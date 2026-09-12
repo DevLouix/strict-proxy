@@ -1,0 +1,22 @@
+{
+  "name": "@strict-proxy/node-agent",
+  "version": "0.1.0",
+  "version_note": "kept in lockstep with controller",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/agent.ts",
+    "start": "node --import tsx src/agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@strict-proxy/types": "*",
+    "dotenv": "^17.4.2",
+    "systeminformation": "^5.23.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}

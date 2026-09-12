@@ -1,0 +1,19 @@
+[Unit]
+Description=strict-proxy node agent (controller sync worker)
+After=network-online.target sing-box.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/strict-proxy/agent.env
+ExecStart=/usr/bin/node --import tsx /opt/strict-proxy/node-agent/src/agent.ts
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

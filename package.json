@@ -1,0 +1,22 @@
+{
+  "name": "strict-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-hosted proxy/VPN + access-control platform: controller, node fleet, client, gatekeeper SDK",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --if-present --workspaces",
+    "typecheck": "npm run typecheck --if-present --workspaces",
+    "dev:controller": "npm run dev -w apps/controller",
+    "dev:agent": "npm run dev -w apps/node-agent",
+    "db:push": "npm run db:push -w apps/controller",
+    "db:seed": "npm run db:seed -w apps/controller"
+  }
+}

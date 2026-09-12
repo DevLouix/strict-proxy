@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.env
+.env.local
+*.log
+.dart_tool/
+.flutter-plugins*
+.packages
+build/
+ios/Pods/
+android/.gradle/
+android/local.properties
+*.iml
+.DS_Store
