@@ -51,6 +51,15 @@ export function renderSingBoxConfig(params: {
         },
       },
     ],
+    experimental: {
+      v2ray_api: {
+        listen: cfg.statsApiListen,
+        stats: {
+          enabled: true,
+          users: users.map((u) => u.email),
+        },
+      },
+    },
     outbounds: [{ type: 'direct', tag: 'direct' }],
   };
 }

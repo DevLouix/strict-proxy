@@ -1,0 +1,129 @@
+name: server-ci
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'apps/client/**'
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths-ignore:
+      - 'apps/client/**'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: server-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+  SING_BOX_VERSION: '1.13.21'
+
+jobs:
+  validate:
+    name: Validate server
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: git diff --check
+      - name: Validate server prerequisite script
+        run: bash -n scripts/check-server-prereqs.sh scripts/smoke-server.sh
+      - name: Validate production Compose file
+        run: |
+          cp .env.docker.example .env.docker
+          sed -i \
+            -e 's/replace-with-a-long-random-password/ci-postgres-password/g' \
+            -e 's/replace-with-a-long-random-redis-password/ci-redis-password/g' \
+            -e 's/replace-with-openssl-rand-base64-48/ci-jwt-secret-012345678901234567890123/' \
+            -e 's/replace-with-a-long-random-secret/ci-webhook-secret-012345678901234567890123/' \
+            -e 's#replace-with-ed25519-private-key#ci-ed25519-key#' \
+            -e 's#CONTROLLER_DATABASE_URL=.*#CONTROLLER_DATABASE_URL=postgres://strict:ci-postgres-password@postgres:5432/strict_proxy#' \
+            -e 's#CONTROLLER_REDIS_URL=.*#CONTROLLER_REDIS_URL=redis://:ci-redis-password@redis:6379#' \
+            .env.docker
+          docker compose --env-file .env.docker -f docker-compose.production.yml config >/dev/null
+
+  images:
+    name: Build and publish server images
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: controller_meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/strict-proxy-controller
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/metadata-action@v5
+        id: agent_meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/strict-proxy-node-agent
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/controller.Dockerfile
+          push: true
+          tags: ${{ steps.controller_meta.outputs.tags }}
+          labels: ${{ steps.controller_meta.outputs.labels }}
+          cache-from: type=gha,scope=controller
+          cache-to: type=gha,mode=max,scope=controller
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/node-agent.Dockerfile
+          build-args: SING_BOX_VERSION=${{ env.SING_BOX_VERSION }}
+          push: true
+          tags: ${{ steps.agent_meta.outputs.tags }}
+          labels: ${{ steps.agent_meta.outputs.labels }}
+          cache-from: type=gha,scope=node-agent
+          cache-to: type=gha,mode=max,scope=node-agent
+
+  artifacts:
+    name: Package server artifacts
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Create agent deployment archive
+        run: |
+          mkdir -p release/node-agent release/packages
+          cp -r apps/node-agent/src apps/node-agent/deploy apps/node-agent/package.json release/node-agent/
+          cp -r packages/types release/packages/
+          cp -r node_modules release/node_modules
+          cp package.json package-lock.json tsconfig.base.json release/
+          tar -czf strict-proxy-node-agent-${GITHUB_SHA}.tar.gz -C release node-agent packages node_modules package.json package-lock.json tsconfig.base.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strict-proxy-node-agent-${{ github.sha }}
+          path: strict-proxy-node-agent-${{ github.sha }}.tar.gz
+          if-no-files-found: error

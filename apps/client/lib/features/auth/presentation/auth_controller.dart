@@ -12,8 +12,14 @@ class AuthState {
   final String? email;
   final String? tier;
 
-  AuthState copyWith({AuthStatus? status, String? email, String? tier}) =>
-      AuthState(status: status ?? this.status, email: email ?? this.email, tier: tier ?? this.tier);
+  AuthState copyWith({Object? status = _unset, Object? email = _unset, Object? tier = _unset}) =>
+      AuthState(
+        status: identical(status, _unset) ? this.status : status as AuthStatus,
+        email: identical(email, _unset) ? this.email : email as String?,
+        tier: identical(tier, _unset) ? this.tier : tier as String?,
+      );
+
+  static const _unset = Object();
 }
 
 final tokenStoreProvider = Provider<TokenStore>((ref) => TokenStore());

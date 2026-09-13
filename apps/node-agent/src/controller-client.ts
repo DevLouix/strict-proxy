@@ -1,5 +1,5 @@
 /**
- * Signed HTTP client for the controller's internal (HMAC) API.
+ * Controller client for enrollment and HMAC-authenticated node operations.
  */
 import { buildHmacHeaders } from '@strict-proxy/types';
 import type { AgentConfig } from './config.js';
@@ -8,42 +8,42 @@ export class ControllerClient {
   constructor(private readonly cfg: AgentConfig) {}
 
   private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+    if (!this.cfg.nodeId || !this.cfg.hmacSecret) throw new Error('node identity is not enrolled');
     const bodyStr = body === undefined ? '' : JSON.stringify(body);
     const headers: Record<string, string> = {
-      ...buildHmacHeaders({
-        nodeId: this.cfg.nodeId,
-        secret: this.cfg.hmacSecret,
-        method,
-        path,
-        body: bodyStr,
-      }),
+      ...buildHmacHeaders({ nodeId: this.cfg.nodeId, secret: this.cfg.hmacSecret, method, path, body: bodyStr }),
     };
     if (body !== undefined) headers['content-type'] = 'application/json';
-
-    const res = await fetch(`${this.cfg.controllerBaseUrl}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : bodyStr,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`controller ${method} ${path} -> ${res.status}: ${text.slice(0, 200)}`);
-    }
+    const res = await fetch(`${this.cfg.controllerBaseUrl}${path}`, { method, headers, body: body === undefined ? undefined : bodyStr });
+    if (!res.ok) throw new Error(`controller ${method} ${path} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
     return (await res.json()) as T;
+  }
+
+  async enroll(): Promise<{ nodeId: string; hmacSecret: string; region: string }> {
+    if (!this.cfg.enrollmentToken) throw new Error('NODE_ENROLLMENT_TOKEN is required for first boot');
+    const res = await fetch(`${this.cfg.controllerBaseUrl}/api/v1/nodes/enroll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        token: this.cfg.enrollmentToken,
+        hostname: this.cfg.hostname,
+        label: this.cfg.label,
+        publicIp: this.cfg.publicIp,
+        tunnelPort: this.cfg.tunnelPort,
+        realityServerName: this.cfg.realityServerName,
+        realityShortIds: Array.from({ length: 8 }, () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0')),
+        engineVersion: 'unknown',
+      }),
+    });
+    if (!res.ok) throw new Error(`node enrollment failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+    return (await res.json()) as { nodeId: string; hmacSecret: string; region: string };
   }
 
   bootstrap(): Promise<{ nodeId: string; hostname: string; region: string; publicIp: string; tunnelPort: number; reality: { privateKey: string; shortIds: string[]; serverName: string } }> {
     return this.request('GET', '/internal/v1/node/bootstrap');
   }
 
-  heartbeat(report: {
-    cpuPercent: number;
-    memoryPercent: number;
-    bandwidthBytes: number;
-    uplinkRttMs: number;
-    uptimeSeconds: number;
-    engineVersion: string;
-  }): Promise<{ ok: boolean; controllerTime: string }> {
+  heartbeat(report: { cpuPercent: number; memoryPercent: number; bandwidthBytes: number; uplinkRttMs: number; uptimeSeconds: number; engineVersion: string }): Promise<{ ok: boolean; controllerTime: string }> {
     return this.request('POST', '/internal/v1/node/heartbeat', report);
   }
 

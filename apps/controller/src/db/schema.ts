@@ -16,6 +16,7 @@ export const users = pgTable(
     email: text('email').notNull(),
     passwordHash: text('password_hash').notNull(),
     role: text('role').notNull().default('user'), // 'user' | 'admin'
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -93,6 +94,7 @@ export const nodes = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     hostname: text('hostname').notNull(),
     region: text('region').notNull(),
+    label: text('label'),
     publicIp: text('public_ip').notNull(),
     tunnelPort: integer('tunnel_port').notNull().default(443),
     /** 'online' | 'degraded' | 'offline' | 'draining' */
@@ -113,6 +115,24 @@ export const nodes = pgTable(
   },
   (t) => [uniqueIndex('nodes_hostname_uq').on(t.hostname), index('nodes_status_idx').on(t.status)],
 );
+
+/** One-time, short-lived credentials used to enroll a VPS node. */
+export const nodeEnrollments = pgTable(
+  'node_enrollments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tokenHash: text('token_hash').notNull(),
+    region: text('region').notNull(),
+    label: text('label'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    nodeId: uuid('node_id').references(() => nodes.id, { onDelete: 'set null' }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('node_enrollments_token_hash_uq').on(t.tokenHash), index('node_enrollments_expiry_idx').on(t.expiresAt)],
+);
+
 
 export const nodeCredentials = pgTable(
   'node_credentials',
@@ -160,7 +180,7 @@ export const usageRollups = pgTable(
     bytesUp: bigint('bytes_up', { mode: 'number' }).notNull().default(0),
     bytesDown: bigint('bytes_down', { mode: 'number' }).notNull().default(0),
   },
-  (t) => [index('usage_rollups_credential_idx').on(t.credentialId, t.windowStart)],
+  (t) => [index('usage_rollups_credential_idx').on(t.credentialId, t.windowStart), uniqueIndex('usage_rollups_window_uq').on(t.credentialId, t.windowStart, t.windowEnd)],
 );
 
 /** JWT ID set for access-token revocation lists (post-logout invalidation). */

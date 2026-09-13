@@ -12,6 +12,7 @@ class ServerNode {
   ServerNode({
     required this.id,
     required this.hostname,
+    required this.label,
     required this.region,
     required this.publicIp,
     required this.status,
@@ -23,6 +24,7 @@ class ServerNode {
 
   final String id;
   final String hostname;
+  final String label;
   final String region;
   final String publicIp;
   final String status;
@@ -36,6 +38,7 @@ class ServerNode {
   factory ServerNode.fromJson(Map<String, dynamic> json) => ServerNode(
         id: json['id'] as String,
         hostname: json['hostname'] as String,
+        label: json['label'] as String? ?? json['region'] as String,
         region: json['region'] as String,
         publicIp: json['publicIp'] as String,
         status: json['status'] as String,
@@ -79,6 +82,34 @@ abstract class VpnEngine {
   EngineState get state;
   Stream<EngineState> get stateStream;
   void dispose();
+}
+
+/// Engine that fails closed on unsupported desktop platforms.
+class UnsupportedEngine implements VpnEngine {
+  const UnsupportedEngine(this.platform);
+
+  final String platform;
+
+  StateError _unsupported() =>
+      StateError('VPN engine is not available on $platform');
+
+  @override
+  EngineState get state => EngineState.error;
+
+  @override
+  Stream<EngineState> get stateStream => const Stream<EngineState>.empty();
+
+  @override
+  Future<void> initialize() async => throw _unsupported();
+
+  @override
+  Future<void> connect(String singBoxConfigJson) async => throw _unsupported();
+
+  @override
+  Future<void> disconnect() async => throw _unsupported();
+
+  @override
+  void dispose() {}
 }
 
 /// Stub engine used in tests / non-VPN build modes. Simulates a session.

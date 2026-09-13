@@ -4,6 +4,7 @@ build/
 *.tsbuildinfo
 .env
 .env.local
+.env.docker
 *.log
 .dart_tool/
 .flutter-plugins*
@@ -14,3 +15,6 @@ android/.gradle/
 android/local.properties
 *.iml
 .DS_Store
+apps/client/.cache/
+apps/client/packages/libbox_bridge/android/libs/*.aar
+apps/client/packages/libbox_bridge/ios/Frameworks/*.xcframework/

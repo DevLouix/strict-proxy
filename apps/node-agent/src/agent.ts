@@ -1,22 +1,19 @@
 /**
  * Strict-proxy Node Agent.
  *
- * Responsibilities:
- *  - Bootstrap from the controller (REALITY keys, ports).
- *  - Heartbeat loop: CPU/RAM/bandwidth/RTT reports.
- *  - Credential sync loop: converge local sing-box users to controller state.
- *  - Usage reporting loop: per-credential bandwidth (aggregated placeholders
- *    until sing-box stats are wired per deployment).
- *  - sing-box supervision: validate, write config, restart on change.
- *
- * All controller calls are HMAC-signed; secrets come from the environment.
+ * First boot: enroll with a one-time token, persist the issued identity, then
+ * bootstrap REALITY settings. Steady state: heartbeat, credential sync,
+ * sing-box config convergence, and per-user usage reporting.
  */
+import { spawn, type ChildProcess } from 'node:child_process';
 import { execFile } from 'node:child_process';
+import { promises as fs } from 'node:fs';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import si from 'systeminformation';
-import { loadAgentConfig, type AgentConfig } from './config.js';
+import { assertAuthenticatedConfig, loadAgentConfig, type AgentConfig, type PersistedNodeIdentity } from './config.js';
 import { ControllerClient } from './controller-client.js';
+import { collectUserUsage } from './usage.js';
 import {
   renderSingBoxConfig,
   liveCredentials,
@@ -34,7 +31,6 @@ function log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ...rest: u
   console.log(`[${new Date().toISOString()}][${level}] ${msg}`, ...rest);
 }
 
-/** Shells out to sing-box for config validation before applying. */
 async function validateSingBoxConfig(binary: string, configPath: string): Promise<boolean> {
   try {
     await execFileP(binary, ['check', '-c', configPath], { timeout: 10_000 });
@@ -45,8 +41,19 @@ async function validateSingBoxConfig(binary: string, configPath: string): Promis
   }
 }
 
-/** Restarts the systemd unit managing sing-box. */
-async function restartSingBox(): Promise<void> {
+async function restartSingBox(cfg: AgentConfig, managedProcess: { current: ChildProcess | null }): Promise<void> {
+  if (cfg.singBoxRestartMode === 'managed') {
+    managedProcess.current?.kill('SIGTERM');
+    managedProcess.current = spawn(cfg.singBoxBinaryPath, ['run', '-c', cfg.singBoxConfigPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    managedProcess.current.stdout?.on('data', (chunk: Buffer) => log('debug', `[sing-box] ${chunk.toString().trim()}`));
+    managedProcess.current.stderr?.on('data', (chunk: Buffer) => log('warn', `[sing-box] ${chunk.toString().trim()}`));
+    managedProcess.current.on('exit', (code, signal) => {
+      if (code !== 0 && signal !== 'SIGTERM') log('error', `managed sing-box exited (${code ?? signal ?? 'unknown'})`);
+    });
+    return;
+  }
   await execFileP('systemctl', ['restart', 'sing-box.service'], { timeout: 30_000 });
 }
 
@@ -54,22 +61,45 @@ function fingerprint(credentials: Credential[]): string {
   return createHash('sha256').update(JSON.stringify(liveCredentials(credentials))).digest('hex');
 }
 
+async function persistIdentity(path: string, identity: PersistedNodeIdentity): Promise<void> {
+  await fs.mkdir(path.substring(0, path.lastIndexOf('/')) || '.', { recursive: true });
+  const tmp = `${path}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(identity, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(tmp, path);
+  await fs.chmod(path, 0o600);
+}
+
 class Agent {
   private readonly client: ControllerClient;
+  private readonly managedSingBox: { current: ChildProcess | null } = { current: null };
   private realityPrivateKey = '';
   private realityShortIds: string[] = [];
   private realityServerName = '';
+  private credentials: Credential[] = [];
   private running = true;
 
   constructor(private readonly cfg: AgentConfig) {
     this.client = new ControllerClient(cfg);
   }
 
+  async enrollIfNeeded(): Promise<void> {
+    if (this.cfg.nodeId && this.cfg.hmacSecret) return;
+    const enrolled = await this.client.enroll();
+    await persistIdentity(this.cfg.identityPath, {
+      nodeId: enrolled.nodeId,
+      hmacSecret: enrolled.hmacSecret,
+      region: enrolled.region,
+      enrolledAt: new Date().toISOString(),
+    });
+    this.cfg.nodeId = enrolled.nodeId;
+    this.cfg.hmacSecret = enrolled.hmacSecret;
+    log('info', `enrolled node ${enrolled.nodeId} in ${enrolled.region}; identity saved to ${this.cfg.identityPath}`);
+  }
+
   async bootstrap(): Promise<void> {
+    assertAuthenticatedConfig(this.cfg);
     const boot = await this.client.bootstrap();
-    if (boot.publicIp !== this.cfg.publicIp) {
-      log('warn', `public IP mismatch: controller=${boot.publicIp} local=${this.cfg.publicIp}; trusting controller`);
-    }
+    if (boot.publicIp !== this.cfg.publicIp) log('warn', `public IP mismatch: controller=${boot.publicIp} local=${this.cfg.publicIp}; trusting controller`);
     this.realityPrivateKey = boot.reality.privateKey;
     this.realityShortIds = boot.reality.shortIds;
     this.realityServerName = boot.reality.serverName;
@@ -77,29 +107,19 @@ class Agent {
   }
 
   async heartbeatOnce(): Promise<void> {
-    const [cpu, mem, net, osUptime] = await Promise.all([
-      si.currentLoad(),
-      si.mem(),
-      si.networkStats(),
-      si.time(),
-    ]);
-    const cpuPercent = cpu.currentLoad ?? 0;
-    const memoryPercent = mem.active / Math.max(1, mem.total) * 100;
+    const [cpu, mem, net, osUptime] = await Promise.all([si.currentLoad(), si.mem(), si.networkStats(), si.time()]);
     const bandwidthBytes = net.reduce((acc, n) => acc + (n.rx_sec ?? 0) + (n.tx_sec ?? 0), 0);
-    const uplinkRttMs = await this.measureUplinkRtt();
-    const uptimeSeconds = Math.floor(osUptime.uptime);
     await this.client.heartbeat({
-      cpuPercent: Number(cpuPercent.toFixed(2)),
-      memoryPercent: Number(memoryPercent.toFixed(2)),
+      cpuPercent: Number((cpu.currentLoad ?? 0).toFixed(2)),
+      memoryPercent: Number((mem.active / Math.max(1, mem.total) * 100).toFixed(2)),
       bandwidthBytes: Math.round(bandwidthBytes),
-      uplinkRttMs,
-      uptimeSeconds,
+      uplinkRttMs: await this.measureUplinkRtt(),
+      uptimeSeconds: Math.floor(osUptime.uptime),
       engineVersion: await this.singBoxVersion(),
     });
     log('debug', 'heartbeat sent');
   }
 
-  /** TCP connect timing to the controller as a cheap uplink probe. */
   private async measureUplinkRtt(): Promise<number> {
     const start = Date.now();
     try {
@@ -127,96 +147,71 @@ class Agent {
 
   async syncOnce(): Promise<void> {
     const state = await this.client.sync();
-    const creds: Credential[] = state.credentials;
-    const fp = fingerprint(creds);
+    this.credentials = state.credentials;
+    const fp = fingerprint(this.credentials);
     const applied = await loadAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`);
-    if (applied === fp) {
-      log('debug', 'credentials unchanged; skipping apply');
-      return;
-    }
+    if (applied === fp) return;
 
-    const rendered = JSON.stringify(
-      renderSingBoxConfig({
-        cfg: this.cfg,
-        realityPrivateKey: this.realityPrivateKey,
-        shortIds: this.realityShortIds,
-        serverName: this.realityServerName,
-        users: liveCredentials(creds),
-      }),
-      null,
-      2,
-    );
+    const rendered = JSON.stringify(renderSingBoxConfig({
+      cfg: this.cfg,
+      realityPrivateKey: this.realityPrivateKey,
+      shortIds: this.realityShortIds,
+      serverName: this.realityServerName,
+      users: liveCredentials(this.credentials),
+    }), null, 2);
 
     if (await needsApply(this.cfg.singBoxConfigPath, rendered)) {
       await writeConfigAtomic(this.cfg.singBoxConfigPath, rendered);
-      if (!(await validateSingBoxConfig(this.cfg.singBoxBinaryPath, this.cfg.singBoxConfigPath))) {
-        log('error', 'rendered config invalid; NOT restarting sing-box');
-        return;
-      }
-      await restartSingBox();
-      log('info', `applied ${liveCredentials(creds).length} credential(s), sing-box restarted`);
+      if (!(await validateSingBoxConfig(this.cfg.singBoxBinaryPath, this.cfg.singBoxConfigPath))) return;
+      await restartSingBox(this.cfg, this.managedSingBox);
+      log('info', `applied ${liveCredentials(this.credentials).length} credential(s), sing-box restarted`);
     }
     await saveAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`, fp);
   }
 
   async reportUsageOnce(): Promise<void> {
-    // NOTE: per-credential byte counters require sing-box's stats/Clash API
-    // (experimental.enable) — wire your collector here per deployment.
-    // The endpoint exists and is HMAC-protected; sending an empty window is a no-op.
-    await this.client.reportUsage([]);
+    try {
+      await collectUserUsage(this.cfg, this.client, this.credentials);
+    } catch (err) {
+      log('warn', 'usage collection failed; verify sing-box was built with V2Ray API support:', err instanceof Error ? err.message : err);
+    }
   }
 
   start(): void {
-    const hb = setInterval(() => {
-      this.heartbeatOnce().catch((err) => log('warn', 'heartbeat failed:', err instanceof Error ? err.message : err));
-    }, this.cfg.heartbeatIntervalSeconds * 1000);
-    hb.unref();
-
-    const sync = setInterval(() => {
-      this.syncOnce().catch((err) => log('warn', 'sync failed:', err instanceof Error ? err.message : err));
-    }, this.cfg.syncIntervalSeconds * 1000);
-    sync.unref();
-
-    const usage = setInterval(() => {
-      this.reportUsageOnce().catch((err) => log('debug', 'usage report failed:', err instanceof Error ? err.message : err));
-    }, 60_000);
-    usage.unref();
-
-    process.on('SIGINT', () => this.stop(hb, sync, usage));
-    process.on('SIGTERM', () => this.stop(hb, sync, usage));
+    const hb = setInterval(() => void this.heartbeatOnce().catch((err) => log('warn', 'heartbeat failed:', err)), this.cfg.heartbeatIntervalSeconds * 1000);
+    const sync = setInterval(() => void this.syncOnce().catch((err) => log('warn', 'sync failed:', err)), this.cfg.syncIntervalSeconds * 1000);
+    const usage = setInterval(() => void this.reportUsageOnce(), this.cfg.usageIntervalSeconds * 1000);
+    hb.unref(); sync.unref(); usage.unref();
+    const stop = () => {
+      if (!this.running) return;
+      this.running = false;
+      clearInterval(hb); clearInterval(sync); clearInterval(usage);
+      this.managedSingBox.current?.kill('SIGTERM');
+      process.exit(0);
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
     log('info', 'agent started');
-  }
-
-  private stop(...timers: NodeJS.Timeout[]): void {
-    if (!this.running) return;
-    this.running = false;
-    timers.forEach((t) => clearInterval(t));
-    log('info', 'agent stopped');
-    process.exit(0);
   }
 }
 
 async function main(): Promise<void> {
   const cfg = loadAgentConfig();
   const agent = new Agent(cfg);
-
-  // Bootstrap with bounded retries; the controller may come up after nodes.
-  let booted = false;
-  for (let attempt = 1; attempt <= 10 && !booted; attempt++) {
+  for (let attempt = 1; attempt <= 10; attempt++) {
     try {
+      await agent.enrollIfNeeded();
       await agent.bootstrap();
-      booted = true;
+      break;
     } catch (err) {
-      log('warn', `bootstrap attempt ${attempt}/10 failed:`, err instanceof Error ? err.message : err);
-      await new Promise((r) => setTimeout(r, attempt * 2000));
+      if (attempt === 10) throw err;
+      log('warn', `bootstrap/enrollment attempt ${attempt}/10 failed:`, err instanceof Error ? err.message : err);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
     }
   }
-  if (!booted) {
-    log('error', 'bootstrap failed after 10 attempts; exiting');
-    process.exit(1);
-  }
-
-  await agent.syncOnce().catch((err) => log('warn', 'initial sync failed:', err instanceof Error ? err.message : err));
+  await agent.syncOnce();
+  await agent.heartbeatOnce();
+  await agent.reportUsageOnce();
   agent.start();
 }
 

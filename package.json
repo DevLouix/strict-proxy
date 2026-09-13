@@ -17,6 +17,13 @@
     "dev:controller": "npm run dev -w apps/controller",
     "dev:agent": "npm run dev -w apps/node-agent",
     "db:push": "npm run db:push -w apps/controller",
-    "db:seed": "npm run db:seed -w apps/controller"
+    "db:seed": "npm run db:seed -w apps/controller",
+    "docker:config": "docker compose --env-file .env.docker -f docker-compose.production.yml config",
+    "docker:build": "docker compose --env-file .env.docker -f docker-compose.production.yml build controller node-agent",
+    "docker:up": "docker compose --env-file .env.docker -f docker-compose.production.yml up -d",
+    "docker:down": "docker compose --env-file .env.docker -f docker-compose.production.yml down",
+    "ci:server": "npm ci --ignore-scripts && npm run typecheck && git diff --check",
+    "server:prereqs": "scripts/check-server-prereqs.sh",
+    "server:smoke": "scripts/smoke-server.sh"
   }
 }

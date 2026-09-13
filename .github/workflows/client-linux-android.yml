@@ -1,0 +1,125 @@
+name: client-linux-android
+
+on:
+  pull_request:
+    paths:
+      - 'apps/client/**'
+      - '.github/workflows/client-linux-android.yml'
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - 'apps/client/**'
+      - '.github/workflows/client-linux-android.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_CHANNEL: stable
+  CLIENT_ENV: production
+  CLIENT_CONTROLLER_URL: https://controller.example.invalid
+
+jobs:
+  verify:
+    name: Test and analyze client
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Install Linux and Android build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev openjdk-17-jdk
+
+      - name: Generate Flutter host projects
+        working-directory: apps/client
+        run: flutter create --platforms=linux,android .
+
+      - name: Get dependencies
+        working-directory: apps/client
+        run: flutter pub get
+
+      - name: Check optional native libbox artifact
+        working-directory: apps/client
+        run: ./tool/check-android-libbox.sh
+
+      - name: Run Flutter tests
+        working-directory: apps/client
+        run: flutter test
+
+      - name: Analyze Flutter sources
+        working-directory: apps/client
+        run: flutter analyze
+
+  linux-artifact:
+    name: Build Linux client artifact
+    needs: verify
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - name: Generate host project and build
+        working-directory: apps/client
+        run: |
+          flutter create --platforms=linux .
+          flutter pub get
+          flutter build linux --release \
+            --dart-define=STRICT_ENV=${CLIENT_ENV} \
+            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
+      - name: Archive Linux client
+        run: tar -czf strict-proxy-client-linux-${GITHUB_SHA}.tar.gz -C apps/client/build/linux/x64/release/bundle .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strict-proxy-client-linux-${{ github.sha }}
+          path: strict-proxy-client-linux-${{ github.sha }}.tar.gz
+          if-no-files-found: error
+
+  android-artifact:
+    name: Build Android client artifact
+    needs: verify
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Generate host project and build
+        working-directory: apps/client
+        run: |
+          flutter create --platforms=android .
+          flutter pub get
+          flutter build apk --debug \
+            --dart-define=STRICT_ENV=${CLIENT_ENV} \
+            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
+      - name: Archive Android APK
+        run: cp apps/client/build/app/outputs/flutter-apk/app-debug.apk strict-proxy-client-android-${GITHUB_SHA}.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strict-proxy-client-android-${{ github.sha }}
+          path: strict-proxy-client-android-${{ github.sha }}.apk
+          if-no-files-found: error

@@ -99,12 +99,18 @@ export async function issueRefreshToken(
     const excess = activeDevices.length - params.seatLimit + 1;
     const toEvict = evictable.slice(0, excess).map((r) => r.deviceRowId);
     if (toEvict.includes(deviceRow.id)) {
-      throw new Error('device_seat_limit');
+      // Re-authentication from an already active device should refresh its
+      // token, not evict the device itself.
+      const otherDevices = evictable.filter((r) => r.deviceRowId !== deviceRow.id);
+      if (otherDevices.length < excess) throw new Error('device_seat_limit');
+      toEvict.splice(0, toEvict.length, ...otherDevices.slice(0, excess).map((r) => r.deviceRowId));
     }
-    await db
-      .update(refreshTokens)
-      .set({ revokedAt: new Date() })
-      .where(and(eq(refreshTokens.userId, params.userId), isNull(refreshTokens.revokedAt)));
+    for (const deviceRowId of toEvict) {
+      await db
+        .update(refreshTokens)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(refreshTokens.userId, params.userId), eq(refreshTokens.deviceRowId, deviceRowId), isNull(refreshTokens.revokedAt)));
+    }
   }
 
   const raw = randomBytes(48).toString('base64url');

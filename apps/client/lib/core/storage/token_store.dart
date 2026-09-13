@@ -1,21 +1,19 @@
 import 'dart:math';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Persists tokens and the installation device id.
-///
-/// Backed by SharedPreferences for portability; swap the storage layer for
-/// flutter_secure_storage in hardened production builds.
+/// Persists authentication tokens in OS secure storage and the installation
+/// identity in preferences. Tokens never live in plain SharedPreferences.
 class TokenStore {
   static const _kAccess = 'sp.access';
   static const _kRefresh = 'sp.refresh';
   static const _kDeviceId = 'sp.deviceId';
   static const _kDeviceName = 'sp.deviceName';
 
-  /// In-memory mirror, populated by [load] and kept in sync by [saveTokens].
+  final FlutterSecureStorage _secure = const FlutterSecureStorage();
   String? accessToken;
   String? refreshToken;
 
-  /// Returns the stable installation device id, creating one on first run.
   Future<String> ensureDeviceIdentity({String? deviceName}) async {
     final prefs = await SharedPreferences.getInstance();
     var id = prefs.getString(_kDeviceId);
@@ -23,49 +21,36 @@ class TokenStore {
       id = _generateId();
       await prefs.setString(_kDeviceId, id);
     }
-    if (deviceName != null && deviceName.isNotEmpty) {
-      await prefs.setString(_kDeviceName, deviceName);
-    }
+    if (deviceName != null && deviceName.isNotEmpty) await prefs.setString(_kDeviceName, deviceName);
     return id;
   }
 
-  Future<String?> get deviceId async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_kDeviceId);
-  }
-
-  Future<String?> get deviceName async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_kDeviceName);
-  }
+  Future<String?> get deviceId async => (await SharedPreferences.getInstance()).getString(_kDeviceId);
+  Future<String?> get deviceName async => (await SharedPreferences.getInstance()).getString(_kDeviceName);
 
   Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    accessToken = prefs.getString(_kAccess);
-    refreshToken = prefs.getString(_kRefresh);
+    accessToken = await _secure.read(key: _kAccess);
+    refreshToken = await _secure.read(key: _kRefresh);
   }
 
   Future<void> saveTokens({String? accessToken, String? refreshToken}) async {
-    final prefs = await SharedPreferences.getInstance();
     if (accessToken != null) {
       this.accessToken = accessToken;
-      await prefs.setString(_kAccess, accessToken);
+      await _secure.write(key: _kAccess, value: accessToken);
     }
     if (refreshToken != null) {
       this.refreshToken = refreshToken;
-      await prefs.setString(_kRefresh, refreshToken);
+      await _secure.write(key: _kRefresh, value: refreshToken);
     }
   }
 
   Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_kAccess);
-    await prefs.remove(_kRefresh);
+    await _secure.delete(key: _kAccess);
+    await _secure.delete(key: _kRefresh);
     accessToken = null;
     refreshToken = null;
   }
 
-  /// 128-bit random identifier, hex formatted like a UUID for familiarity.
   String _generateId() {
     final rnd = Random.secure();
     final bytes = List<int>.generate(16, (_) => rnd.nextInt(256));

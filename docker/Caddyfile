@@ -1,0 +1,8 @@
+{
+  email {$TLS_EMAIL}
+}
+
+{$CADDY_SITE_ADDRESS} {
+  encode zstd gzip
+  reverse_proxy {$CADDY_CONTROLLER_HOST}:{$CONTROLLER_INTERNAL_PORT}
+}

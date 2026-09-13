@@ -28,15 +28,15 @@ class HomeScreen extends ConsumerWidget {
           children: [
             GestureDetector(
               onTap: () => ref.read(connectionStateProvider.notifier).toggle(),
-              child: ConnectButton(state: conn.state),
+              child: ConnectButton(state: conn),
             ),
             const SizedBox(height: 24),
             Text(
-              switch (conn.state) {
+              switch (conn) {
                 EngineStateIdle() => 'Disconnected',
                 EngineStateConnecting() => 'Connecting…',
-                EngineStateConnected() => 'Connected · ${conn.node?.region ?? ''}',
-                EngineStateError() => 'Error: ${conn.message}',
+                EngineStateConnected(:final node) => 'Connected · ${node.region}',
+                EngineStateError(:final message) => 'Error: $message',
               },
               style: Theme.of(context).textTheme.titleMedium,
             ),

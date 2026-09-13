@@ -1,12 +1,21 @@
+import 'dart:async';
+import 'package:flutter/services.dart';
+import 'package:strict_proxy_libbox_bridge/libbox_bridge.dart';
+
 import 'engine_adapter.dart';
 
-/// Production engine backed by sing-box's libbox (Go mobile bindings).
+/// Platform bridge contract for the native gomobile/libbox implementation.
 ///
-/// INTEGRATION POINT: to enable, add `libbox` as a flutter plugin via gomobile
-/// (see docs/integration-libbox.md) and replace the marked stub bodies with
-/// the real libbox calls. Until then this behaves like NoopEngine so the UI
-/// and flows can be developed end-to-end.
+/// Android and iOS must implement the `strict_proxy/libbox` channel methods:
+/// initialize, start, stop. The native side owns TUN/VpnService/NetworkExtension
+/// and calls back with `state` events: connecting, connected, disconnected, error.
 class LibboxEngine implements VpnEngine {
+  LibboxEngine({MethodChannel? channel})
+      : _channel = channel ?? LibboxBridge.channel {
+    _channel.setMethodCallHandler(_onMethodCall);
+  }
+
+  final MethodChannel _channel;
   final _controller = StreamController<EngineState>.broadcast();
   EngineState _state = EngineState.disconnected;
 
@@ -18,33 +27,65 @@ class LibboxEngine implements VpnEngine {
 
   @override
   Future<void> initialize() async {
-    // TODO(integration): libbox.setWorkingPath / initialize debug server.
+    final available = await _channel.invokeMethod<bool>('isAvailable') ?? false;
+    if (!available) {
+      _setState(EngineState.error);
+      throw StateError('libbox native artifact is unavailable for this platform build');
+    }
+    await _channel.invokeMethod<void>('initialize');
     _setState(EngineState.disconnected);
   }
 
   @override
   Future<void> connect(String singBoxConfigJson) async {
+    if (singBoxConfigJson.trim().isEmpty) {
+      throw const FormatException('libbox configuration cannot be empty');
+    }
     _setState(EngineState.connecting);
-    // TODO(integration): parse options via libbox.Options, build a
-    // libbox.Box, register a TunService (Android VpnService /
-    // NetworkExtension on iOS) and call box.Start().
-    await Future<void>.delayed(const Duration(milliseconds: 600));
-    _setState(EngineState.connected);
+    try {
+      await _channel.invokeMethod<void>('start', {'config': singBoxConfigJson});
+    } catch (error) {
+      _setState(EngineState.error);
+      throw StateError('libbox start failed: $error');
+    }
   }
 
   @override
   Future<void> disconnect() async {
     _setState(EngineState.disconnecting);
-    // TODO(integration): box.Close().
-    await Future<void>.delayed(const Duration(milliseconds: 300));
-    _setState(EngineState.disconnected);
+    try {
+      await _channel.invokeMethod<void>('stop');
+      _setState(EngineState.disconnected);
+    } catch (error) {
+      _setState(EngineState.error);
+      throw StateError('libbox stop failed: $error');
+    }
   }
 
-  void _setState(EngineState s) {
-    _state = s;
-    _controller.add(s);
+  Future<void> _onMethodCall(MethodCall call) async {
+    if (call.method != 'state') return;
+    final value = switch (call.arguments) {
+      String state => state,
+      Map<dynamic, dynamic> payload => payload['state'] as String? ?? 'error',
+      _ => 'error',
+    };
+    _setState(switch (value) {
+      'connecting' => EngineState.connecting,
+      'connected' => EngineState.connected,
+      'disconnecting' => EngineState.disconnecting,
+      'disconnected' => EngineState.disconnected,
+      _ => EngineState.error,
+    });
+  }
+
+  void _setState(EngineState value) {
+    _state = value;
+    if (!_controller.isClosed) _controller.add(value);
   }
 
   @override
-  void dispose() => _controller.close();
+  void dispose() {
+    _channel.setMethodCallHandler(null);
+    _controller.close();
+  }
 }

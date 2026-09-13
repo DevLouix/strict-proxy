@@ -13,6 +13,8 @@ dependencies:
   flutter_riverpod: ^2.6.1
   flutter_secure_storage: ^9.2.2
   shared_preferences: ^2.3.3
+  strict_proxy_libbox_bridge:
+    path: packages/libbox_bridge
 
 dev_dependencies:
   flutter_test:

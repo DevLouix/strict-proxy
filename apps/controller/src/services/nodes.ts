@@ -1,28 +1,91 @@
 /**
- * Node registry + per-user credential provisioning.
- * A "credential" is one VLESS UUID + REALITY short-id scoped to (user, node).
+ * Node registry, secure VPS enrollment, and per-user credential provisioning.
  */
-import { randomUUID, randomBytes } from 'node:crypto';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
+import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { nodeCredentials, nodes } from '../db/schema.js';
+import { nodeCredentials, nodeEnrollments, nodes } from '../db/schema.js';
 import { generateRealityKeypair } from '@strict-proxy/types';
 
-/** Normalized load score 0..100 from a node's raw report. */
-export function computeLoadScore(cpuPercent: number, memoryPercent: number): number {
-  return Math.min(100, Math.round(cpuPercent * 0.6 + memoryPercent * 0.4));
+/** Generates a one-time enrollment token and its database hash. */
+export function createNodeEnrollmentToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString('base64url');
+  return { token, tokenHash: createHash('sha256').update(token, 'utf8').digest('hex') };
+}
+
+/** Hashes a presented enrollment token for database lookup. */
+export function hashNodeEnrollmentToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
 /**
- * Registers (or re-registers) a node, returning its id and the HMAC secret
- * used for internal API authentication. The secret is generated here and
- * must be delivered to the node operator via a secure channel.
+ * Atomically consumes a one-time enrollment and creates the node in offline
+ * state. The node becomes client-visible only after its first valid heartbeat.
+ */
+export async function enrollNode(
+  db: Db,
+  params: {
+    token: string;
+    hostname: string;
+    label?: string;
+    publicIp: string;
+    tunnelPort: number;
+    realityServerName: string;
+    realityShortIds: string[];
+    engineVersion: string;
+  },
+): Promise<{ nodeId: string; hmacSecret: string; region: string }> {
+  return db.transaction(async (tx) => {
+    const now = new Date();
+    const [enrollment] = await tx
+      .update(nodeEnrollments)
+      .set({ usedAt: now })
+      .where(and(eq(nodeEnrollments.tokenHash, hashNodeEnrollmentToken(params.token)), isNull(nodeEnrollments.usedAt), gt(nodeEnrollments.expiresAt, now)))
+      .returning({ id: nodeEnrollments.id, region: nodeEnrollments.region });
+    if (!enrollment) throw new Error('invalid_or_expired_enrollment');
+
+    const reality = generateRealityKeypair();
+    const hmacSecret = randomBytes(32).toString('base64url');
+    const [node] = await tx
+      .insert(nodes)
+      .values({
+        hostname: params.hostname,
+        region: enrollment.region,
+        label: params.label ?? null,
+        publicIp: params.publicIp,
+        tunnelPort: params.tunnelPort,
+        realityPrivateKey: reality.privateKeyB64,
+        realityPublicKey: reality.publicKeyB64,
+        realityServerName: params.realityServerName,
+        realityShortIds: params.realityShortIds,
+        engineVersion: params.engineVersion,
+        hmacSecret,
+        status: 'offline',
+      })
+      .returning({ id: nodes.id });
+    if (!node) throw new Error('failed_to_enroll_node');
+
+    await tx.update(nodeEnrollments).set({ nodeId: node.id }).where(eq(nodeEnrollments.id, enrollment.id));
+    return { nodeId: node.id, hmacSecret, region: enrollment.region };
+  });
+}
+
+/** Normalized load score 0..100 from a node's raw report. */
+export function computeLoadScore(cpuPercent: number, memoryPercent: number): number {
+  return Math.min(100, Math.max(0, Math.round(cpuPercent * 0.6 + memoryPercent * 0.4)));
+}
+
+/**
+ * Registers (or re-registers) a node, returning its id and HMAC secret.
+ * This remains useful for controlled bootstrap/seed tooling; normal VPS
+ * onboarding should use the one-time enrollment endpoint above.
  */
 export async function registerNode(
   db: Db,
   params: {
     hostname: string;
     region: string;
+    label?: string;
     publicIp: string;
     tunnelPort: number;
     realityPrivateKey?: string;
@@ -47,6 +110,7 @@ export async function registerNode(
     .values({
       hostname: params.hostname,
       region: params.region,
+      label: params.label ?? null,
       publicIp: params.publicIp,
       tunnelPort: params.tunnelPort,
       realityPrivateKey: priv,
@@ -62,6 +126,7 @@ export async function registerNode(
       target: nodes.hostname,
       set: {
         region: params.region,
+        label: params.label ?? null,
         publicIp: params.publicIp,
         tunnelPort: params.tunnelPort,
         realityPrivateKey: priv,
@@ -80,10 +145,7 @@ export async function registerNode(
   return { nodeId: row.id, hmacSecret };
 }
 
-/**
- * Ensures a VLESS credential exists for (user, node). Idempotent: an existing
- * non-revoked credential is returned as-is.
- */
+/** Ensures a VLESS credential exists for (user, node). */
 export async function ensureUserCredential(db: Db, userId: string, nodeId: string): Promise<{ uuid: string; shortId: string; flow: string }> {
   const [existing] = await db
     .select({ uuid: nodeCredentials.uuid, shortId: nodeCredentials.shortId, flow: nodeCredentials.flow, revoked: nodeCredentials.revoked })
@@ -94,12 +156,10 @@ export async function ensureUserCredential(db: Db, userId: string, nodeId: strin
   if (existing && !existing.revoked) return existing;
 
   if (existing && existing.revoked) {
-    // Re-activate the same UUID on re-subscription.
     await db.update(nodeCredentials).set({ revoked: false, revokedAt: null }).where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId)));
     return { uuid: existing.uuid, shortId: existing.shortId, flow: existing.flow };
   }
 
-  // Fresh credential: random UUID + a short-id drawn from the node's pool.
   const [node] = await db.select({ shortIds: nodes.realityShortIds }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
   if (!node) throw new Error('node_not_found');
   const pool = node.shortIds;
@@ -116,7 +176,7 @@ export async function ensureUserCredential(db: Db, userId: string, nodeId: strin
   return created;
 }
 
-/** Immediately revokes all credentials for a user (payment failure / churn). */
+/** Immediately revokes all credentials for a user. */
 export async function revokeAllUserCredentials(db: Db, userId: string): Promise<number> {
   const rows = await db
     .update(nodeCredentials)
@@ -126,13 +186,10 @@ export async function revokeAllUserCredentials(db: Db, userId: string): Promise<
   return rows.length;
 }
 
-/** Marks credentials revoked for a set of users (bulk maintenance). */
+/** Marks credentials revoked for a set of users. */
 export async function revokeCredentialsForUsers(db: Db, userIds: string[]): Promise<void> {
   if (userIds.length === 0) return;
-  await db
-    .update(nodeCredentials)
-    .set({ revoked: true, revokedAt: new Date() })
-    .where(and(inArray(nodeCredentials.userId, userIds), eq(nodeCredentials.revoked, false)));
+  await db.update(nodeCredentials).set({ revoked: true, revokedAt: new Date() }).where(and(inArray(nodeCredentials.userId, userIds), eq(nodeCredentials.revoked, false)));
 }
 
 /** Nodes whose heartbeat is stale are flipped to offline. */

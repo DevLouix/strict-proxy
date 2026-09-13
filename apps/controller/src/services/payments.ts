@@ -19,7 +19,7 @@ import { revokeAllUserCredentials } from './nodes.js';
 import { setNx } from '../redis.js';
 import type { Redis } from 'ioredis';
 import type { ControllerConfig } from '../env.js';
-import { tierDefinition, nextPeriodEnd } from './tiers.js';
+import { tierDefinition, nextPeriodEnd, isKnownTier } from './tiers.js';
 import type { PaymentEvent, PaymentEventResult, PaymentEventType, SubscriptionTier } from '@strict-proxy/types';
 
 // ---------------------------------------------------------------------------
@@ -92,23 +92,37 @@ export class PlaceholderPaymentAdapter implements PaymentGatewayAdapter {
 // Event application (idempotent, stateful)
 // ---------------------------------------------------------------------------
 
-/** Finds a user by provider customer id; null when unmapped. */
-async function findUserIdByCustomer(db: Db, customerId: string | null): Promise<string | null> {
-  if (!customerId) return null;
-  const [row] = await db
-    .select({ userId: subscriptions.userId })
-    .from(subscriptions)
-    .where(eq(subscriptions.providerCustomerId, customerId))
-    .limit(1);
-  if (row) return row.userId;
-  // Fallback: some flows create the mapping on checkout via email metadata.
-  const [byEmail] = await db.select({ id: users.id }).from(users).where(eq(users.email, customerId)).limit(1);
-  return byEmail?.id ?? null;
+/** Finds a user by provider customer or subscription id; null when unmapped. */
+async function findUserIdByExternalRefs(db: Db, customerId: string | null, subscriptionId: string | null): Promise<string | null> {
+  if (customerId) {
+    const [row] = await db
+      .select({ userId: subscriptions.userId })
+      .from(subscriptions)
+      .where(eq(subscriptions.providerCustomerId, customerId))
+      .limit(1);
+    if (row) return row.userId;
+    // Fallback: some flows create the mapping on checkout via email metadata.
+    const [byEmail] = await db.select({ id: users.id }).from(users).where(eq(users.email, customerId)).limit(1);
+    if (byEmail) return byEmail.id;
+  }
+  if (subscriptionId) {
+    const [row] = await db
+      .select({ userId: subscriptions.userId })
+      .from(subscriptions)
+      .where(eq(subscriptions.providerSubscriptionId, subscriptionId))
+      .limit(1);
+    if (row) return row.userId;
+  }
+  return null;
 }
 
 /** Ensures a subscription row exists for the user. */
 async function ensureSubscriptionRow(db: Db, userId: string): Promise<void> {
   await db.insert(subscriptions).values({ userId, tier: 'free', status: 'active' }).onConflictDoNothing({ target: subscriptions.userId });
+}
+
+async function markPaymentEvent(db: Db, eventId: string, applied: boolean, reason: string | null): Promise<void> {
+  await db.update(paymentEvents).set({ applied, reason }).where(eq(paymentEvents.id, eventId));
 }
 
 /**
@@ -122,14 +136,18 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
     return { applied: false, reason: 'duplicate_event' };
   }
 
-  try {
-    await db.insert(paymentEvents).values({ id: event.id, type: event.type, payload: event.raw as object }).onConflictDoNothing({ target: paymentEvents.id });
-  } catch {
+  const [inserted] = await db
+    .insert(paymentEvents)
+    .values({ id: event.id, type: event.type, payload: event.raw as object })
+    .onConflictDoNothing({ target: paymentEvents.id })
+    .returning({ id: paymentEvents.id });
+  if (!inserted) {
     return { applied: false, reason: 'duplicate_event' };
   }
 
-  const userId = await findUserIdByCustomer(db, event.providerCustomerId);
+  const userId = await findUserIdByExternalRefs(db, event.providerCustomerId, event.providerSubscriptionId);
   if (!userId) {
+    await markPaymentEvent(db, event.id, false, 'unknown_customer');
     return { applied: false, reason: 'unknown_customer' };
   }
 
@@ -138,11 +156,12 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
   switch (event.type) {
     case 'checkout.completed': {
       // -> Grants/extends the user's subscription tier.
-      if (!event.tier) {
+      if (!event.tier || !isKnownTier(event.tier)) {
+        await markPaymentEvent(db, event.id, false, 'unknown_event_type');
         return { applied: false, reason: 'unknown_event_type' };
       }
-      const periodEnd = event.currentPeriodEnd ? new Date(event.currentPeriodEnd) : nextPeriodEnd();
-      const def = tierDefinition(event.tier);
+      const parsedPeriodEnd = event.currentPeriodEnd ? new Date(event.currentPeriodEnd) : nextPeriodEnd();
+      const periodEnd = Number.isNaN(parsedPeriodEnd.getTime()) ? nextPeriodEnd() : parsedPeriodEnd;
       await db
         .update(subscriptions)
         .set({
@@ -150,11 +169,13 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
           status: 'active',
           currentPeriodEnd: periodEnd,
           provider: 'placeholder',
+          providerCustomerId: event.providerCustomerId,
           providerSubscriptionId: event.providerSubscriptionId,
           updatedAt: new Date(),
         })
         .where(eq(subscriptions.userId, userId));
-      return { applied: true, userId, tier: event.tier, tierExpiresAt: periodEnd.toISOString(), ...(def ? {} : {}) };
+      await markPaymentEvent(db, event.id, true, null);
+      return { applied: true, userId, tier: event.tier, tierExpiresAt: periodEnd.toISOString() };
     }
 
     case 'subscription.deleted':
@@ -166,10 +187,12 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
         .where(eq(subscriptions.userId, userId));
       await revokeAllUserCredentials(db, userId);
       await revokeAllRefreshTokens(db, userId);
+      await markPaymentEvent(db, event.id, true, null);
       return { applied: true, userId, tier: 'free', tierExpiresAt: null };
     }
 
     default:
+      await markPaymentEvent(db, event.id, false, 'unknown_event_type');
       return { applied: false, reason: 'unknown_event_type' };
   }
 }

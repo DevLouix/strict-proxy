@@ -1,0 +1,23 @@
+name: strict_proxy_libbox_bridge
+description: Native sing-box libbox bridge for StrictProxy.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.5.0
+  flutter: '>=3.24.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.strictproxy.libbox_bridge
+        pluginClass: LibboxBridgePlugin
+      ios:
+        pluginClass: LibboxBridgePlugin
+      linux:
+        pluginClass: LibboxBridgePlugin

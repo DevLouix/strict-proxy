@@ -24,6 +24,9 @@ export interface ControllerConfig {
   /** SNI clients must present for REALITY (can be overridden per node row). */
   defaultRealityServerName: string;
   corsOrigins: string[];
+  trustProxyHops: number;
+  enableHsts: boolean;
+  hstsMaxAgeSeconds: number;
 }
 
 export function loadConfig(): ControllerConfig {
@@ -42,5 +45,8 @@ export function loadConfig(): ControllerConfig {
     hmacTimestampToleranceSeconds: optionalInt('HMAC_TIMESTAMP_TOLERANCE_SECONDS', 300),
     defaultRealityServerName: optionalString('DEFAULT_REALITY_SERVER_NAME', 'www.microsoft.com'),
     corsOrigins: optionalString('CORS_ORIGINS', '*').split(',').map((s) => s.trim()),
+    trustProxyHops: optionalInt('TRUST_PROXY_HOPS', 1),
+    enableHsts: optionalString('ENABLE_HSTS', 'false').toLowerCase() === 'true',
+    hstsMaxAgeSeconds: optionalInt('HSTS_MAX_AGE_SECONDS', 31536000),
   };
 }

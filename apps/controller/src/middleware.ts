@@ -6,6 +6,8 @@ import type { Request, Response, NextFunction } from 'express';
 import { safeEqual, hmacSign, buildHmacSigningString } from '@strict-proxy/types';
 import { verifyAccessToken, isAccessRevoked, type AccessClaims } from './services/auth.js';
 import { getRedis, setNx } from './redis.js';
+import { users } from './db/schema.js';
+import { eq } from 'drizzle-orm';
 import type { ControllerConfig } from './env.js';
 import type { Db } from './db/client.js';
 
@@ -42,12 +44,26 @@ export function requireJwt(cfg: ControllerConfig, db: Db) {
         res.status(401).json({ error: 'token revoked', code: 'TOKEN_REVOKED' });
         return;
       }
+      const [user] = await db.select({ disabledAt: users.disabledAt, role: users.role }).from(users).where(eq(users.id, claims.sub)).limit(1);
+      if (!user || user.disabledAt || user.role !== claims.role) {
+        res.status(401).json({ error: 'account is unavailable', code: 'ACCOUNT_UNAVAILABLE' });
+        return;
+      }
       req.auth = claims;
       next();
     } catch {
       res.status(401).json({ error: 'invalid or expired token', code: 'UNAUTHENTICATED' });
     }
   };
+}
+
+/** Requires a valid JWT with the administrator role. */
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  if (req.auth?.role !== 'admin') {
+    res.status(403).json({ error: 'administrator access required', code: 'FORBIDDEN' });
+    return;
+  }
+  next();
 }
 
 /**
@@ -104,7 +120,7 @@ export function requireNodeHmac(cfg: ControllerConfig, db: Db, lookupSecret: (no
 /** JSON error handler; keeps internals out of responses in production. */
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   const message = err instanceof Error ? err.message : 'internal error';
-  const code = message === 'device_seat_limit' ? 'DEVICE_SEAT_LIMIT' : message === 'no_nodes_available' ? 'NO_NODES_AVAILABLE' : 'INTERNAL';
+  const code = message === 'device_seat_limit' ? 'DEVICE_SEAT_LIMIT' : message === 'no_nodes_available' ? 'NO_NODES_AVAILABLE' : message === 'invalid_or_expired_enrollment' ? 'INVALID_OR_EXPIRED_ENROLLMENT' : message === 'failed_to_enroll_node' ? 'NODE_ENROLLMENT_FAILED' : 'INTERNAL';
   const status = code === 'INTERNAL' ? 500 : 400;
   if (status === 500) console.error('[controller] unhandled error:', err);
   res.status(status).json({ error: status === 500 ? 'internal error' : message, code });

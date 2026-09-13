@@ -1,0 +1,254 @@
+# Production-like deployment for the controller, infrastructure, and optional edge/node.
+# API-only mode:
+#   docker compose --env-file .env.docker -f docker-compose.production.yml up -d --build
+# Public HTTPS mode:
+#   docker compose --profile edge --env-file .env.docker -f docker-compose.production.yml up -d --build
+# Optional local Docker node:
+#   docker compose --profile node --env-file .env.docker -f docker-compose.production.yml up -d --build
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    hostname: ${POSTGRES_HOSTNAME:-strict-proxy-postgres}
+    restart: ${POSTGRES_RESTART_POLICY:-unless-stopped}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-strict}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-strict_proxy}
+      POSTGRES_INITDB_ARGS: ${POSTGRES_INITDB_ARGS:-}
+    ports:
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: ${POSTGRES_HEALTH_INTERVAL:-5s}
+      timeout: ${POSTGRES_HEALTH_TIMEOUT:-5s}
+      retries: ${POSTGRES_HEALTH_RETRIES:-20}
+      start_period: ${POSTGRES_HEALTH_START_PERIOD:-10s}
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEMORY_LIMIT:-1g}
+    logging:
+      driver: ${DOCKER_LOG_DRIVER:-json-file}
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILES:-5}
+    networks: [backend]
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    hostname: ${REDIS_HOSTNAME:-strict-proxy-redis}
+    restart: ${REDIS_RESTART_POLICY:-unless-stopped}
+    command: ["redis-server", "--appendonly", "${REDIS_APPENDONLY:-yes}", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    ports:
+      - "${REDIS_BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: ${REDIS_HEALTH_INTERVAL:-5s}
+      timeout: ${REDIS_HEALTH_TIMEOUT:-3s}
+      retries: ${REDIS_HEALTH_RETRIES:-20}
+      start_period: ${REDIS_HEALTH_START_PERIOD:-5s}
+    deploy:
+      resources:
+        limits:
+          memory: ${REDIS_MEMORY_LIMIT:-256m}
+    logging:
+      driver: ${DOCKER_LOG_DRIVER:-json-file}
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILES:-5}
+    networks: [backend]
+
+  controller:
+    image: ${CONTROLLER_IMAGE:-strict-proxy/controller:local}
+    hostname: ${CONTROLLER_HOSTNAME:-strict-proxy-controller}
+    build:
+      context: ${BUILD_CONTEXT:-.}
+      dockerfile: ${CONTROLLER_DOCKERFILE:-docker/controller.Dockerfile}
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+    restart: ${CONTROLLER_RESTART_POLICY:-unless-stopped}
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: ${CONTROLLER_INTERNAL_PORT:-8080}
+      DATABASE_URL: ${CONTROLLER_DATABASE_URL:?CONTROLLER_DATABASE_URL is required}
+      REDIS_URL: ${CONTROLLER_REDIS_URL:?CONTROLLER_REDIS_URL is required}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_ISSUER: ${JWT_ISSUER:-strict-proxy-controller}
+      ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-900}
+      REFRESH_TOKEN_TTL_SECONDS: ${REFRESH_TOKEN_TTL_SECONDS:-2592000}
+      SIGNING_PRIVATE_KEY_PEM: ${SIGNING_PRIVATE_KEY_PEM:?SIGNING_PRIVATE_KEY_PEM is required}
+      SIGNING_KEY_ID: ${SIGNING_KEY_ID:-primary}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?PAYMENT_WEBHOOK_SECRET is required}
+      HEARTBEAT_TTL_SECONDS: ${HEARTBEAT_TTL_SECONDS:-90}
+      HMAC_TIMESTAMP_TOLERANCE_SECONDS: ${HMAC_TIMESTAMP_TOLERANCE_SECONDS:-300}
+      DEFAULT_REALITY_SERVER_NAME: ${DEFAULT_REALITY_SERVER_NAME:-www.microsoft.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      ENABLE_HSTS: ${ENABLE_HSTS:-false}
+      HSTS_MAX_AGE_SECONDS: ${HSTS_MAX_AGE_SECONDS:-31536000}
+      DB_INIT_MAX_ATTEMPTS: ${DB_INIT_MAX_ATTEMPTS:-30}
+    ports:
+      - "${CONTROLLER_BIND_ADDRESS:-127.0.0.1}:${CONTROLLER_PORT:-8080}:${CONTROLLER_INTERNAL_PORT:-8080}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8080) + '/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: ${CONTROLLER_HEALTH_INTERVAL:-10s}
+      timeout: ${CONTROLLER_HEALTH_TIMEOUT:-5s}
+      retries: ${CONTROLLER_HEALTH_RETRIES:-12}
+      start_period: ${CONTROLLER_HEALTH_START_PERIOD:-20s}
+    deploy:
+      resources:
+        limits:
+          memory: ${CONTROLLER_MEMORY_LIMIT:-512m}
+          cpus: ${CONTROLLER_CPU_LIMIT:-1}
+    logging:
+      driver: ${DOCKER_LOG_DRIVER:-json-file}
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILES:-5}
+    networks: [backend]
+
+  edge:
+    profiles: [edge]
+    image: ${EDGE_IMAGE:-caddy:2.11.4-alpine}
+    hostname: ${EDGE_HOSTNAME:-strict-proxy-edge}
+    restart: ${EDGE_RESTART_POLICY:-unless-stopped}
+    init: true
+    environment:
+      TLS_MODE: ${TLS_MODE:-disabled}
+      TLS_EMAIL: ${TLS_EMAIL:-ops@example.com}
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-http://localhost}
+      CADDY_CONTROLLER_HOST: ${CADDY_CONTROLLER_HOST:-controller}
+      CONTROLLER_INTERNAL_PORT: ${CONTROLLER_INTERNAL_PORT:-8080}
+    ports:
+      - "${EDGE_BIND_ADDRESS:-0.0.0.0}:${EDGE_HTTP_PORT:-80}:80"
+      - "${EDGE_BIND_ADDRESS:-0.0.0.0}:${EDGE_HTTPS_PORT:-443}:443"
+    volumes:
+      - caddyconfig:/etc/caddy
+      - caddydata:/data
+      - caddystate:/config
+    entrypoint: ["/usr/local/bin/strict-proxy-edge-entrypoint"]
+    command: []
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+      - source: edge_entrypoint
+        target: /usr/local/bin/strict-proxy-edge-entrypoint
+        mode: 0555
+    depends_on:
+      controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/healthz"]
+      interval: ${EDGE_HEALTH_INTERVAL:-10s}
+      timeout: ${EDGE_HEALTH_TIMEOUT:-5s}
+      retries: ${EDGE_HEALTH_RETRIES:-12}
+      start_period: ${EDGE_HEALTH_START_PERIOD:-10s}
+    deploy:
+      resources:
+        limits:
+          memory: ${EDGE_MEMORY_LIMIT:-128m}
+    logging:
+      driver: ${DOCKER_LOG_DRIVER:-json-file}
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILES:-5}
+    networks: [backend]
+
+  # Optional single-node Docker deployment. For a multi-VPS fleet, run this
+  # image independently on each VPS with its own enrollment token.
+  node-agent:
+    profiles: [node]
+    image: ${NODE_AGENT_IMAGE:-strict-proxy/node-agent:local}
+    hostname: ${NODE_AGENT_HOSTNAME:-strict-proxy-node-agent}
+    build:
+      context: ${BUILD_CONTEXT:-.}
+      dockerfile: ${NODE_AGENT_DOCKERFILE:-docker/node-agent.Dockerfile}
+      args:
+        SING_BOX_VERSION: ${SING_BOX_VERSION:-1.13.21}
+        NODE_VERSION: ${NODE_VERSION:-22}
+    restart: ${NODE_AGENT_RESTART_POLICY:-unless-stopped}
+    init: true
+    network_mode: ${NODE_NETWORK_MODE:-host}
+    cap_add:
+      - ${NODE_NET_ADMIN_CAPABILITY:-NET_ADMIN}
+    devices:
+      - ${NODE_TUN_DEVICE:-/dev/net/tun}:/dev/net/tun
+    environment:
+      CONTROLLER_URL: ${NODE_CONTROLLER_URL:-http://127.0.0.1:8080}
+      NODE_ENROLLMENT_TOKEN: ${NODE_ENROLLMENT_TOKEN:-}
+      NODE_PUBLIC_IP: ${NODE_PUBLIC_IP:-127.0.0.1}
+      NODE_TUNNEL_PORT: ${NODE_TUNNEL_PORT:-443}
+      NODE_HOSTNAME: ${NODE_HOSTNAME:-strict-proxy-node-agent}
+      NODE_LABEL: ${NODE_LABEL:-}
+      NODE_REALITY_SERVER_NAME: ${NODE_REALITY_SERVER_NAME:-www.microsoft.com}
+      NODE_IDENTITY_PATH: ${NODE_IDENTITY_PATH:-/var/lib/strict-proxy/node-identity.json}
+      SING_BOX_BINARY: ${SING_BOX_BINARY:-/usr/local/bin/sing-box}
+      SING_BOX_RESTART_MODE: managed
+      SING_BOX_CONFIG_PATH: ${SING_BOX_CONFIG_PATH:-/etc/sing-box/config.json}
+      SING_BOX_STATS_API_LISTEN: ${SING_BOX_STATS_API_LISTEN:-127.0.0.1:10085}
+      SING_BOX_STATS_PROTO: ${SING_BOX_STATS_PROTO:-/app/apps/node-agent/src/v2rayapi/stats.proto}
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-30}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-60}
+      USAGE_INTERVAL_SECONDS: ${USAGE_INTERVAL_SECONDS:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - nodeidentity:/var/lib/strict-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: ${NODE_AGENT_HEALTH_INTERVAL:-30s}
+      timeout: ${NODE_AGENT_HEALTH_TIMEOUT:-5s}
+      retries: ${NODE_AGENT_HEALTH_RETRIES:-3}
+      start_period: ${NODE_AGENT_HEALTH_START_PERIOD:-15s}
+    deploy:
+      resources:
+        limits:
+          memory: ${NODE_AGENT_MEMORY_LIMIT:-512m}
+          cpus: ${NODE_AGENT_CPU_LIMIT:-2}
+    logging:
+      driver: ${DOCKER_LOG_DRIVER:-json-file}
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILES:-5}
+
+volumes:
+  pgdata:
+    name: ${POSTGRES_DATA_VOLUME:-strict-proxy-pgdata}
+  redisdata:
+    name: ${REDIS_DATA_VOLUME:-strict-proxy-redisdata}
+  nodeidentity:
+    name: ${NODE_IDENTITY_VOLUME:-strict-proxy-nodeidentity}
+  caddyconfig:
+    name: ${EDGE_CONFIG_VOLUME:-strict-proxy-caddyconfig}
+  caddydata:
+    name: ${EDGE_DATA_VOLUME:-strict-proxy-caddydata}
+  caddystate:
+    name: ${EDGE_STATE_VOLUME:-strict-proxy-caddystate}
+
+configs:
+  caddyfile:
+    file: ./docker/Caddyfile
+  edge_entrypoint:
+    file: ./docker/edge-entrypoint.sh
+
+networks:
+  backend:
+    driver: ${BACKEND_NETWORK_DRIVER:-bridge}
+    ipam:
+      driver: ${BACKEND_NETWORK_IPAM_DRIVER:-default}
+      config:
+        - subnet: ${BACKEND_NETWORK_SUBNET:-172.30.0.0/16}
+          gateway: ${BACKEND_NETWORK_GATEWAY:-172.30.0.1}

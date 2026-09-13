@@ -1,10 +1,65 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../auth/presentation/auth_controller.dart';
+import '../../../core/config.dart';
 import '../../engine/engine_adapter.dart';
+import '../../engine/libbox_engine.dart';
+import '../../engine/linux_singbox_engine.dart';
+
+/// Converts the controller's compact VLESS+REALITY descriptor into a complete
+/// sing-box client configuration with a system TUN inbound.
+Map<String, dynamic> buildSingBoxTunConfig(Map<String, dynamic> endpoint) => {
+      'log': {'level': 'warn', 'timestamp': true},
+      'dns': {
+        'servers': [
+          {'tag': 'remote', 'address': 'https://1.1.1.1/dns-query', 'detour': 'proxy'},
+          {'tag': 'local', 'address': 'local'},
+        ],
+        'final': 'remote',
+        'strategy': 'prefer_ipv4',
+      },
+      'inbounds': [
+        {
+          'type': 'tun',
+          'tag': 'tun-in',
+          'interface_name': 'strictproxy0',
+          'address': [AppConfig.tunIpv4Address, AppConfig.tunIpv6Address],
+          'auto_route': true,
+          'strict_route': true,
+          'stack': 'mixed',
+        },
+      ],
+      'outbounds': [
+        {
+          'type': 'vless',
+          'tag': 'proxy',
+          'server': endpoint['server'],
+          'server_port': endpoint['serverPort'],
+          'uuid': endpoint['uuid'],
+          'flow': endpoint['flow'] ?? 'xtls-rprx-vision',
+          'tls': {
+            'enabled': true,
+            'server_name': endpoint['serverName'],
+            'utls': {'enabled': true, 'fingerprint': endpoint['fingerprint'] ?? 'chrome'},
+            'reality': {
+              'enabled': true,
+              'public_key': endpoint['publicKey'],
+              'short_id': endpoint['shortId'],
+            },
+          },
+        },
+        {'type': 'direct', 'tag': 'direct'},
+        {'type': 'block', 'tag': 'block'},
+      ],
+      'route': {
+        'auto_detect_interface': true,
+        'final': 'proxy',
+      },
+    };
 
 /// Sealed connection state.
 sealed class ConnState {
@@ -39,8 +94,8 @@ class LatencyResult {
 class ConnectionNotifier extends StateNotifier<ConnState> {
   ConnectionNotifier(this._ref) : super(const EngineStateIdle()) {
     final engine = _ref.read(engineProvider);
+    _engineReady = _initializeEngine(engine);
     engine.stateStream.listen((s) {
-      // Mirror engine state transitions into the UI state machine.
       switch (s) {
         case EngineState.connecting:
           if (state is! EngineStateConnected) state = const EngineStateConnecting();
@@ -56,7 +111,17 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   }
 
   final Ref _ref;
+  late final Future<void> _engineReady;
   ServerNode? _selected;
+
+  Future<void> _initializeEngine(VpnEngine engine) async {
+    try {
+      await engine.initialize();
+    } catch (error) {
+      state = EngineStateError(error.toString());
+      rethrow;
+    }
+  }
 
   ServerNode? get selected => _selected;
 
@@ -71,6 +136,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
   Future<void> connect({ServerNode? node}) async {
     try {
+      await _engineReady;
       if (node != null) _selected = node;
       _selected ??= await pickBestNode();
       if (_selected == null) {
@@ -81,21 +147,28 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
       final api = _ref.read(apiProvider);
       final bundleJson = await api.networkConfig();
-      final engine = _ref.read(engineProvider);
-      final nodeConfig = (bundleJson['configs'] as Map<String, dynamic>? ?? {})[_selected!.id];
-      await engine.connect(nodeConfig != null ? jsonEncode(nodeConfig) : '{}');
-      // `connected` is delivered via the engine state stream.
+      final configs = bundleJson['configs'] as Map<String, dynamic>? ?? {};
+      final nodeConfig = configs[_selected!.id];
+      if (nodeConfig is! Map<String, dynamic>) {
+        state = const EngineStateError('Selected server configuration is unavailable');
+        return;
+      }
+      await _ref.read(engineProvider).connect(jsonEncode(buildSingBoxTunConfig(nodeConfig)));
     } catch (e) {
       state = EngineStateError(e.toString());
     }
   }
 
   Future<void> disconnect() async {
-    await _ref.read(engineProvider).disconnect();
-    state = const EngineStateIdle();
+    try {
+      await _engineReady;
+      await _ref.read(engineProvider).disconnect();
+      state = const EngineStateIdle();
+    } catch (error) {
+      state = EngineStateError(error.toString());
+    }
   }
 
-  /// Chooses the lowest-latency node using parallel TCP probes.
   Future<ServerNode?> pickBestNode() async {
     final bundleJson = await _ref.read(apiProvider).networkConfig();
     final bundle = ConfigBundle.fromJson(bundleJson);
@@ -121,8 +194,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       final sw = Stopwatch()..start();
       int? ms;
       try {
-        final socket = await Socket.connect(n.tunnelHost, n.tunnelPort,
-            timeout: const Duration(seconds: 3));
+        final socket = await Socket.connect(n.tunnelHost, n.tunnelPort, timeout: const Duration(seconds: 3));
         sw.stop();
         ms = sw.elapsedMilliseconds;
         socket.destroy();
@@ -136,11 +208,13 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 }
 
 final engineProvider = Provider<VpnEngine>((ref) {
-  // Swap for LibboxEngine() once the libbox plugin is integrated.
-  final engine = NoopEngine();
+  final engine = switch (Platform.operatingSystem) {
+    'linux' => LinuxSingBoxEngine(),
+    'android' || 'ios' => LibboxEngine(),
+    final platform => UnsupportedEngine(platform),
+  };
   ref.onDispose(engine.dispose);
   return engine;
 });
 
-final connectionStateProvider =
-    StateNotifierProvider<ConnectionNotifier, ConnState>((ref) => ConnectionNotifier(ref));
+final connectionStateProvider = StateNotifierProvider<ConnectionNotifier, ConnState>((ref) => ConnectionNotifier(ref));

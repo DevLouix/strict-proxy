@@ -25,7 +25,10 @@ class ControllerApi {
 
   TokenStore get tokens => _tokens;
 
-  Uri _uri(String path) => Uri.parse('${AppConfig.controllerUrl}$path');
+  Uri _uri(String path) {
+    final base = Uri.parse(AppConfig.controllerUrl);
+    return base.resolve(path.startsWith('/') ? path.substring(1) : path);
+  }
 
   Map<String, String> _headers({bool auth = true}) => {
         'content-type': 'application/json',
@@ -33,18 +36,34 @@ class ControllerApi {
           'authorization': 'Bearer ${_tokens.accessToken}',
       };
 
+  Future<http.Response> _request(
+    Future<http.Response> Function() fn,
+  ) async {
+    try {
+      return await fn().timeout(AppConfig.requestTimeout);
+    } on FormatException {
+      rethrow;
+    } catch (error) {
+      throw ApiException(0, 'NETWORK_ERROR', 'Controller request failed: $error');
+    }
+  }
+
   Future<Map<String, dynamic>> _send(
     Future<http.Response> Function() fn, {
     bool retryOn401 = true,
   }) async {
-    final res = await fn();
+    final res = await _request(fn);
     if (res.statusCode == 401 && retryOn401) {
       final refreshed = await tryRefresh();
-      if (refreshed) {
-        return _send(fn, retryOn401: false);
-      }
+      if (refreshed) return _send(fn, retryOn401: false);
     }
-    final body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+
+    final decoded = res.bodyBytes.isEmpty
+        ? <String, dynamic>{}
+        : jsonDecode(utf8.decode(res.bodyBytes));
+    final body = decoded is Map<String, dynamic>
+        ? decoded
+        : <String, dynamic>{'data': decoded};
     if (res.statusCode >= 400) {
       throw ApiException(
         res.statusCode,

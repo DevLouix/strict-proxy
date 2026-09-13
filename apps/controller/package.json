@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "db:push": "drizzle-kit push",
     "db:seed": "tsx src/scripts/seed.ts",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"
   },
   "dependencies": {
     "@strict-proxy/types": "*",

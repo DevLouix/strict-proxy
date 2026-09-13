@@ -66,7 +66,7 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
           final latency = _latencies[n.id];
           return ListTile(
             leading: _statusDot(n.status),
-            title: Text('${n.region} · ${n.hostname}'),
+            title: Text('${n.label} · ${n.region}'),
             subtitle: Text(latency == null
                 ? 'probing…'
                 : latency >= 0

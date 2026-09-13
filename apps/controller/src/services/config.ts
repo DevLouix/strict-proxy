@@ -7,11 +7,12 @@
  */
 import type { Db } from '../db/client.js';
 import { nodeCredentials, nodes, users } from '../db/schema.js';
-import { and, eq, gt, inArray, or } from 'drizzle-orm';
+import { and, eq, gt, inArray, notInArray, or } from 'drizzle-orm';
 import { loadSigningPrivateKey, signJson } from '@strict-proxy/types';
 import type { NodeEndpoint, SignedConfigBundle, SubscriptionTier, VlessRealityClientConfig } from '@strict-proxy/types';
 import type { ControllerConfig } from '../env.js';
 import { ensureUserCredential } from './nodes.js';
+import { tierDefinition } from './tiers.js';
 
 const CONFIG_TTL_SECONDS = 6 * 60 * 60; // clients re-fetch every 6h at most
 
@@ -31,15 +32,22 @@ export async function buildSignedConfigBundle(
   if (activeNodes.length === 0) {
     throw new Error('no_nodes_available');
   }
-  for (const node of activeNodes) {
-    await ensureUserCredential(db, params.userId, node.id);
+  const maxNodes = Math.min(tierDefinition(params.tier).maxNodes, activeNodes.length);
+  const allowedNodeIds = activeNodes.slice(0, maxNodes).map((node) => node.id);
+  for (const nodeId of allowedNodeIds) {
+    await ensureUserCredential(db, params.userId, nodeId);
   }
+  await db
+    .update(nodeCredentials)
+    .set({ revoked: true, revokedAt: new Date() })
+    .where(and(eq(nodeCredentials.userId, params.userId), notInArray(nodeCredentials.nodeId, allowedNodeIds), eq(nodeCredentials.revoked, false)));
 
   const rows = await db
     .select({
       nodeId: nodes.id,
       hostname: nodes.hostname,
       region: nodes.region,
+      label: nodes.label,
       publicIp: nodes.publicIp,
       status: nodes.status,
       loadScore: nodes.loadScore,
@@ -55,10 +63,9 @@ export async function buildSignedConfigBundle(
       nodeCredentials,
       and(eq(nodeCredentials.nodeId, nodes.id), eq(nodeCredentials.userId, params.userId), eq(nodeCredentials.revoked, false)),
     )
-    .where(inArray(nodes.status, ['online', 'degraded']));
+    .where(and(inArray(nodes.status, ['online', 'degraded']), inArray(nodes.id, allowedNodeIds)));
 
-  const freeLimit = params.tier === 'free' ? 2 : rows.length;
-  const limited = rows.slice(0, freeLimit);
+  const limited = rows;
 
   const endpoints: NodeEndpoint[] = [];
   const configs: Record<string, VlessRealityClientConfig> = {};
@@ -69,17 +76,18 @@ export async function buildSignedConfigBundle(
       id: row.nodeId,
       hostname: row.hostname,
       region: row.region,
+      label: row.label,
       publicIp: row.publicIp,
       status: row.status as NodeEndpoint['status'],
       loadScore: row.loadScore,
-      tunnelHost: row.hostname,
+      tunnelHost: row.publicIp,
       tunnelPort: row.tunnelPort,
     };
     endpoints.push(endpoint);
     configs[row.nodeId] = {
       protocol: 'vless-reality',
       uuid: row.credentialUuid,
-      server: row.hostname,
+      server: row.publicIp,
       serverPort: row.tunnelPort,
       serverName: row.realityServerName,
       shortId: row.credentialShortId,

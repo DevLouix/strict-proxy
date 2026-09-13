@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'features/auth/presentation/auth_controller.dart';
-import 'features/auth/presentation/login_screen.dart';
-import 'features/home/presentation/home_screen.dart';
-import 'features/servers/presentation/servers_screen.dart';
+import 'auth/presentation/auth_controller.dart';
+import 'auth/presentation/login_screen.dart';
+import 'home/presentation/home_screen.dart';
+import 'servers/presentation/servers_screen.dart';
 
 class RootGate extends ConsumerWidget {
   const RootGate({super.key});

@@ -9,11 +9,11 @@
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
-import { eq, sql } from 'drizzle-orm';
+import { eq, sql, and, asc, desc, inArray, isNull } from 'drizzle-orm';
 import { generateEd25519Keypair, signJson, loadSigningPrivateKey } from '@strict-proxy/types';
 import type { PublicIpsResponse, SubscriptionTier, UserPublic } from '@strict-proxy/types';
 import type { Db } from './db/client.js';
-import { devices, nodes, subscriptions, users } from './db/schema.js';
+import { devices, nodeEnrollments, nodes, nodeCredentials, paymentEvents, refreshTokens, subscriptions, usageRollups, users } from './db/schema.js';
 import type { ControllerConfig } from './env.js';
 import type { Redis } from 'ioredis';
 import {
@@ -24,8 +24,8 @@ import {
 } from './services/auth.js';
 import { tierDefinition, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
-import { computeLoadScore } from './services/nodes.js';
-import { asyncHandler, requireJwt, requireNodeHmac } from './middleware.js';
+import { computeLoadScore, createNodeEnrollmentToken, enrollNode, registerNode, revokeAllUserCredentials } from './services/nodes.js';
+import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
 
 interface Ctx {
   db: Db;
@@ -95,6 +95,16 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ ok: true, time: new Date().toISOString() });
   });
 
+  router.get('/readyz', asyncHandler(async (_req, res) => {
+    try {
+      await ctx.db.execute(sql`select 1`);
+      await ctx.redis.ping();
+      res.json({ ok: true, time: new Date().toISOString() });
+    } catch {
+      res.status(503).json({ ok: false, code: 'DEPENDENCY_UNAVAILABLE' });
+    }
+  }));
+
   // -- auth -----------------------------------------------------------------
   router.post(
     '/api/v1/auth/register',
@@ -129,11 +139,11 @@ export function buildRouter(ctx: Ctx): Router {
         return;
       }
       const [user] = await ctx.db
-        .select({ id: users.id, email: users.email, role: users.role, passwordHash: users.passwordHash, createdAt: users.createdAt })
+        .select({ id: users.id, email: users.email, role: users.role, passwordHash: users.passwordHash, disabledAt: users.disabledAt, createdAt: users.createdAt })
         .from(users)
         .where(eq(users.email, email.toLowerCase().trim()))
         .limit(1);
-      if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+      if (!user || user.disabledAt || !(await bcrypt.compare(password, user.passwordHash))) {
         res.status(401).json({ error: 'invalid credentials', code: 'INVALID_CREDENTIALS' });
         return;
       }
@@ -169,11 +179,11 @@ export function buildRouter(ctx: Ctx): Router {
         return;
       }
       const [user] = await ctx.db
-        .select({ id: users.id, email: users.email, role: users.role, createdAt: users.createdAt })
+        .select({ id: users.id, email: users.email, role: users.role, disabledAt: users.disabledAt, createdAt: users.createdAt })
         .from(users)
         .where(eq(users.id, rotated.userId))
         .limit(1);
-      if (!user) {
+      if (!user || user.disabledAt) {
         res.status(401).json({ error: 'invalid refresh token', code: 'INVALID_REFRESH' });
         return;
       }
@@ -220,6 +230,208 @@ export function buildRouter(ctx: Ctx): Router {
     }),
   );
 
+  // -- admin -----------------------------------------------------------------
+  // All operational controls are protected by both JWT authentication and the
+  // administrator role. Payment provider calls remain webhook-driven.
+  const requireAdministrator = [requireAuth, requireAdmin];
+
+  router.get('/api/v1/admin/overview', ...requireAdministrator, asyncHandler(async (_req, res) => {
+    const [userCount] = await ctx.db.select({ count: sql<number>`count(*)` }).from(users);
+    const [activeSubscriptions] = await ctx.db.select({ count: sql<number>`count(*)` }).from(subscriptions).where(and(eq(subscriptions.status, 'active'), inArray(subscriptions.tier, ['standard', 'pro'])));
+    const [onlineNodes] = await ctx.db.select({ count: sql<number>`count(*)` }).from(nodes).where(inArray(nodes.status, ['online', 'degraded']));
+    const [credentialCount] = await ctx.db.select({ count: sql<number>`count(*)` }).from(nodeCredentials).where(eq(nodeCredentials.revoked, false));
+    res.json({ users: Number(userCount?.count ?? 0), activeSubscriptions: Number(activeSubscriptions?.count ?? 0), onlineNodes: Number(onlineNodes?.count ?? 0), activeCredentials: Number(credentialCount?.count ?? 0) });
+  }));
+
+  router.get('/api/v1/admin/users', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 50), 1), 200);
+    const rows = await ctx.db.select({ id: users.id, email: users.email, role: users.role, disabledAt: users.disabledAt, createdAt: users.createdAt, tier: subscriptions.tier, subscriptionStatus: subscriptions.status, currentPeriodEnd: subscriptions.currentPeriodEnd })
+      .from(users).leftJoin(subscriptions, eq(subscriptions.userId, users.id)).orderBy(desc(users.createdAt)).limit(limit);
+    res.json({ users: rows });
+  }));
+
+  router.patch('/api/v1/admin/users/:userId', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const userId = req.params.userId;
+    if (typeof userId !== 'string' || userId.length === 0) {
+      res.status(400).json({ error: 'userId is required', code: 'VALIDATION' });
+      return;
+    }
+    const body = req.body as { disabled?: boolean; role?: 'user' | 'admin' };
+    if (body.role !== undefined && body.role !== 'user' && body.role !== 'admin') {
+      res.status(400).json({ error: 'role must be user or admin', code: 'VALIDATION' });
+      return;
+    }
+    const [updated] = await ctx.db.update(users).set({
+      ...(body.disabled === undefined ? {} : { disabledAt: body.disabled ? new Date() : null }),
+      ...(body.role === undefined ? {} : { role: body.role }),
+      updatedAt: new Date(),
+    }).where(eq(users.id, userId)).returning({ id: users.id, email: users.email, role: users.role, disabledAt: users.disabledAt });
+    if (!updated) {
+      res.status(404).json({ error: 'user not found', code: 'NOT_FOUND' });
+      return;
+    }
+    if (body.disabled === true) {
+      await revokeAllUserCredentials(ctx.db, userId);
+      await ctx.db.update(refreshTokens).set({ revokedAt: new Date() }).where(and(eq(refreshTokens.userId, userId), sql`${refreshTokens.revokedAt} IS NULL`));
+    }
+    res.json({ user: updated });
+  }));
+
+  router.patch('/api/v1/admin/users/:userId/subscription', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const userId = req.params.userId;
+    if (typeof userId !== 'string' || userId.length === 0) {
+      res.status(400).json({ error: 'userId is required', code: 'VALIDATION' });
+      return;
+    }
+    const body = req.body as { tier?: string; status?: 'active' | 'expired' | 'revoked'; currentPeriodEnd?: string | null };
+    const tier = body.tier;
+    const status = body.status;
+    if (!tier || !isKnownTier(tier) || !status || !['active', 'expired', 'revoked'].includes(status)) {
+      res.status(400).json({ error: 'tier and a valid status are required', code: 'VALIDATION' });
+      return;
+    }
+    const periodEnd = body.currentPeriodEnd === null || body.currentPeriodEnd === undefined ? null : new Date(body.currentPeriodEnd);
+    if (periodEnd && Number.isNaN(periodEnd.getTime())) {
+      res.status(400).json({ error: 'currentPeriodEnd must be a valid ISO date', code: 'VALIDATION' });
+      return;
+    }
+    await ctx.db.insert(subscriptions).values({ userId, tier, status, currentPeriodEnd: periodEnd }).onConflictDoUpdate({ target: subscriptions.userId, set: { tier, status, currentPeriodEnd: periodEnd, updatedAt: new Date() } });
+    if (status !== 'active') {
+      await revokeAllUserCredentials(ctx.db, userId);
+      await ctx.db.update(refreshTokens).set({ revokedAt: new Date() }).where(and(eq(refreshTokens.userId, userId), sql`${refreshTokens.revokedAt} IS NULL`));
+    }
+    const sub = await getSubscription(ctx.db, userId);
+    res.json({ userId, subscription: sub });
+  }));
+
+  router.post('/api/v1/admin/node-enrollments', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const body = req.body as { region?: string; label?: string; ttlMinutes?: number };
+    if (!body.region || body.region.trim().length < 2) {
+      res.status(400).json({ error: 'region is required', code: 'VALIDATION' });
+      return;
+    }
+    const ttlMinutes = Math.min(Math.max(Number(body.ttlMinutes ?? 30), 5), 24 * 60);
+    const enrollment = createNodeEnrollmentToken();
+    const [created] = await ctx.db.insert(nodeEnrollments).values({
+      tokenHash: enrollment.tokenHash,
+      region: body.region.trim(),
+      label: body.label?.trim() || null,
+      expiresAt: new Date(Date.now() + ttlMinutes * 60_000),
+      createdBy: req.auth!.sub,
+    }).returning({ id: nodeEnrollments.id, expiresAt: nodeEnrollments.expiresAt, region: nodeEnrollments.region, label: nodeEnrollments.label });
+    if (!created) {
+      res.status(500).json({ error: 'enrollment creation failed', code: 'INTERNAL' });
+      return;
+    }
+    res.status(201).json({ enrollmentId: created.id, token: enrollment.token, region: created.region, label: created.label, expiresAt: created.expiresAt });
+  }));
+
+  router.get('/api/v1/admin/node-enrollments', ...requireAdministrator, asyncHandler(async (_req, res) => {
+    const rows = await ctx.db.select({ id: nodeEnrollments.id, region: nodeEnrollments.region, label: nodeEnrollments.label, expiresAt: nodeEnrollments.expiresAt, usedAt: nodeEnrollments.usedAt, nodeId: nodeEnrollments.nodeId, createdAt: nodeEnrollments.createdAt }).from(nodeEnrollments).orderBy(desc(nodeEnrollments.createdAt)).limit(200);
+    res.json({ enrollments: rows });
+  }));
+
+  router.delete('/api/v1/admin/node-enrollments/:enrollmentId', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const enrollmentId = req.params.enrollmentId;
+    if (typeof enrollmentId !== 'string' || enrollmentId.length === 0) {
+      res.status(400).json({ error: 'enrollmentId is required', code: 'VALIDATION' });
+      return;
+    }
+    const [revoked] = await ctx.db.update(nodeEnrollments).set({ expiresAt: new Date(), usedAt: new Date() }).where(eq(nodeEnrollments.id, enrollmentId)).returning({ id: nodeEnrollments.id });
+    if (!revoked) {
+      res.status(404).json({ error: 'enrollment not found', code: 'NOT_FOUND' });
+      return;
+    }
+    res.json({ ok: true });
+  }));
+
+  router.post('/api/v1/nodes/enroll', asyncHandler(async (req, res) => {
+    const body = req.body as { token?: string; hostname?: string; label?: string; publicIp?: string; tunnelPort?: number; realityServerName?: string; realityShortIds?: string[]; engineVersion?: string };
+    if (!body.token || !body.hostname || !body.publicIp || !body.realityServerName || !body.realityShortIds?.length) {
+      res.status(400).json({ error: 'token, hostname, publicIp, realityServerName and realityShortIds are required', code: 'VALIDATION' });
+      return;
+    }
+    const enrolled = await enrollNode(ctx.db, {
+      token: body.token,
+      hostname: body.hostname,
+      label: body.label,
+      publicIp: body.publicIp,
+      tunnelPort: Number(body.tunnelPort ?? 443),
+      realityServerName: body.realityServerName,
+      realityShortIds: body.realityShortIds,
+      engineVersion: body.engineVersion ?? 'unknown',
+    });
+    res.status(201).json(enrolled);
+  }));
+
+  router.get('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (_req, res) => {
+    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
+    res.json({ nodes: rows });
+  }));
+
+  router.post('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const body = req.body as { hostname?: string; region?: string; label?: string; publicIp?: string; tunnelPort?: number; realityPrivateKey?: string; realityPublicKey?: string; realityServerName?: string; realityShortIds?: string[]; engineVersion?: string };
+    if (!body.hostname || !body.region || !body.publicIp || !body.realityServerName || !body.realityShortIds?.length) {
+      res.status(400).json({ error: 'hostname, region, publicIp, realityServerName and realityShortIds are required', code: 'VALIDATION' });
+      return;
+    }
+    const registered = await registerNode(ctx.db, { hostname: body.hostname, region: body.region, label: body.label, publicIp: body.publicIp, tunnelPort: Number(body.tunnelPort ?? 443), realityPrivateKey: body.realityPrivateKey, realityPublicKey: body.realityPublicKey, realityServerName: body.realityServerName, realityShortIds: body.realityShortIds, engineVersion: body.engineVersion ?? 'unknown' });
+    res.status(201).json(registered);
+  }));
+
+  router.patch('/api/v1/admin/nodes/:nodeId', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const nodeId = req.params.nodeId;
+    if (typeof nodeId !== 'string' || nodeId.length === 0) {
+      res.status(400).json({ error: 'nodeId is required', code: 'VALIDATION' });
+      return;
+    }
+    const body = req.body as { hostname?: string; region?: string; label?: string | null; publicIp?: string; tunnelPort?: number; status?: 'online' | 'degraded' | 'offline' | 'draining' };
+    if (body.status === undefined && body.hostname === undefined && body.region === undefined && body.label === undefined && body.publicIp === undefined && body.tunnelPort === undefined) {
+      res.status(400).json({ error: 'at least one node field is required', code: 'VALIDATION' });
+      return;
+    }
+    if (body.tunnelPort !== undefined && (!Number.isInteger(body.tunnelPort) || body.tunnelPort < 1 || body.tunnelPort > 65535)) {
+      res.status(400).json({ error: 'tunnelPort must be an integer from 1 to 65535', code: 'VALIDATION' });
+      return;
+    }
+    if (body.status !== undefined && !['online', 'degraded', 'offline', 'draining'].includes(body.status)) {
+      res.status(400).json({ error: 'valid status is required', code: 'VALIDATION' });
+      return;
+    }
+    const [updated] = await ctx.db.update(nodes).set({
+      ...(body.status === undefined ? {} : { status: body.status }),
+      ...(body.hostname === undefined ? {} : { hostname: body.hostname.trim() }),
+      ...(body.region === undefined ? {} : { region: body.region.trim() }),
+      ...(body.label === undefined ? {} : { label: body.label?.trim() || null }),
+      ...(body.publicIp === undefined ? {} : { publicIp: body.publicIp.trim() }),
+      ...(body.tunnelPort === undefined ? {} : { tunnelPort: body.tunnelPort }),
+    }).where(eq(nodes.id, nodeId)).returning({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, tunnelPort: nodes.tunnelPort, status: nodes.status });
+    if (!updated) {
+      res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
+      return;
+    }
+    res.json({ node: updated });
+  }));
+
+  router.delete('/api/v1/admin/nodes/:nodeId', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const nodeId = req.params.nodeId;
+    if (typeof nodeId !== 'string' || nodeId.length === 0) {
+      res.status(400).json({ error: 'nodeId is required', code: 'VALIDATION' });
+      return;
+    }
+    const [removed] = await ctx.db.delete(nodes).where(eq(nodes.id, nodeId)).returning({ id: nodes.id });
+    if (!removed) {
+      res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
+      return;
+    }
+    res.json({ ok: true });
+  }));
+
+  router.get('/api/v1/admin/payments/events', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500);
+    const rows = await ctx.db.select().from(paymentEvents).orderBy(desc(paymentEvents.receivedAt)).limit(limit);
+    res.json({ events: rows });
+  }));
   // -- network (client) ------------------------------------------------------
   router.get(
     '/api/v1/network/config',
@@ -240,10 +452,7 @@ export function buildRouter(ctx: Ctx): Router {
   router.get(
     '/api/v1/network/nodes/public-ips',
     asyncHandler(async (_req, res) => {
-      const rows = await ctx.db
-        .select({ publicIp: nodes.publicIp })
-        .from(nodes)
-        .where(eq(nodes.status, 'online'));
+      const rows = await ctx.db.select({ nodeId: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, status: nodes.status, loadScore: nodes.loadScore, lastHeartbeatAt: nodes.lastHeartbeatAt }).from(nodes).where(inArray(nodes.status, ['online', 'degraded'])).orderBy(nodes.region, nodes.label, nodes.hostname);
       const generatedAt = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
       const ips = rows.map((r) => r.publicIp).sort();
@@ -300,10 +509,15 @@ export function buildRouter(ctx: Ctx): Router {
       const cpu = Number(body.cpuPercent ?? 0);
       const mem = Number(body.memoryPercent ?? 0);
       const load = computeLoadScore(cpu, mem);
+      const [node] = await ctx.db.select({ status: nodes.status }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+      if (!node) {
+        res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
+        return;
+      }
       await ctx.db
         .update(nodes)
         .set({
-          status: load > 90 ? 'degraded' : 'online',
+          status: node.status === 'draining' ? 'draining' : load > 90 ? 'degraded' : 'online',
           loadScore: load,
           engineVersion: body.engineVersion ?? 'unknown',
           lastHeartbeatAt: new Date(),
@@ -329,15 +543,21 @@ export function buildRouter(ctx: Ctx): Router {
       const nodeId = req.node!.nodeId;
       const body = req.body as { usage?: Array<{ uuid: string; bytesUp: number; bytesDown: number; windowStart: string; windowEnd: string }> };
       const usage = Array.isArray(body.usage) ? body.usage : [];
-      // Bandwidth accounting per credential (usage rollups are written by the
-      // agent against the credential's UUID).
+      let applied = 0;
       for (const u of usage) {
-        // Increment bytes_used on the matching credential.
-        await ctx.db.execute(
-          sql`UPDATE node_credentials SET bytes_used = bytes_used + ${u.bytesUp + u.bytesDown} WHERE uuid = ${u.uuid} AND node_id = ${nodeId}`,
-        );
+        const bytesUp = Number(u.bytesUp);
+        const bytesDown = Number(u.bytesDown);
+        const windowStart = new Date(u.windowStart);
+        const windowEnd = new Date(u.windowEnd);
+        if (!Number.isFinite(bytesUp) || !Number.isFinite(bytesDown) || bytesUp < 0 || bytesDown < 0 || Number.isNaN(windowStart.getTime()) || Number.isNaN(windowEnd.getTime()) || windowEnd <= windowStart) continue;
+        const [credential] = await ctx.db.select({ id: nodeCredentials.id }).from(nodeCredentials).where(and(eq(nodeCredentials.uuid, u.uuid), eq(nodeCredentials.nodeId, nodeId))).limit(1);
+        if (!credential) continue;
+        const [rollup] = await ctx.db.insert(usageRollups).values({ credentialId: credential.id, windowStart, windowEnd, bytesUp: Math.floor(bytesUp), bytesDown: Math.floor(bytesDown) }).onConflictDoNothing({ target: [usageRollups.credentialId, usageRollups.windowStart, usageRollups.windowEnd] }).returning({ id: usageRollups.id });
+        if (!rollup) continue;
+        await ctx.db.execute(sql`UPDATE node_credentials SET bytes_used = bytes_used + ${Math.floor(bytesUp + bytesDown)} WHERE id = ${credential.id}`);
+        applied += 1;
       }
-      res.json({ ok: true, applied: usage.length });
+      res.json({ ok: true, applied });
     }),
   );
 

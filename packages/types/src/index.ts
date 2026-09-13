@@ -85,6 +85,8 @@ export interface FleetNode {
   id: string;
   hostname: string;
   region: string;
+  /** Optional admin-defined display label, e.g. "Frankfurt 1". */
+  label?: string | null;
   /** Public IPv4 of the exit node. */
   publicIp: string;
   status: NodeStatus;
@@ -98,6 +100,8 @@ export interface NodeEndpoint {
   id: string;
   hostname: string;
   region: string;
+  /** Optional admin-defined display label, e.g. "Frankfurt 1". */
+  label?: string | null;
   publicIp: string;
   status: NodeStatus;
   loadScore: number;
