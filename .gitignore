@@ -14,6 +14,7 @@ ios/Pods/
 android/.gradle/
 android/local.properties
 *.iml
+.idea/
 .DS_Store
 apps/client/.cache/
 apps/client/packages/libbox_bridge/android/libs/*.aar
