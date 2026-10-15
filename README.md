@@ -13,6 +13,11 @@ proxy/VPN + access-control platform with four decoupled modules:
 Shared primitives live in `packages/types` (domain types, HMAC + Ed25519 helpers,
 REALITY keygen, strict env parsing).
 
+> **New here?** Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first —
+> it maps every module, the trust boundaries, the data model, which of the
+> OpenPay SDK's 32 resources we deliberately do *not* use, and an explicit list
+> of known gaps.
+
 ## Architecture
 
 ```

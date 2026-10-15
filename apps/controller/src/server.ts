@@ -6,7 +6,7 @@
 import { getDb } from './db/client.js';
 import { closeRedis } from './redis.js';
 import { buildApp } from './server-app.js';
-import { refreshNodeStatus } from './services/nodes.js';
+import { refreshNodeStatus, expireLapsedSubscriptions } from './services/nodes.js';
 import { expireStaleCheckouts } from './services/billing.js';
 
 /** How often background maintenance runs. */
@@ -27,6 +27,9 @@ function main(): void {
     );
     expireStaleCheckouts(db).catch((err) =>
       console.error('[controller] checkout expiry sweep failed:', err),
+    );
+    expireLapsedSubscriptions(db).catch((err) =>
+      console.error('[controller] subscription expiry sweep failed:', err),
     );
   }, SWEEP_INTERVAL_MS);
   sweep.unref();

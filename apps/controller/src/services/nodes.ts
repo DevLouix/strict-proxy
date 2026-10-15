@@ -2,9 +2,9 @@
  * Node registry, secure VPS enrollment, and per-user credential provisioning.
  */
 import { createHash, randomUUID, randomBytes } from 'node:crypto';
-import { and, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { nodeCredentials, nodeEnrollments, nodes } from '../db/schema.js';
+import { nodeCredentials, nodeEnrollments, nodes, subscriptions } from '../db/schema.js';
 import { generateRealityKeypair } from '@strict-proxy/types';
 
 /** Generates a one-time enrollment token and its database hash. */
@@ -183,6 +183,31 @@ export async function revokeAllUserCredentials(db: Db, userId: string): Promise<
     .set({ revoked: true, revokedAt: new Date() })
     .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.revoked, false)))
     .returning({ id: nodeCredentials.id });
+  return rows.length;
+}
+
+/**
+ * Flips subscriptions whose billing period has elapsed from `active` to
+ * `expired`.
+ *
+ * Access was already denied by the period-end check in the config route, but
+ * the row itself kept claiming `active`. That made every status-based surface
+ * lie: the admin overview counted lapsed customers as paying subscribers, and
+ * `/api/v1/me` reported an active plan for someone who no longer had one.
+ * Reconciling the row keeps status, the dashboard and access in agreement.
+ */
+export async function expireLapsedSubscriptions(db: Db): Promise<number> {
+  const rows = await db
+    .update(subscriptions)
+    .set({ status: 'expired', updatedAt: new Date() })
+    .where(
+      and(
+        eq(subscriptions.status, 'active'),
+        isNotNull(subscriptions.currentPeriodEnd),
+        lt(subscriptions.currentPeriodEnd, new Date()),
+      ),
+    )
+    .returning({ userId: subscriptions.userId });
   return rows.length;
 }
 
