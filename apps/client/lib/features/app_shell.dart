@@ -5,6 +5,7 @@ import 'auth/presentation/auth_controller.dart';
 import 'auth/presentation/login_screen.dart';
 import 'home/presentation/home_screen.dart';
 import 'servers/presentation/servers_screen.dart';
+import 'billing/presentation/account_screen.dart';
 
 class RootGate extends ConsumerWidget {
   const RootGate({super.key});
@@ -27,6 +28,8 @@ Route<dynamic>? onGenerateRoute(RouteSettings settings) {
   switch (settings.name) {
     case '/servers':
       return MaterialPageRoute(builder: (_) => const ServersScreen());
+    case '/account':
+      return MaterialPageRoute(builder: (_) => const AccountScreen());
     default:
       return null;
   }

@@ -2,7 +2,7 @@
  * Node registry, secure VPS enrollment, and per-user credential provisioning.
  */
 import { createHash, randomUUID, randomBytes } from 'node:crypto';
-import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { nodeCredentials, nodeEnrollments, nodes } from '../db/schema.js';
 import { generateRealityKeypair } from '@strict-proxy/types';
@@ -184,12 +184,6 @@ export async function revokeAllUserCredentials(db: Db, userId: string): Promise<
     .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.revoked, false)))
     .returning({ id: nodeCredentials.id });
   return rows.length;
-}
-
-/** Marks credentials revoked for a set of users. */
-export async function revokeCredentialsForUsers(db: Db, userIds: string[]): Promise<void> {
-  if (userIds.length === 0) return;
-  await db.update(nodeCredentials).set({ revoked: true, revokedAt: new Date() }).where(and(inArray(nodeCredentials.userId, userIds), eq(nodeCredentials.revoked, false)));
 }
 
 /** Nodes whose heartbeat is stale are flipped to offline. */

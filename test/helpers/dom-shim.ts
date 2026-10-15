@@ -1,0 +1,176 @@
+/**
+ * Minimal DOM shim for exercising the admin dashboard without a browser.
+ *
+ * Real browser testing would need a headless Chrome in CI. This shim is
+ * deliberately small: it supports only the operations the dashboard actually
+ * uses, which is enough to catch the failure modes that matter — typos,
+ * undefined function references, and handlers that throw when clicked.
+ */
+
+// ---------------------------------------------------------------------------
+// Shim
+// ---------------------------------------------------------------------------
+
+class FakeClassList {
+  constructor(el) {
+    this.el = el;
+  }
+  toggle(name, force) {
+    const set = this.el._classes ?? new Set();
+    if (force) set.add(name);
+    else set.delete(name);
+    this.el._classes = set;
+    this.el.className = [...set].join(' ');
+  }
+  add(name) {
+    this.toggle(name, true);
+  }
+  remove(name) {
+    this.toggle(name, false);
+  }
+}
+
+export class FakeElement {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.attributes = {};
+    this.dataset = {};
+    this.style = {};
+    this._listeners = new Map();
+    this.classList = new FakeClassList(this);
+    this.className = '';
+    this.value = '';
+    this.textContent = '';
+    this.disabled = false;
+  }
+  setAttribute(k, v) {
+    this.attributes[k] = String(v);
+  }
+  getAttribute(k) {
+    return this.attributes[k];
+  }
+  addEventListener(type, fn) {
+    this._listeners.set(type, fn);
+  }
+  dispatch(type, ev = {}) {
+    const fn = this._listeners.get(type);
+    return fn ? fn({ preventDefault() {}, target: this, ...ev }) : undefined;
+  }
+  append(...nodes) {
+    for (const n of nodes) this.children.push(n);
+  }
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+  remove() {}
+  focus() {}
+  showModal() {
+    this.open = true;
+  }
+  close() {
+    this.open = false;
+    this.dispatch('close');
+  }
+  querySelector() {
+    return null;
+  }
+  /** Concatenated text of this subtree. */
+  text() {
+    let out = this.textContent ?? '';
+    for (const c of this.children) out += c instanceof FakeText ? c.data : c instanceof FakeElement ? c.text() : '';
+    return out;
+  }
+  /** Every element in this subtree, depth-first. */
+  *walk() {
+    for (const c of this.children) {
+      if (c instanceof FakeElement) {
+        yield c;
+        yield* c.walk();
+      }
+    }
+  }
+}
+
+class FakeText {
+  constructor(data) {
+    this.data = String(data);
+  }
+}
+
+/** Installs the shim onto globalThis. Call before importing the dashboard. */
+export function installDomShim() {
+  const toasts = new FakeElement('div');
+  globalThis.Node = FakeElement;
+  globalThis.document = {
+    createElement: (tag) => new FakeElement(tag),
+    createTextNode: (t) => new FakeText(t),
+    getElementById: (id) => (id === 'toasts' ? toasts : null),
+    // The dashboard only uses this to probe for an optional element; reporting
+    // "not found" is the right answer for the selectors it passes.
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    body: new FakeElement('body'),
+  };
+  globalThis.window = { addEventListener: () => {} };
+  globalThis.location = { hash: '' };
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { clipboard: { writeText: async () => {} } },
+    configurable: true,
+  });
+  globalThis.sessionStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  return { toasts };
+}
+
+/** Stub API returning representative admin payloads. */
+export function stubApi() {
+  const data = {
+    overview: { users: 2, activeSubscriptions: 1, onlineNodes: 1, activeCredentials: 3 },
+    billing: { checkouts: { total: 3, paid: 1, open: 1, expired: 1 }, revenue: { grossMinor: 750000, currency: 'NGN' }, gateway: 'openpay' },
+    me: { user: { email: 'admin@x.test', role: 'admin' } },
+    users: {
+      users: [
+        { id: 'u1', email: 'a@x.test', role: 'user', tier: 'pro', subscriptionStatus: 'active', disabledAt: null, createdAt: '2026-01-01T00:00:00Z', currentPeriodEnd: '2026-12-01T00:00:00Z' },
+        { id: 'u2', email: 'b@x.test', role: 'user', tier: 'free', subscriptionStatus: 'revoked', disabledAt: '2026-02-01T00:00:00Z', createdAt: '2026-01-02T00:00:00Z', currentPeriodEnd: null },
+      ],
+    },
+    nodes: {
+      nodes: [{ id: 'n1', hostname: 'fra-1', region: 'eu-central', label: 'Frankfurt 1', publicIp: '203.0.113.1', status: 'online', loadScore: 12, lastHeartbeatAt: new Date().toISOString(), engineVersion: '1.13.21' }],
+    },
+    enrollments: {
+      enrollments: [{ id: 'e1', region: 'eu-west', label: null, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), usedAt: null, createdAt: '2026-01-01T00:00:00Z' }],
+    },
+    events: {
+      events: [{ id: 'evt_1', type: 'checkout.completed', applied: true, reason: null, receivedAt: '2026-01-01T00:00:00Z' }],
+    },
+  };
+
+  return {
+    calls: [],
+    async get(path) {
+      this.calls.push(['GET', path]);
+      if (path.startsWith('/api/v1/me')) return data.me;
+      if (path.startsWith('/api/v1/admin/overview')) return data.overview;
+      if (path.startsWith('/api/v1/admin/billing/summary')) return data.billing;
+      if (path.startsWith('/api/v1/admin/users')) return data.users;
+      if (path.startsWith('/api/v1/admin/nodes')) return data.nodes;
+      if (path.startsWith('/api/v1/admin/node-enrollments')) return data.enrollments;
+      if (path.startsWith('/api/v1/admin/payments/events')) return data.events;
+      throw new Error(`unstubbed GET ${path}`);
+    },
+    async post(path, body) {
+      this.calls.push(['POST', path, body]);
+      return { token: 'tok', reference: 'ref_1', checkoutUrl: 'https://example.test/pay' };
+    },
+    async patch(path, body) {
+      this.calls.push(['PATCH', path, body]);
+      return { ok: true };
+    },
+    async del(path) {
+      this.calls.push(['DELETE', path]);
+      return { ok: true };
+    },
+  };
+}

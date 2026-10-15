@@ -11,14 +11,16 @@
  */
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { paymentEvents, subscriptions, users } from '../db/schema.js';
+import { billingCheckouts, paymentEvents, subscriptions, users } from '../db/schema.js';
 import { revokeAllRefreshTokens } from './auth.js';
 import { revokeAllUserCredentials } from './nodes.js';
 import { setNx } from '../redis.js';
 import type { Redis } from 'ioredis';
 import type { ControllerConfig } from '../env.js';
+import { rateLimit } from './rate-limit.js';
+import { findCheckoutForEvent, candidateReferences } from './checkout-resolution.js';
 import { tierDefinition, nextPeriodEnd, isKnownTier } from './tiers.js';
 import type { PaymentEvent, PaymentEventResult, PaymentEventType, SubscriptionTier } from '@strict-proxy/types';
 
@@ -92,8 +94,33 @@ export class PlaceholderPaymentAdapter implements PaymentGatewayAdapter {
 // Event application (idempotent, stateful)
 // ---------------------------------------------------------------------------
 
-/** Finds a user by provider customer or subscription id; null when unmapped. */
-async function findUserIdByExternalRefs(db: Db, customerId: string | null, subscriptionId: string | null): Promise<string | null> {
+/**
+ * Finds the user a payment event concerns.
+ *
+ * Resolution order, most to least authoritative:
+ *   1. `userId` carried in provider metadata (we stamp it on every checkout).
+ *   2. A checkout row we opened whose reference matches the event — this is
+ *      the durable link and survives providers that drop metadata.
+ *   3. The subscription's stored provider customer/subscription id.
+ *   4. An email that happens to match the customer reference.
+ *
+ * Every branch is a lookup against data we wrote; an event can never name an
+ * arbitrary user because the id is matched, never trusted as a role claim.
+ */
+async function findUserIdByExternalRefs(
+  db: Db,
+  event: PaymentEvent,
+): Promise<string | null> {
+  if (event.userId) {
+    const [byMeta] = await db.select({ id: users.id }).from(users).where(eq(users.id, event.userId)).limit(1);
+    if (byMeta) return byMeta.id;
+  }
+
+  const byCheckout = await findCheckoutForEvent(db, event);
+  if (byCheckout) return byCheckout.userId;
+
+  const customerId = event.providerCustomerId;
+  const subscriptionId = event.providerSubscriptionId;
   if (customerId) {
     const [row] = await db
       .select({ userId: subscriptions.userId })
@@ -145,7 +172,7 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
     return { applied: false, reason: 'duplicate_event' };
   }
 
-  const userId = await findUserIdByExternalRefs(db, event.providerCustomerId, event.providerSubscriptionId);
+  const userId = await findUserIdByExternalRefs(db, event);
   if (!userId) {
     await markPaymentEvent(db, event.id, false, 'unknown_customer');
     return { applied: false, reason: 'unknown_customer' };
@@ -156,26 +183,32 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
   switch (event.type) {
     case 'checkout.completed': {
       // -> Grants/extends the user's subscription tier.
-      if (!event.tier || !isKnownTier(event.tier)) {
+      // Resolve the tier BEFORE settling the checkout: the ledger lookup only
+      // matches open rows, so marking it paid first would hide the very row we
+      // need to read the tier from.
+      const tier = event.tier ?? (await tierForEvent(db, event));
+      if (!tier || !isKnownTier(tier)) {
         await markPaymentEvent(db, event.id, false, 'unknown_event_type');
         return { applied: false, reason: 'unknown_event_type' };
       }
+      // Settle the ledger so a replay cannot re-grant later, and so the admin
+      // audit trail reflects what was actually paid for.
+      await markCheckoutPaid(db, event);
       const parsedPeriodEnd = event.currentPeriodEnd ? new Date(event.currentPeriodEnd) : nextPeriodEnd();
       const periodEnd = Number.isNaN(parsedPeriodEnd.getTime()) ? nextPeriodEnd() : parsedPeriodEnd;
       await db
         .update(subscriptions)
         .set({
-          tier: event.tier,
+          tier,
           status: 'active',
           currentPeriodEnd: periodEnd,
-          provider: 'placeholder',
           providerCustomerId: event.providerCustomerId,
           providerSubscriptionId: event.providerSubscriptionId,
           updatedAt: new Date(),
         })
         .where(eq(subscriptions.userId, userId));
       await markPaymentEvent(db, event.id, true, null);
-      return { applied: true, userId, tier: event.tier, tierExpiresAt: periodEnd.toISOString() };
+      return { applied: true, userId, tier, tierExpiresAt: periodEnd.toISOString() };
     }
 
     case 'subscription.deleted':
@@ -197,6 +230,31 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
   }
 }
 
+/**
+ * Falls back to the tier recorded on the checkout row when the provider did
+ * not echo our metadata back on the event.
+ */
+async function tierForEvent(db: Db, event: PaymentEvent): Promise<SubscriptionTier | null> {
+  const checkout = await findCheckoutForEvent(db, event);
+  if (!checkout) return null;
+  return isKnownTier(checkout.tier) ? (checkout.tier as SubscriptionTier) : null;
+}
+
+/** Marks any matching checkout row as paid. Idempotent. */
+async function markCheckoutPaid(db: Db, event: PaymentEvent): Promise<void> {
+  const candidates = candidateReferences(event);
+  if (candidates.length === 0) return;
+  await db
+    .update(billingCheckouts)
+    .set({ status: 'paid', paidAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        or(inArray(billingCheckouts.reference, candidates), inArray(billingCheckouts.providerReference, candidates)),
+        isNull(billingCheckouts.paidAt),
+      ),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -206,24 +264,32 @@ export function createPaymentWebhookRouter(params: { db: Db; redis: Redis; cfg: 
 
   // Raw body is required for signature verification; express.json with
   // `verify` is wired in server.ts before this router is mounted.
-  router.post('/webhooks/payments', async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      if (!params.adapter.verifyWebhook(req, params.cfg)) {
-        res.status(401).json({ error: 'invalid webhook signature', code: 'WEBHOOK_UNVERIFIED' });
-        return;
+  router.post(
+    '/webhooks/payments',
+    rateLimit(params.cfg, {
+      bucket: 'webhooks.payments',
+      maxAttempts: params.cfg.rateLimitMaxAttempts,
+      windowSeconds: params.cfg.rateLimitWindowSeconds,
+    }),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        if (!params.adapter.verifyWebhook(req, params.cfg)) {
+          res.status(401).json({ error: 'invalid webhook signature', code: 'WEBHOOK_UNVERIFIED' });
+          return;
+        }
+        const event = params.adapter.parseEvent(req);
+        if (!event) {
+          // Not an event we care about; ACK so the provider stops retrying.
+          res.status(200).json({ received: true, ignored: true });
+          return;
+        }
+        const result = await applyPaymentEvent(params.db, params.redis, event);
+        res.status(200).json({ received: true, ...result });
+      } catch (err) {
+        next(err);
       }
-      const event = params.adapter.parseEvent(req);
-      if (!event) {
-        // Not an event we care about; ACK so the provider stops retrying.
-        res.status(200).json({ received: true, ignored: true });
-        return;
-      }
-      const result = await applyPaymentEvent(params.db, params.redis, event);
-      res.status(200).json({ received: true, ...result });
-    } catch (err) {
-      next(err);
-    }
-  });
+    },
+  );
 
   return router;
 }

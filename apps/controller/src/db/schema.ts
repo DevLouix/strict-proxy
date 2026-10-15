@@ -5,7 +5,12 @@
  * - Users never touch nodes directly; access is mediated by `node_credentials`
  *   rows (one VLESS UUID + REALITY short-id per user per node).
  * - `payment_events` is the idempotency ledger for gateway webhooks.
- * - `signing_keys` supports Ed25519 key rotation for public artifacts.
+ * - The active Ed25519 signing key lives in the environment
+ *   (`SIGNING_PRIVATE_KEY_PEM` + `SIGNING_KEY_ID`); public artifacts carry the
+ *   key id so consumers can verify during a rotation. There is deliberately no
+ *   signing-keys table: a database-stored private half that the signing path
+ *   never reads can silently diverge from the key consumers were configured
+ *   with.
  */
 import { pgTable, uuid, text, timestamp, integer, boolean, jsonb, index, uniqueIndex, bigint } from 'drizzle-orm/pg-core';
 
@@ -76,6 +81,45 @@ export const subscriptions = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('subscriptions_user_uq').on(t.userId), index('subscriptions_provider_customer_idx').on(t.providerCustomerId)],
+);
+
+/**
+ * Hosted checkouts the controller opened with the payment provider.
+ *
+ * This is the durable link between a provider event and a local user: it
+ * survives providers that drop the metadata we attach, and it records what was
+ * actually offered so the audit trail does not depend on provider retention.
+ * Entitlement is granted by the verified webhook, never by this row.
+ */
+export const billingCheckouts = pgTable(
+  'billing_checkouts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Our idempotent handle, stamped into provider metadata and echoed back. */
+    reference: text('reference').notNull(),
+    /** The provider-assigned reference for the session, when returned. */
+    providerReference: text('provider_reference'),
+    /** Provider-side checkout session id. */
+    sessionId: text('session_id'),
+    tier: text('tier').notNull(),
+    amountMinor: integer('amount_minor').notNull(),
+    currency: text('currency').notNull(),
+    /** 'open' | 'paid' | 'expired' | 'failed' */
+    status: text('status').notNull().default('open'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('billing_checkouts_reference_uq').on(t.reference),
+    index('billing_checkouts_provider_ref_idx').on(t.providerReference),
+    index('billing_checkouts_user_idx').on(t.userId),
+    index('billing_checkouts_status_idx').on(t.status),
+  ],
 );
 
 export const paymentEvents = pgTable('payment_events', {
@@ -157,15 +201,6 @@ export const nodeCredentials = pgTable(
   },
   (t) => [uniqueIndex('node_credentials_user_node_uq').on(t.userId, t.nodeId), uniqueIndex('node_credentials_uuid_uq').on(t.uuid)],
 );
-
-export const signingKeys = pgTable('signing_keys', {
-  keyId: text('key_id').primaryKey(),
-  publicKeyPem: text('public_key_pem').notNull(),
-  /** Only the active key's private half is stored; rotation inserts a new row. */
-  privateKeyPem: text('private_key_pem'),
-  active: boolean('active').notNull().default(false),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
 
 /** Interval-based bandwidth rollups reported by nodes (per credential). */
 export const usageRollups = pgTable(

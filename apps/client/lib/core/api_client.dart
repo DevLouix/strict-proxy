@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
+import 'billing_models.dart';
 import 'config.dart';
 import 'storage/token_store.dart';
 
@@ -113,6 +114,38 @@ class ControllerApi {
   /// Signed dynamic sing-box config bundle (per-node VLESS+REALITY).
   Future<Map<String, dynamic>> networkConfig() =>
       _send(() => _client.get(_uri('/api/v1/network/config'), headers: _headers()));
+
+  /// Purchasable tiers and their prices.
+  Future<BillingCatalog> billingCatalog() async {
+    final body = await _send(() => _client.get(_uri('/api/v1/billing/catalog'), headers: _headers()));
+    return BillingCatalog.fromJson(body);
+  }
+
+  /// Current subscription, limits and rolling-window bandwidth usage.
+  Future<SubscriptionSummary> subscription() async {
+    final body = await _send(() => _client.get(_uri('/api/v1/billing/subscription'), headers: _headers()));
+    return SubscriptionSummary.fromJson(body);
+  }
+
+  /// Opens a hosted checkout for [tier] and returns the payment session.
+  Future<CheckoutSession> createCheckout(String tier, {String? successUrl, String? cancelUrl}) async {
+    final body = await _send(() => _client.post(
+          _uri('/api/v1/billing/checkout'),
+          headers: _headers(),
+          body: jsonEncode({
+            'tier': tier,
+            if (successUrl != null) 'successUrl': successUrl,
+            if (cancelUrl != null) 'cancelUrl': cancelUrl,
+          }),
+        ));
+    return CheckoutSession.fromJson(body);
+  }
+
+  /// Per-node bandwidth consumption for the signed-in user.
+  Future<UsageReport> usage() async {
+    final body = await _send(() => _client.get(_uri('/api/v1/billing/usage'), headers: _headers()));
+    return UsageReport.fromJson(body);
+  }
 
   /// Attempts a token refresh; true when a fresh access token is available.
   Future<bool> tryRefresh() async {

@@ -226,6 +226,13 @@ export interface PaymentEvent {
   providerCustomerId: string | null;
   /** Provider's subscription reference, if applicable. */
   providerSubscriptionId: string | null;
+  /**
+   * Hint identifying the local user this event concerns, when the provider
+   * echoed it back (we stamp `metadata.user_id` on every checkout we open).
+   * Resolution still falls back to provider references and the checkout
+   * ledger, so this is an optimisation rather than a trust boundary.
+   */
+  userId?: string | null;
   /** Tier to grant on checkout completion. */
   tier: SubscriptionTier | null;
   /** Subscription period end (ISO) when extending access. */
@@ -237,10 +244,30 @@ export interface PaymentEvent {
 /** Result of applying a payment event to a user's subscription. */
 export interface PaymentEventResult {
   applied: boolean;
-  reason?: 'unknown_customer' | 'duplicate_event' | 'unknown_event_type' | 'already_active';
+  reason?: 'unknown_customer' | 'duplicate_event' | 'unknown_event_type' | 'already_active' | 'free_tier_not_purchasable';
   userId?: string;
   tier?: SubscriptionTier;
   tierExpiresAt?: string | null;
+}
+
+/** Minor-unit amounts are integers (kobo for NGN, cents for USD). */
+export interface TierPrice {
+  /** Charge amount in the currency's minor unit. */
+  amountMinor: number;
+  /** ISO 4217 code. */
+  currency: string;
+  /** Human label shown on the checkout. */
+  label: string;
+}
+
+/** A checkout the controller opened with the provider, awaiting settlement. */
+export interface BillingCheckoutPublic {
+  reference: string;
+  checkoutUrl: string;
+  tier: SubscriptionTier;
+  amountMinor: number;
+  currency: string;
+  expiresAt: string;
 }
 
 // ---------------------------------------------------------------------------

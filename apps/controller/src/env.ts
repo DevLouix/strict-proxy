@@ -27,6 +27,28 @@ export interface ControllerConfig {
   trustProxyHops: number;
   enableHsts: boolean;
   hstsMaxAgeSeconds: number;
+  /** Requests allowed per IP per window on the auth + webhook surfaces. */
+  rateLimitMaxAttempts: number;
+  rateLimitWindowSeconds: number;
+
+  // -- OpenPay gateway ------------------------------------------------------
+  /** OpenPay API key. Empty means the deployment runs without a live gateway. */
+  openpayApiKey: string;
+  openpayBaseUrl: string;
+  /** Shared secret OpenPay signs outbound webhooks with. */
+  openpayWebhookSecret: string;
+  /** Header carrying the OpenPay signature. */
+  openpaySignatureHeader: string;
+  /** Rejects replayed or clock-skewed webhook signatures beyond this window. */
+  openpayTimestampToleranceSeconds: number;
+  /** Shown on OpenPay-hosted receipts and emails. */
+  openpayPlatformName: string;
+
+  // -- Billing catalog ------------------------------------------------------
+  /** ISO 4217 code for checkout sessions. */
+  billingCurrency: string;
+  billingStandardAmountMinor: number;
+  billingProAmountMinor: number;
 }
 
 export function loadConfig(): ControllerConfig {
@@ -48,5 +70,18 @@ export function loadConfig(): ControllerConfig {
     trustProxyHops: optionalInt('TRUST_PROXY_HOPS', 1),
     enableHsts: optionalString('ENABLE_HSTS', 'false').toLowerCase() === 'true',
     hstsMaxAgeSeconds: optionalInt('HSTS_MAX_AGE_SECONDS', 31536000),
+    rateLimitMaxAttempts: optionalInt('RATE_LIMIT_MAX_ATTEMPTS', 10),
+    rateLimitWindowSeconds: optionalInt('RATE_LIMIT_WINDOW_SECONDS', 60),
+
+    openpayApiKey: optionalString('OPENPAY_API_KEY', ''),
+    openpayBaseUrl: optionalString('OPENPAY_BASE_URL', 'https://api.openpay.example.com'),
+    openpayWebhookSecret: optionalString('OPENPAY_WEBHOOK_SECRET', ''),
+    openpaySignatureHeader: optionalString('OPENPAY_SIGNATURE_HEADER', 'x-openpay-signature'),
+    openpayTimestampToleranceSeconds: optionalInt('OPENPAY_TIMESTAMP_TOLERANCE_SECONDS', 300),
+    openpayPlatformName: optionalString('OPENPAY_PLATFORM_NAME', 'StrictProxy'),
+
+    billingCurrency: optionalString('BILLING_CURRENCY', 'NGN'),
+    billingStandardAmountMinor: optionalInt('STANDARD_TIER_AMOUNT_MINOR', 250_000),
+    billingProAmountMinor: optionalInt('PRO_TIER_AMOUNT_MINOR', 750_000),
   };
 }

@@ -7,8 +7,11 @@ import { getDb } from './db/client.js';
 import { getRedis } from './redis.js';
 import { loadConfig, type ControllerConfig } from './env.js';
 import { buildRouter } from './routes.js';
+import { buildBillingRouter } from './routes/billing.js';
 import { createPaymentWebhookRouter, PlaceholderPaymentAdapter, type PaymentGatewayAdapter } from './services/payments.js';
+import { createOpenPayAdapter } from './services/openpay.js';
 import { errorHandler } from './middleware.js';
+import { mountAdminDashboard } from './admin-ui.js';
 
 export interface AppContext {
   app: Express;
@@ -66,10 +69,23 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
   });
 
   // Payment webhooks FIRST (need raw body, no auth middleware).
-  const webhookRouter = createPaymentWebhookRouter({ db, redis, cfg, adapter: options.paymentAdapter ?? new PlaceholderPaymentAdapter() });
+  // OpenPay is preferred when configured; the placeholder adapter is a
+  // development-only fallback that must not be mistaken for a live gateway.
+  const adapter: PaymentGatewayAdapter =
+    options.paymentAdapter ?? createOpenPayAdapter(cfg) ?? new PlaceholderPaymentAdapter();
+  const webhookRouter = createPaymentWebhookRouter({ db, redis, cfg, adapter });
   app.use(webhookRouter);
 
-  // Main API.
+  // Main API. The billing router must be mounted BEFORE the main router: the
+// main router ends with a catch-all JSON 404, which would otherwise swallow
+// every /api/v1/billing/* route.
+  app.use(buildBillingRouter({ db, cfg, redis }));
+
+  // Admin dashboard (static bundle). Must be mounted BEFORE the main router:
+  // that router ends with a catch-all JSON 404 which would otherwise swallow
+  // every /admin request.
+  mountAdminDashboard(app);
+
   app.use(buildRouter({ db, cfg, redis }));
   app.use(errorHandler);
 

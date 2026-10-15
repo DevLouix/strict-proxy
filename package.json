@@ -14,6 +14,9 @@
   "scripts": {
     "build": "npm run build --if-present --workspaces",
     "typecheck": "npm run typecheck --if-present --workspaces",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "node --import tsx --test test/unit/*.test.ts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 test/integration/*.test.ts",
     "dev:controller": "npm run dev -w apps/controller",
     "dev:agent": "npm run dev -w apps/node-agent",
     "db:push": "npm run db:push -w apps/controller",
@@ -22,8 +25,13 @@
     "docker:build": "docker compose --env-file .env.docker -f docker-compose.production.yml build controller node-agent",
     "docker:up": "docker compose --env-file .env.docker -f docker-compose.production.yml up -d",
     "docker:down": "docker compose --env-file .env.docker -f docker-compose.production.yml down",
-    "ci:server": "npm ci --ignore-scripts && npm run typecheck && git diff --check",
+    "ci:server": "npm ci --ignore-scripts && npm run typecheck && npm test && git diff --check",
     "server:prereqs": "scripts/check-server-prereqs.sh",
     "server:smoke": "scripts/smoke-server.sh"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^12.2.1",
+    "@testcontainers/redis": "^12.2.1",
+    "testcontainers": "^12.2.1"
   }
 }

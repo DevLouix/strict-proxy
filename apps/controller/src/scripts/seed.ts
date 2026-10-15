@@ -1,13 +1,17 @@
 /**
- * Development seed: admin user, Ed25519 signing key (printed for .env),
- * a sample REALITY node and its agent HMAC secret derivation note.
+ * Development seed: admin user, a sample REALITY node, and a reminder of the
+ * Ed25519 public key derived from the configured signing key.
+ *
+ * The seed never generates a signing key. The active key is owned by
+ * `SIGNING_PRIVATE_KEY_PEM` in the environment (see `generate-env.ts`); minting
+ * a second keypair here would print a key that does not match the one the
+ * Gatekeeper and clients were configured with.
  */
 import bcrypt from 'bcryptjs';
-import { eq } from 'drizzle-orm';
-import { generateEd25519Keypair, generateRealityKeypair } from '@strict-proxy/types';
-import { randomBytes } from 'node:crypto';
+import { generateRealityKeypair } from '@strict-proxy/types';
+import { createPublicKey, randomBytes } from 'node:crypto';
 import { getDb } from '../db/client.js';
-import { nodes, signingKeys, subscriptions, users } from '../db/schema.js';
+import { nodes, subscriptions, users } from '../db/schema.js';
 import { loadConfig } from '../env.js';
 import { registerNode } from '../services/nodes.js';
 
@@ -16,15 +20,15 @@ async function main(): Promise<void> {
   const db = getDb(cfg.databaseUrl);
 
   // --- signing key -----------------------------------------------------------
-  const existingKey = await db.select().from(signingKeys).where(eq(signingKeys.keyId, cfg.signingKeyId)).limit(1);
-  if (existingKey.length === 0) {
-    const kp = generateEd25519Keypair();
-    await db.insert(signingKeys).values({ keyId: cfg.signingKeyId, publicKeyPem: kp.publicKeyPem, privateKeyPem: kp.privateKeyPem, active: true });
-    console.log('----------------------------------------------------------------');
-    console.log('NEW ED25519 SIGNING KEY generated. Put the private key in .env:');
-    console.log(`SIGNING_PRIVATE_KEY_PEM="${kp.privateKeyPem.replace(/\n/g, '\\n')}"`);
-    console.log('----------------------------------------------------------------');
-  }
+  // Report the public half of the key the controller will actually sign with.
+  const publicKeyPem = createPublicKey(cfg.signingPrivateKeyPem.replace(/\\n/g, '\n'))
+    .export({ type: 'spki', format: 'pem' })
+    .toString();
+  console.log('----------------------------------------------------------------');
+  console.log(`Ed25519 signing key id: ${cfg.signingKeyId}`);
+  console.log('PUBLIC key to share with the Gatekeeper SDK / client verification:');
+  console.log(publicKeyPem);
+  console.log('----------------------------------------------------------------');
 
   // --- admin user ------------------------------------------------------------
   const adminEmail = process.env.SEED_ADMIN_EMAIL ?? 'admin@strict.local';

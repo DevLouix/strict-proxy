@@ -17,6 +17,12 @@ class HomeScreen extends ConsumerWidget {
         title: const Text('StrictProxy'),
         actions: [
           IconButton(
+            tooltip: 'Account',
+            icon: const Icon(Icons.person_outline),
+            onPressed: () => Navigator.of(context).pushNamed('/account'),
+          ),
+          IconButton(
+            tooltip: 'Sign out',
             icon: const Icon(Icons.logout),
             onPressed: () => ref.read(authStateProvider.notifier).logout(),
           ),

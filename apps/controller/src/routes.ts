@@ -25,6 +25,8 @@ import {
 import { tierDefinition, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
 import { computeLoadScore, createNodeEnrollmentToken, enrollNode, registerNode, revokeAllUserCredentials } from './services/nodes.js';
+import { rateLimit } from './services/rate-limit.js';
+import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
 import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
 
 interface Ctx {
@@ -106,8 +108,15 @@ export function buildRouter(ctx: Ctx): Router {
   }));
 
   // -- auth -----------------------------------------------------------------
+  // The whole auth surface is unauthenticated, so each endpoint gets its own
+  // per-IP budget: an attacker cannot spend the login budget to unlock
+  // unlimited registration, or vice versa.
+  const limit = (bucket: string) =>
+    rateLimit(ctx.cfg, { bucket, maxAttempts: ctx.cfg.rateLimitMaxAttempts, windowSeconds: ctx.cfg.rateLimitWindowSeconds });
+
   router.post(
     '/api/v1/auth/register',
+    limit('auth.register'),
     asyncHandler(async (req, res) => {
       const { email, password } = req.body as { email?: string; password?: string };
       if (!email || !password || password.length < 10) {
@@ -132,6 +141,7 @@ export function buildRouter(ctx: Ctx): Router {
 
   router.post(
     '/api/v1/auth/login',
+    limit('auth.login'),
     asyncHandler(async (req, res) => {
       const { email, password, deviceId, deviceName } = req.body as { email?: string; password?: string; deviceId?: string; deviceName?: string };
       if (!email || !password || !deviceId) {
@@ -167,6 +177,7 @@ export function buildRouter(ctx: Ctx): Router {
 
   router.post(
     '/api/v1/auth/refresh',
+    limit('auth.refresh'),
     asyncHandler(async (req, res) => {
       const { refreshToken, deviceId } = req.body as { refreshToken?: string; deviceId?: string };
       if (!refreshToken || !deviceId) {
@@ -345,7 +356,7 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ ok: true });
   }));
 
-  router.post('/api/v1/nodes/enroll', asyncHandler(async (req, res) => {
+  router.post('/api/v1/nodes/enroll', limit('nodes.enroll'), asyncHandler(async (req, res) => {
     const body = req.body as { token?: string; hostname?: string; label?: string; publicIp?: string; tunnelPort?: number; realityServerName?: string; realityShortIds?: string[]; engineVersion?: string };
     if (!body.token || !body.hostname || !body.publicIp || !body.realityServerName || !body.realityShortIds?.length) {
       res.status(400).json({ error: 'token, hostname, publicIp, realityServerName and realityShortIds are required', code: 'VALIDATION' });
@@ -442,6 +453,20 @@ export function buildRouter(ctx: Ctx): Router {
       if (sub.status !== 'active' || (sub.currentPeriodEnd && sub.currentPeriodEnd < new Date())) {
         res.status(402).json({ error: 'active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
         return;
+      }
+      // Enforce the tier's bandwidth quota before handing out working credentials.
+      const quotaBytes = tierDefinition(sub.tier).bandwidthQuotaBytes;
+      if (quotaBytes !== null) {
+        const usedBytes = await userBandwidthUsageInWindow(ctx.db, claims.sub, quotaWindowStart());
+        if (usedBytes >= quotaBytes) {
+          res.status(402).json({
+            error: 'bandwidth quota exhausted for the current period',
+            code: 'BANDWIDTH_QUOTA_EXCEEDED',
+            quotaBytes,
+            usedBytes,
+          });
+          return;
+        }
       }
       const bundle = await buildSignedConfigBundle(ctx.db, ctx.cfg, { userId: claims.sub, tier: sub.tier });
       res.json(bundle);

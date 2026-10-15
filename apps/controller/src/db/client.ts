@@ -18,5 +18,14 @@ export function getDb(databaseUrl: string) {
   return drizzle(getPool(databaseUrl), { schema });
 }
 
+/** Closes the shared pool so the process can exit (tests, graceful shutdown). */
+export async function closePool(): Promise<void> {
+  if (pool) {
+    const closing = pool;
+    pool = null;
+    await closing.end().catch(() => undefined);
+  }
+}
+
 export type Db = ReturnType<typeof getDb>;
 export { schema };

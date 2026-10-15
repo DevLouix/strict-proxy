@@ -37,6 +37,12 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: git diff --check
+      - name: Run unit tests
+        run: npm run test:unit
+      - name: Run integration tests
+        # Needs a working Docker daemon: the integration suite boots ephemeral
+        # Postgres + Redis containers with testcontainers.
+        run: npm run test:integration
       - name: Validate server prerequisite script
         run: bash -n scripts/check-server-prereqs.sh scripts/smoke-server.sh
       - name: Validate production Compose file

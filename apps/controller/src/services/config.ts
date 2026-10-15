@@ -17,9 +17,28 @@ import { tierDefinition } from './tiers.js';
 const CONFIG_TTL_SECONDS = 6 * 60 * 60; // clients re-fetch every 6h at most
 
 /**
+ * Ranks candidate nodes for assignment.
+ *
+ * Preference order: healthy nodes before degraded ones, then lowest reported
+ * load, then node id as a deterministic tie-break so two users fetching at the
+ * same time get a stable answer and a free-tier user limited to two nodes is
+ * not pinned to whichever two happened to sort first.
+ */
+export function rankNodesForAssignment<T extends { id: string; loadScore: number; status: string }>(candidates: T[]): T[] {
+  const statusRank = (status: string) => (status === 'online' ? 0 : 1);
+  return [...candidates].sort((a, b) => {
+    const byStatus = statusRank(a.status) - statusRank(b.status);
+    if (byStatus !== 0) return byStatus;
+    if (a.loadScore !== b.loadScore) return a.loadScore - b.loadScore;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/**
  * Builds and signs the full config bundle for a user.
- * Only nodes that are currently online (or degraded) are included; free tier
- * users are limited to two nodes.
+ * Only nodes that are currently online (or degraded) are included, ranked by
+ * health so the least loaded are assigned first; free tier users are limited
+ * to two nodes.
  */
 export async function buildSignedConfigBundle(
   db: Db,
@@ -28,12 +47,15 @@ export async function buildSignedConfigBundle(
 ): Promise<SignedConfigBundle> {
   // Provision per-node credentials for this user before rendering configs,
   // so a fresh user immediately gets working VLESS UUIDs on every node.
-  const activeNodes = await db.select({ id: nodes.id }).from(nodes).where(inArray(nodes.status, ['online', 'degraded']));
+  const activeNodes = await db
+    .select({ id: nodes.id, loadScore: nodes.loadScore, status: nodes.status })
+    .from(nodes)
+    .where(inArray(nodes.status, ['online', 'degraded']));
   if (activeNodes.length === 0) {
     throw new Error('no_nodes_available');
   }
   const maxNodes = Math.min(tierDefinition(params.tier).maxNodes, activeNodes.length);
-  const allowedNodeIds = activeNodes.slice(0, maxNodes).map((node) => node.id);
+  const allowedNodeIds = rankNodesForAssignment(activeNodes).slice(0, maxNodes).map((node) => node.id);
   for (const nodeId of allowedNodeIds) {
     await ensureUserCredential(db, params.userId, nodeId);
   }

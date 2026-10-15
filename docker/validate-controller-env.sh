@@ -34,4 +34,31 @@ if ! SIGNING_PRIVATE_KEY_PEM="$SIGNING_PRIVATE_KEY_PEM" node -e "require('node:c
   exit 1
 fi
 
+# Billing catalog amounts are minor units (kobo/cents) and must be positive
+# integers when set; a bad value would silently charge the wrong amount.
+# An unset value is fine — the controller applies its own default.
+for var in STANDARD_TIER_AMOUNT_MINOR PRO_TIER_AMOUNT_MINOR; do
+  eval "amount=\${$var:-}"
+  [ -z "$amount" ] && continue
+  case "$amount" in
+    *[!0-9]*) echo "$var must be a positive integer in minor units" >&2; exit 1 ;;
+  esac
+  if [ "$amount" -le 0 ]; then
+    echo "$var must be greater than zero" >&2
+    exit 1
+  fi
+done
+
+# The OpenPay gateway is optional, but configuring it half-way (a key without
+# its webhook secret, or vice versa) means signed webhooks can never be
+# verified — refuse to boot rather than silently drop every payment event.
+if [ -n "${OPENPAY_API_KEY:-}" ] && [ -z "${OPENPAY_WEBHOOK_SECRET:-}" ]; then
+  echo "OPENPAY_API_KEY is set but OPENPAY_WEBHOOK_SECRET is empty; webhooks could never be verified" >&2
+  exit 1
+fi
+if [ -n "${OPENPAY_WEBHOOK_SECRET:-}" ] && [ -z "${OPENPAY_API_KEY:-}" ]; then
+  echo "OPENPAY_WEBHOOK_SECRET is set but OPENPAY_API_KEY is empty; checkouts could never be opened" >&2
+  exit 1
+fi
+
 printf '%s\\n' '[controller] required environment validation passed'
