@@ -1,12 +1,16 @@
 /**
  * Central Controller entrypoint.
- * Boots the Express app with a periodic node-status sweep and graceful
+ * Boots the Express app with periodic maintenance sweeps and graceful
  * shutdown handling.
  */
 import { getDb } from './db/client.js';
 import { closeRedis } from './redis.js';
 import { buildApp } from './server-app.js';
 import { refreshNodeStatus } from './services/nodes.js';
+import { expireStaleCheckouts } from './services/billing.js';
+
+/** How often background maintenance runs. */
+const SWEEP_INTERVAL_MS = 30_000;
 
 function main(): void {
   const { app, cfg } = buildApp();
@@ -14,12 +18,17 @@ function main(): void {
     console.log(`[controller] listening on :${cfg.port}`);
   });
 
-  // Periodic sweep: flip stale nodes to offline.
+  // Periodic maintenance. The jobs are independent: one failing must not stop
+  // the others from running on the next tick.
+  const db = getDb(cfg.databaseUrl);
   const sweep = setInterval(() => {
-    refreshNodeStatus(getDb(cfg.databaseUrl), cfg.heartbeatTtlSeconds).catch((err) =>
+    refreshNodeStatus(db, cfg.heartbeatTtlSeconds).catch((err) =>
       console.error('[controller] node status sweep failed:', err),
     );
-  }, 30_000);
+    expireStaleCheckouts(db).catch((err) =>
+      console.error('[controller] checkout expiry sweep failed:', err),
+    );
+  }, SWEEP_INTERVAL_MS);
   sweep.unref();
 
   const shutdown = async (signal: string) => {

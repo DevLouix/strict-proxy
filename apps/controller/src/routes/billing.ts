@@ -3,12 +3,12 @@
  * creation, subscription state, and usage against the tier quota.
  */
 import { Router, type Request, type Response } from 'express';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
 import type { Redis } from 'ioredis';
 import type { SubscriptionTier } from '@strict-proxy/types';
-import { subscriptions, nodeCredentials } from '../db/schema.js';
+import { subscriptions, nodeCredentials, billingCheckouts, users } from '../db/schema.js';
 import { asyncHandler, requireJwt } from '../middleware.js';
 import { isKnownTier, tierDefinition, nextPeriodEnd } from '../services/tiers.js';
 import { BillingError, purchasableTiers, validateBillingConfig } from '../services/catalog.js';
@@ -137,6 +137,62 @@ export function buildBillingRouter(ctx: Ctx): Router {
 
       const total = rows.reduce((acc, r) => acc + Number(r.bytesUsed ?? 0), 0);
       res.json({ totalBytes: total, credentials: rows });
+    }),
+  );
+
+  /**
+   * Individual checkouts, newest first.
+   *
+   * This is the first thing anyone needs when a customer says they paid but
+   * still have no access: it shows what was offered, whether it settled, and
+   * both the provider reference and the user the checkout belongs to.
+   */
+  router.get(
+    '/api/v1/admin/billing/checkouts',
+    requireJwt(ctx.cfg, ctx.db),
+    asyncHandler(async (req: Request, res: Response) => {
+      if (req.auth?.role !== 'admin') {
+        res.status(403).json({ error: 'administrator access required', code: 'FORBIDDEN' });
+        return;
+      }
+      const limit = Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500);
+      const status = typeof req.query.status === 'string' && req.query.status.length > 0 ? req.query.status : null;
+
+      const base = ctx.db
+        .select({
+          reference: billingCheckouts.reference,
+          providerReference: billingCheckouts.providerReference,
+          tier: billingCheckouts.tier,
+          amountMinor: billingCheckouts.amountMinor,
+          currency: billingCheckouts.currency,
+          status: billingCheckouts.status,
+          expiresAt: billingCheckouts.expiresAt,
+          paidAt: billingCheckouts.paidAt,
+          createdAt: billingCheckouts.createdAt,
+          userId: billingCheckouts.userId,
+          email: users.email,
+        })
+        .from(billingCheckouts)
+        .innerJoin(users, eq(users.id, billingCheckouts.userId));
+
+      const rows = await (status ? base.where(eq(billingCheckouts.status, status)) : base)
+        .orderBy(desc(billingCheckouts.createdAt))
+        .limit(limit);
+
+      res.json({
+        checkouts: rows.map((r) => ({
+          reference: r.reference,
+          providerReference: r.providerReference,
+          tier: r.tier,
+          amountMinor: r.amountMinor,
+          currency: r.currency,
+          status: r.status,
+          expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
+          paidAt: r.paidAt ? r.paidAt.toISOString() : null,
+          createdAt: r.createdAt.toISOString(),
+          user: { id: r.userId, email: r.email },
+        })),
+      });
     }),
   );
 

@@ -19,7 +19,7 @@ export interface AppContext {
 }
 
 export interface BuildAppOptions {
-  /** Replace the placeholder with the real provider adapter when supplied. */
+  /** Override the selected gateway adapter (used by tests and custom integrations). */
   paymentAdapter?: PaymentGatewayAdapter;
 }
 

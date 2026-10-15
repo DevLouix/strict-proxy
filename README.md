@@ -184,6 +184,7 @@ that JWT and the admin role.
 | `PATCH /api/v1/admin/nodes/:nodeId` / `DELETE .../:nodeId` | Edit, drain, disable, or remove a node |
 | `GET /api/v1/admin/payments/events` | Audit verified payment events and outcomes |
 | `GET /api/v1/admin/billing/summary` | Revenue and checkout pipeline rollup |
+| `GET /api/v1/admin/billing/checkouts` | Individual checkouts with both references and the owning user |
 
 These APIs back the admin dashboard served at `/admin`, and remain usable
 directly by operational tooling.
@@ -279,6 +280,7 @@ webhook secret would mean every payment is silently dropped.
 | `POST /api/v1/billing/checkout` | Open a hosted checkout (rate limited) |
 | `GET /api/v1/billing/usage` | Per-node bandwidth consumption |
 | `GET /api/v1/admin/billing/summary` | Revenue + checkout pipeline (admin) |
+| `GET /api/v1/admin/billing/checkouts` | Per-checkout ledger for support (admin) |
 
 If `OPENPAY_API_KEY` and `OPENPAY_WEBHOOK_SECRET` are both unset the controller
 falls back to the placeholder HMAC adapter so local development still works;
@@ -342,7 +344,7 @@ existing admin REST API.
 | Users | Filter, promote/demote, disable/enable, edit tier + status + period |
 | Nodes | Fleet health, load, heartbeat, drain/resume, delete, enroll a node |
 | Enrollments | Issued tokens with live/used/expired state, revoke |
-| Payments | Verified webhook events, revenue, awaiting-payment count |
+| Payments | Checkout ledger (what was offered and whether it settled), verified webhook events, revenue |
 | Usage | Quota model, ledger state, fleet load |
 
 Design constraints:
@@ -569,6 +571,18 @@ smaller machines; override the images with `TEST_POSTGRES_IMAGE` and
 
 `.github/workflows/server-ci.yml` runs both suites on every pull request.
 
+### Checkout ledger
+
+Every checkout the controller opens is recorded in `billing_checkouts` with both
+our reference and the provider-assigned one. That row is what lets a webhook be
+resolved back to a user even when the provider drops the metadata we attached,
+and what an admin reads when a customer says they paid but still have no
+access: `GET /api/v1/admin/billing/checkouts` shows both references, the owning
+user, and whether it settled.
+
+Abandoned checkouts are reclaimed by a periodic sweep alongside the node-status
+sweep, so an abandoned session cannot sit `open` forever.
+
 ## Account & billing in the client
 
 The client exposes an **Account** screen (person icon on the home screen) that
@@ -580,6 +594,11 @@ shows the live server-side state rather than assuming a purchase succeeded:
   warning and a pointer to upgrade
 - the purchasable plans, cheapest first, with an Upgrade/Switch action
 - per-node usage breakdown
+
+The home screen also carries a plan strip showing the tier, remaining data, and
+any non-active status, so a limited connection can be explained without opening
+the account screen. It renders nothing until subscription data arrives, so
+nothing wrong is ever flashed on first paint.
 
 Upgrades open a hosted **OpenPay** checkout. Because entitlement is granted by a
 verified webhook, not by the redirect returning, the screen shows a snackbar

@@ -1,13 +1,17 @@
 /**
- * Payment gateway abstraction. The concrete provider (Stripe, Paddle, BTCPay,
- * etc.) is NOT wired yet — per project direction we implement the full
- * event-handling pipeline and leave provider calls as a placeholder adapter.
+ * Payment gateway abstraction.
+ *
+ * `OpenPayAdapter` (services/openpay.ts) is the production implementation;
+ * `PlaceholderPaymentAdapter` below is a development-only fallback used when no
+ * gateway is configured.
  *
  * Integration contract:
- *   1. Implement `PaymentGatewayAdapter` (see the TODO marker below).
- *   2. Mount `createPaymentWebhookRouter({ adapter })` in server.ts.
- * The controller never calls the provider's API directly; it consumes only
- * verified webhook events and applies them to subscription state.
+ *   1. Implement `PaymentGatewayAdapter` (verifyWebhook + parseEvent).
+ *   2. Pass it to `createPaymentWebhookRouter({ adapter })`, or configure
+ *      OpenPay so one is selected automatically.
+ *
+ * The controller never calls the provider's API to decide entitlement; it
+ * consumes only verified webhook events and applies them to subscription state.
  */
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -25,7 +29,7 @@ import { tierDefinition, nextPeriodEnd, isKnownTier } from './tiers.js';
 import type { PaymentEvent, PaymentEventResult, PaymentEventType, SubscriptionTier } from '@strict-proxy/types';
 
 // ---------------------------------------------------------------------------
-// Adapter interface — IMPLEMENT THIS when the real provider is chosen.
+// Adapter interface
 // ---------------------------------------------------------------------------
 
 export interface PaymentGatewayAdapter {

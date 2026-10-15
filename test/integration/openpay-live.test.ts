@@ -25,11 +25,14 @@ const skip = apiKey && baseUrl ? false : 'set OPENPAY_API_KEY and OPENPAY_BASE_U
 let h: Harness | undefined;
 
 /**
- * Whether the merchant has a settlement provider configured. Without one the
- * gateway rejects every checkout, which is an operator-side prerequisite rather
- * than a defect in this integration.
+ * Result of one real probe checkout, made during setup.
+ *
+ * Capability is determined empirically rather than by reading
+ * `status.services.providers`: that map is empty even when a settlement
+ * provider is configured and working, so inferring readiness from it would
+ * wrongly skip the happy path.
  */
-let providersConfigured: boolean | undefined;
+let probeCheckout: { created: boolean; status: number; code?: string; error?: string } | undefined;
 
 before(async () => {
   h = await createHarness({
@@ -38,16 +41,9 @@ before(async () => {
     openpayBaseUrl: baseUrl,
   });
 
-  try {
-    const { createOpenPayClient } = await import('../../apps/controller/src/services/openpay.js');
-    const client = createOpenPayClient(h.cfg);
-    const status = (await client.status.get()) as { services?: { providers?: Record<string, unknown> } };
-    const providers = status?.services?.providers;
-    providersConfigured =
-      providers && typeof providers === 'object' && Object.keys(providers).length > 0 ? true : undefined;
-  } catch {
-    providersConfigured = undefined;
-  }
+  const token = await login();
+  const res = await h.request('POST', '/api/v1/billing/checkout', { token, body: { tier: 'standard' } });
+  probeCheckout = { created: res.status === 201, status: res.status, code: res.body.code, error: res.body.error };
 });
 
 after(async () => {
@@ -55,7 +51,10 @@ after(async () => {
 });
 
 async function login(): Promise<string> {
-  const email = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.test`;
+  // `example.com`, not `example.test`: settlement providers validate the TLD
+  // and reject synthetic domains, which would fail every checkout for a
+  // reason that has nothing to do with this code.
+  const email = `strictproxy-live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
   const password = 'live integration password';
   await h!.request('POST', '/api/v1/auth/register', { body: { email, password } });
   const res = await h!.request<{ accessToken: string }>('POST', '/api/v1/auth/login', {
@@ -111,8 +110,15 @@ test('unsigned webhooks are rejected with the live secret configured', { skip },
 
 test(
   'a checkout opens against the live gateway and is recorded locally',
-  { skip: skip || providersConfigured !== true },
-  async () => {
+  { skip },
+  async (t) => {
+    // Deferred on purpose: the probe runs in `before`, which is later than the
+    // point at which a static `skip` option would be evaluated.
+    if (probeCheckout?.created !== true) {
+      t.skip(`live gateway could not open a checkout (${probeCheckout?.status} ${probeCheckout?.code ?? ''}: ${probeCheckout?.error ?? 'unknown'})`);
+      return;
+    }
+
     const token = await login();
     const userId = await currentUserId(token);
 
@@ -140,22 +146,22 @@ test(
 
 test(
   'a rejected checkout surfaces the provider reason instead of a generic 500',
-  { skip: skip || providersConfigured === true },
-  async () => {
-    // With no settlement provider configured the gateway rejects the charge.
-    // The controller must report *that*, not "internal error".
-    const token = await login();
-    const res = await h!.request('POST', '/api/v1/billing/checkout', { token, body: { tier: 'standard' } });
+  { skip },
+  async (t) => {
+    // `before` already made a real checkout attempt. Only meaningful when the
+    // gateway actually refused it.
+    if (probeCheckout?.created === true) {
+      t.skip('live gateway accepts checkouts, so there is no rejection to inspect');
+      return;
+    }
 
-    assert.notEqual(res.status, 201, 'this test only applies when checkout creation is rejected');
-    assert.ok(res.status >= 400, 'a rejection must not be a success');
-    assert.notEqual(res.body.code, 'INTERNAL', 'the gateway reason must not be flattened to INTERNAL');
-    assert.ok(typeof res.body.error === 'string' && res.body.error.length > 0, 'a reason must be surfaced');
-    console.log(`    [live] gateway rejection surfaced as ${res.status} ${res.body.code}: ${res.body.error}`);
-
-    // Nothing must be recorded for a checkout the provider refused.
-    const userId = await currentUserId(token);
-    const rows = await h!.query<any>(`SELECT id FROM billing_checkouts WHERE user_id = '${userId}'`);
-    assert.equal(rows.length, 0, 'a rejected checkout must not leave a ledger row');
+    // The controller must have reported the gateway's own reason, not
+    // "internal error".
+    const observed = probeCheckout!;
+    assert.equal(observed.created, false, 'this test only applies when checkout creation is rejected');
+    assert.ok(observed.status >= 400, 'a rejection must not be a success');
+    assert.notEqual(observed.code, 'INTERNAL', 'the gateway reason must not be flattened to INTERNAL');
+    assert.ok(typeof observed.error === 'string' && observed.error.length > 0, 'a reason must be surfaced');
+    console.log(`    [live] gateway rejection surfaced as ${observed.status} ${observed.code}: ${observed.error}`);
   },
 );

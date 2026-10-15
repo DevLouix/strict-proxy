@@ -74,7 +74,7 @@ export const subscriptions = pgTable(
     /** 'active' | 'expired' | 'revoked' */
     status: text('status').notNull().default('active'),
     currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
-    /** Payment provider discriminator for the adapter layer ('placeholder' today). */
+    /** Payment provider discriminator, set by the active adapter (e.g. 'openpay'). */
     provider: text('provider'),
     providerCustomerId: text('provider_customer_id'),
     providerSubscriptionId: text('provider_subscription_id'),

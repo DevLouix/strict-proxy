@@ -15,7 +15,7 @@ export interface ControllerConfig {
   /** Ed25519 private key (PEM, escaped newlines ok) used to sign public artifacts. */
   signingPrivateKeyPem: string;
   signingKeyId: string;
-  /** HMAC secret shared with the placeholder payment provider for webhook signing. */
+  /** HMAC secret for the development placeholder adapter's webhook signing. */
   paymentWebhookSecret: string;
   /** Heartbeat freshness window: nodes without a beat inside this are offline. */
   heartbeatTtlSeconds: number;

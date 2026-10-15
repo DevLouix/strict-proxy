@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../auth/presentation/auth_controller.dart';
+import '../../billing/application/billing_controller.dart';
+import 'plan_strip.dart';
 import '../application/connection_controller.dart';
 
 class HomeScreen extends ConsumerWidget {
@@ -11,6 +13,7 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionStateProvider);
     final auth = ref.watch(authStateProvider);
+    final billing = ref.watch(billingProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -52,6 +55,17 @@ class HomeScreen extends ConsumerWidget {
             FilledButton.tonal(
               onPressed: () => Navigator.of(context).pushNamed('/servers'),
               child: const Text('Choose server'),
+            ),
+            const SizedBox(height: 20),
+            PlanStrip(
+              subscription: billing.subscription,
+              onTap: () async {
+                await Navigator.of(context).pushNamed('/account');
+                // Tier and quota can change underneath us (a webhook, or a
+                // purchase completed while the app was backgrounded), so
+                // refresh on return rather than showing stale numbers.
+                await ref.read(billingProvider.notifier).load();
+              },
             ),
           ],
         ),

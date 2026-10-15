@@ -470,12 +470,14 @@ export async function paymentsView(api) {
   let filter = '';
 
   async function load() {
-    const [events, billing] = await Promise.all([
+    const [events, billing, checkouts] = await Promise.all([
       api.get('/api/v1/admin/payments/events?limit=200'),
       api.get('/api/v1/admin/billing/summary').catch(() => null),
+      api.get('/api/v1/admin/billing/checkouts?limit=100').catch(() => null),
     ]);
     const rows = (events.events ?? []).filter((e) =>
       !filter.trim() || `${e.id} ${e.type} ${e.reason ?? ''}`.toLowerCase().includes(filter.trim().toLowerCase()));
+    const checkoutRows = checkouts?.checkouts ?? [];
 
     mount(host,
       h('div', { class: 'page-head' },
@@ -508,6 +510,37 @@ export async function paymentsView(api) {
           value: filter,
           onInput: (e) => { filter = e.target.value; load(); },
         }),
+      ),
+      h('div', { class: 'panel' },
+        h('header', {},
+          h('h3', {}, 'Checkout ledger'),
+          h('span', { class: 'muted small' }, 'What was offered, and whether it settled'),
+        ),
+        h('div', { class: 'table-wrap' },
+          checkoutRows.length === 0
+            ? h('div', { class: 'empty' }, 'No checkouts have been opened yet.')
+            : h('table', {},
+              h('thead', {}, h('tr', {},
+                h('th', {}, 'Reference'),
+                h('th', {}, 'Customer'),
+                h('th', {}, 'Plan'),
+                h('th', {}, 'Amount'),
+                h('th', {}, 'Status'),
+                h('th', {}, 'Opened'),
+              )),
+              h('tbody', {}, ...checkoutRows.map((c) => h('tr', {},
+                h('td', {},
+                  h('div', { class: 'mono' }, c.reference),
+                  c.providerReference ? h('span', { class: 'muted small mono' }, c.providerReference) : null,
+                ),
+                h('td', { class: 'small' }, c.user?.email ?? '—'),
+                h('td', {}, badge(c.tier)),
+                h('td', { class: 'small' }, money(c.amountMinor, c.currency)),
+                h('td', {}, badge(c.status)),
+                h('td', { class: 'small muted' }, date(c.createdAt)),
+              ))),
+            ),
+        ),
       ),
       h('div', { class: 'panel' },
         h('div', { class: 'table-wrap' },
