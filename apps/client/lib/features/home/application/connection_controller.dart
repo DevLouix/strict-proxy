@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/api_client.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../../../core/config.dart';
 import '../../engine/engine_adapter.dart';
@@ -154,8 +156,42 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         return;
       }
       await _ref.read(engineProvider).connect(jsonEncode(buildSingBoxTunConfig(nodeConfig)));
+    } on ApiException catch (e) {
+      state = EngineStateError(_describeConnectFailure(e));
     } catch (e) {
       state = EngineStateError(e.toString());
+    }
+  }
+
+  /// Turns an API failure into something a person can act on.
+  ///
+  /// Losing entitlement is the common case here, and `ApiException(402,
+  /// SUBSCRIPTION_REQUIRED)` on its own tells the user nothing. These codes
+  /// each mean something specific, so say what it is and what to do.
+  static String _describeConnectFailure(ApiException e) =>
+      describeConnectFailureForTest(e);
+
+  /// Exposed for tests; the logic is pure and worth pinning down directly.
+  @visibleForTesting
+  static String describeConnectFailureForTest(ApiException e) {
+    switch (e.code) {
+      case 'SUBSCRIPTION_REQUIRED':
+        return 'Your subscription has expired. Renew it to reconnect.';
+      case 'BANDWIDTH_QUOTA_EXCEEDED':
+        return 'You have used your data allowance. Upgrade to reconnect.';
+      case 'NO_NODES_AVAILABLE':
+        return 'No servers are available right now. Try again shortly.';
+      case 'TOKEN_REVOKED':
+      case 'UNAUTHENTICATED':
+      case 'INVALID_REFRESH':
+      case 'ACCOUNT_UNAVAILABLE':
+        return 'Your session has ended. Sign in again to reconnect.';
+      case 'RESET_TOKEN_INVALID':
+        return 'This link has expired. Request a new reset link.';
+      default:
+        return e.statusCode == 0
+            ? 'Cannot reach the controller. Check your connection.'
+            : e.message;
     }
   }
 

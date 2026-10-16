@@ -218,6 +218,30 @@ export const usageRollups = pgTable(
   (t) => [index('usage_rollups_credential_idx').on(t.credentialId, t.windowStart), uniqueIndex('usage_rollups_window_uq').on(t.credentialId, t.windowStart, t.windowEnd)],
 );
 
+/**
+ * Single-use password reset tokens.
+ *
+ * Only the SHA-256 hash is stored, matching refresh-token handling. Tokens
+ * expire quickly and are consumed on first use, so an intercepted reset link
+ * cannot be replayed.
+ */
+export const passwordResetTokens = pgTable(
+  'password_reset_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    /** Admin who issued it, for operator-mediated recovery. Null = self-service. */
+    issuedBy: uuid('issued_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('password_reset_tokens_hash_uq').on(t.tokenHash), index('password_reset_tokens_user_idx').on(t.userId)],
+);
+
 /** JWT ID set for access-token revocation lists (post-logout invalidation). */
 export const revokedAccessTokens = pgTable('revoked_access_tokens', {
   jti: text('jti').primaryKey(),

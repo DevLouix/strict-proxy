@@ -109,6 +109,8 @@ app.use(createGatekeeperMiddleware({
 | Route | Auth | Purpose |
 |---|---|---|
 | `POST /api/v1/auth/register` / `login` / `refresh` / `logout` | none / JWT | Accounts + device-seat-limited tokens |
+| `POST /api/v1/auth/password/forgot` / `reset` / `change` | none / JWT | Account recovery; tokens are single-use and expire |
+| `DELETE /api/v1/me` | JWT + password | Self-service account deletion |
 | `GET /api/v1/me` | JWT | Profile + device seats |
 | `GET /api/v1/network/config` | JWT + active sub | Signed dynamic VLESS+REALITY bundle per user |
 | `GET /api/v1/network/nodes/public-ips` | public (signed) | Ed25519-signed fleet IP list for Gatekeeper |
@@ -189,6 +191,9 @@ that JWT and the admin role.
 | `PATCH /api/v1/admin/nodes/:nodeId` / `DELETE .../:nodeId` | Edit, drain, disable, or remove a node |
 | `GET /api/v1/admin/payments/events` | Audit verified payment events and outcomes |
 | `GET /api/v1/admin/billing/summary` | Revenue and checkout pipeline rollup |
+| `POST /api/v1/admin/billing/refund` | Refund a settled checkout; a full refund revokes access |
+| `GET/POST /api/v1/admin/disputes…` | List, inspect and contest a chargeback |
+| `POST /api/v1/admin/users/:userId/password-reset` | Issue a reset token while no mail transport exists |
 | `GET /api/v1/admin/billing/checkouts` | Individual checkouts with both references and the owning user |
 
 These APIs back the admin dashboard served at `/admin`, and remain usable

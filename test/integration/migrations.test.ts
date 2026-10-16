@@ -14,6 +14,7 @@ import { createHarness, type Harness } from '../helpers/harness.js';
 /** Tables the application depends on. */
 const EXPECTED_TABLES = [
   'billing_checkouts',
+  'password_reset_tokens',
   'devices',
   'node_credentials',
   'node_enrollments',
@@ -68,6 +69,7 @@ test('critical unique constraints exist after migrating', async () => {
   // duplicate credential or double-charged webhook would be possible.
   for (const index of [
     'users_email_uq',
+    'password_reset_tokens_hash_uq',
     'refresh_tokens_hash_uq',
     'node_credentials_user_node_uq',
     'node_credentials_uuid_uq',

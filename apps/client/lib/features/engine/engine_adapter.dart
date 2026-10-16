@@ -50,14 +50,37 @@ class ServerNode {
 
 /// Parsed form of the controller's signed config bundle.
 class ConfigBundle {
-  ConfigBundle({required this.expiresAt, required this.nodes, required this.rawConfigs});
+  ConfigBundle({
+    required this.expiresAt,
+    required this.nodes,
+    required this.rawConfigs,
+    required this.signature,
+    required this.keyId,
+  });
 
   final DateTime expiresAt;
   final List<ServerNode> nodes;
   /// Raw per-node sing-box outbound config keyed by node id.
   final Map<String, dynamic> rawConfigs;
 
+  /// Ed25519 signature over the canonical JSON of {expiresAt, nodes, configs},
+  /// base64. Carried for callers that verify; see [signatureVerified].
+  final String signature;
+
+  /// Key id the signature was made with, for rotation.
+  final String keyId;
+
   bool get isExpired => DateTime.now().isAfter(expiresAt);
+
+  /// Whether the caller has cryptographically checked [signature].
+  ///
+  /// Always false in this client: Dart has no Ed25519 in the standard library,
+  /// so verification needs a crypto dependency we do not currently take. The
+  /// bundle arrives over TLS from the authenticated controller, so transport
+  /// authenticity is what is actually relied on today. Adding `cryptography`
+  /// and verifying here is the honest fix; until then this flag keeps the gap
+  /// visible instead of implying a guarantee that does not exist.
+  bool get signatureVerified => false;
 
   factory ConfigBundle.fromJson(Map<String, dynamic> json) {
     final nodesJson = (json['nodes'] as List<dynamic>? ?? const []);
@@ -66,6 +89,8 @@ class ConfigBundle {
       expiresAt: DateTime.parse(json['expiresAt'] as String),
       nodes: nodesJson.map((e) => ServerNode.fromJson(e as Map<String, dynamic>)).toList(),
       rawConfigs: configsJson,
+      signature: json['signature'] as String? ?? '',
+      keyId: json['keyId'] as String? ?? '',
     );
   }
 }

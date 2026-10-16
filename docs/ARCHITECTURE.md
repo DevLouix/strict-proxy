@@ -242,12 +242,31 @@ fails a test rather than silently dropping every payment.
 
 | Gap | Impact | Why / where |
 |---|---|---|
+| **Client does not verify the bundle signature** | the controller signs bundles so callers *can* check them; the Flutter client parses `signature` and `keyId` but cannot verify — Dart has no Ed25519 in its standard library | add the `cryptography` package and verify in `ConfigBundle`. Today transport TLS to the authenticated controller is what is relied on. `signatureVerified` is hardcoded false so the gap is visible rather than implied |
+| **No mail transport** | no reset email, no lapse warning, no signup confirmation. Recovery is operator-mediated (`POST /api/v1/admin/users/:userId/password-reset`) until an SMTP worker exists | plug a `deliver` callback into `issuePasswordReset` |
 | **iOS build unverified** | Linux release and Android debug APK are built and verified; iOS needs macOS + Xcode | CI macOS runner |
-| **No outbound email** | no lapse warning, no signup confirmation. Receipts are on demand but never sent. | needs an SMTP worker; OpenPay `emailTemplates` covers provider emails only |
-| **Recurring plans are not auto-provisioned** | `subscription.renewed` is handled and tested, and `createPlan` is verified live, but plans are created by hand. The first purchase still opens a one-time checkout. | create plans per tier from the catalog, then subscribe the saved payment method |
-| **Dispute outcome not applied** | a dispute we *win* does not restore access; it stays revoked | `dispute.resolved` carries no outcome in the envelope — confirm the shape with the provider |
-| **Single workspace** | `app_id` scoping unused; fine for one product, limiting for a marketplace | OpenPay `apps` |
+| **Recurring plans not auto-provisioned** | `subscription.renewed` is handled and tested, and `createPlan` is verified live, but plans are created by hand and the first purchase still opens a one-time checkout | create plans per tier from the catalog, then subscribe the saved payment method |
+| **Dispute outcome not applied** | a dispute we *win* stays revoked | `dispute.resolved` carries no outcome in the envelope — confirm the shape with the provider |
+| **Single workspace** | `app_id` scoping unused | OpenPay `apps` |
 | **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
+
+### Account recovery
+
+The auth surface used to be register/login/refresh/logout only, which meant a
+user who forgot their password was locked out permanently. It now also covers:
+
+| Route | Purpose |
+|---|---|
+| `POST /api/v1/auth/password/forgot` | starts a reset; always 202 with an identical body, so it is not an account-existence oracle |
+| `POST /api/v1/auth/password/reset` | consumes a token and sets a new password |
+| `POST /api/v1/auth/password/change` | signed-in user changes their own password |
+| `DELETE /api/v1/me` | self-service deletion, requiring the current password |
+| `POST /api/v1/admin/users/:userId/password-reset` | operator-issued reset token, the recovery path while there is no mail transport |
+| `POST /api/v1/admin/billing/refund` | the refund the payment docs describe; a full refund also revokes access |
+
+Reset tokens are single-use, expire after 30 minutes, are superseded by a newer
+issue, and sign out every other session and node credential — so an intercepted
+link cannot leave an attacker holding a live refresh token or a working tunnel.
 
 ## Testing map
 
@@ -272,6 +291,7 @@ via testcontainers, so it needs Docker.
 | `test/integration/recurring-billing.test.ts` | renewal, pause/resume, cancellation, dunning, idempotency |
 | `test/integration/disputes.test.ts` | dispute workflow authorization and validation |
 | `test/integration/coupons.test.ts` | coupon validation and failure handling |
+| `test/integration/account.test.ts` | password reset/change, account deletion, refunds |
 | `test/unit/openpay-delivery.test.ts` | replays a real captured signed delivery |
 | `test/integration/openpay-webhooks.test.ts` | signature rejection, idempotency, user resolution |
 | `test/integration/openpay-live.test.ts` | the real gateway; skipped unless `OPENPAY_API_KEY` is set |
