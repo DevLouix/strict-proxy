@@ -44,6 +44,17 @@ export interface ControllerConfig {
   /** Shown on OpenPay-hosted receipts and emails. */
   openpayPlatformName: string;
 
+  /** Base URL of the client/web app, used to build links in outbound email. */
+  publicAppUrl: string;
+
+  // -- Settings -------------------------------------------------------------
+  /**
+   * Encrypts operator-configured secrets (the SMTP password) at rest. Optional:
+   * the JWT secret is the fallback so a deployment cannot be bricked by omitting
+   * it, but a dedicated value lets that key be rotated on its own schedule.
+   */
+  settingsEncryptionKey?: string;
+
   // -- Billing catalog ------------------------------------------------------
   /** ISO 4217 code for checkout sessions. */
   billingCurrency: string;
@@ -83,5 +94,8 @@ export function loadConfig(): ControllerConfig {
     billingCurrency: optionalString('BILLING_CURRENCY', 'NGN'),
     billingStandardAmountMinor: optionalInt('STANDARD_TIER_AMOUNT_MINOR', 250_000),
     billingProAmountMinor: optionalInt('PRO_TIER_AMOUNT_MINOR', 750_000),
+
+    publicAppUrl: optionalString('PUBLIC_APP_URL', 'http://localhost:3000'),
+    settingsEncryptionKey: optionalString('SETTINGS_ENCRYPTION_KEY', ''),
   };
 }

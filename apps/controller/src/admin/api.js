@@ -134,6 +134,10 @@ export class ApiClient {
     return send('PATCH', path, { body, token: this.token() });
   }
 
+  put(path, body) {
+    return send('PUT', path, { body, token: this.token() });
+  }
+
   del(path) {
     return send('DELETE', path, { token: this.token() });
   }

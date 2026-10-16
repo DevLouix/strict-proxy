@@ -242,6 +242,28 @@ export const passwordResetTokens = pgTable(
   (t) => [uniqueIndex('password_reset_tokens_hash_uq').on(t.tokenHash), index('password_reset_tokens_user_idx').on(t.userId)],
 );
 
+/**
+ * Operator-editable platform settings, keyed by name.
+ *
+ * Generic on purpose: SMTP today, anything else tomorrow, without a migration
+ * each time. Secret values (currently the SMTP password) are encrypted at rest
+ * and tagged with an `enc:v1:` prefix so a setting can move between secret and
+ * plain without ambiguity. See `services/settings.ts`.
+ */
+export const platformSettings = pgTable('platform_settings', {
+  key: text('key').primaryKey(),
+  /**
+   * Encrypted ciphertext for secrets, plaintext otherwise. `enc:v1:<iv>:<tag>:<data>`
+   * when secret; JSON-encoded for structured values.
+   */
+  value: text('value').notNull(),
+  /** Marks values that must never be returned by the API. */
+  isSecret: boolean('is_secret').notNull().default(false),
+  /** Admin who last wrote it. */
+  updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 /** JWT ID set for access-token revocation lists (post-logout invalidation). */
 export const revokedAccessTokens = pgTable('revoked_access_tokens', {
   jti: text('jti').primaryKey(),

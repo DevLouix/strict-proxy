@@ -175,6 +175,34 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 
 label.field { display: block; margin-bottom: 12px; }
 label.field > span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+label.field > span.small { margin: 4px 0 0; }
+
+/* Two columns on wide screens, one when the window is narrow. */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0 16px; align-items: start; }
+.form-grid > .actions,
+.form-grid > .inline,
+.form-grid > h4 { grid-column: 1 / -1; }
+
+/* A labelled control on the same row as its explanation, e.g. a checkbox. */
+label.field > .inline { display: flex; align-items: center; gap: 8px; }
+label.field > .inline input[type="checkbox"] { width: auto; }
+
+.inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+.actions .small { margin: 0; }
+
+/* Inline advisory inside a panel — used to explain why mail is not configured. */
+.notice {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.notice code { color: var(--text); font-size: 12px; }
 
 .btn {
   padding: 7px 12px;

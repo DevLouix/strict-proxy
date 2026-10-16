@@ -1,0 +1,94 @@
+{
+  "publicKeyBase64": "U6ja8VfyZQHI1K+gBV/1Kf0s6l4xgWL26zoTX6i36b8=",
+  "fixtures": [
+    {
+      "payload": {
+        "expiresAt": "2026-12-01T00:00:00.000Z",
+        "nodes": [],
+        "configs": {}
+      },
+      "canonical": "{\"configs\":{},\"expiresAt\":\"2026-12-01T00:00:00.000Z\",\"nodes\":[]}",
+      "signature": "CuOw27s5tBesALkMEkCNWpL7b7QqmAxkXjAvh1ULgyOQgQ4mxtRawvGwc6Q45nMcY2WV87iNwX6yE9E6wykGBg=="
+    },
+    {
+      "payload": {
+        "expiresAt": "2026-12-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23",
+            "hostname": "ng-lagos-01",
+            "label": "Lagos 01",
+            "region": "ng-lagos",
+            "publicIp": "102.89.34.17",
+            "status": "online",
+            "loadScore": 12,
+            "tunnelHost": "edge.lagos.strictproxy.example",
+            "tunnelPort": 443
+          }
+        ],
+        "configs": {
+          "5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23": {
+            "protocol": "vless-reality",
+            "server": "edge.lagos.strictproxy.example",
+            "serverPort": 443,
+            "flow": "xtls-rprx-vision",
+            "publicKey": "xQ0hZ2RmY1F4R3l1eFZ4Y2hEZVZ6cXAyZGRHZjRlQUFC"
+          }
+        }
+      },
+      "canonical": "{\"configs\":{\"5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23\":{\"flow\":\"xtls-rprx-vision\",\"protocol\":\"vless-reality\",\"publicKey\":\"xQ0hZ2RmY1F4R3l1eFZ4Y2hEZVZ6cXAyZGRHZjRlQUFC\",\"server\":\"edge.lagos.strictproxy.example\",\"serverPort\":443}},\"expiresAt\":\"2026-12-01T00:00:00.000Z\",\"nodes\":[{\"hostname\":\"ng-lagos-01\",\"id\":\"5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23\",\"label\":\"Lagos 01\",\"loadScore\":12,\"publicIp\":\"102.89.34.17\",\"region\":\"ng-lagos\",\"status\":\"online\",\"tunnelHost\":\"edge.lagos.strictproxy.example\",\"tunnelPort\":443}]}",
+      "signature": "RAar+UlSCEDaaU5HnGIpQT7hQTP8Qn3rkuIuwkRKQsSlGE+KF0I2unJn0xlkGnPNh3SZHMvjwdoc1y/533H8Bg=="
+    },
+    {
+      "payload": {
+        "expiresAt": "2027-01-31T23:59:59.999Z",
+        "nodes": [
+          {
+            "zulu": 1,
+            "alpha": 2,
+            "mike": [
+              true,
+              false,
+              null
+            ],
+            "nested": {
+              "b": 2,
+              "a": 1
+            }
+          }
+        ],
+        "configs": {}
+      },
+      "canonical": "{\"configs\":{},\"expiresAt\":\"2027-01-31T23:59:59.999Z\",\"nodes\":[{\"alpha\":2,\"mike\":[true,false,null],\"nested\":{\"a\":1,\"b\":2},\"zulu\":1}]}",
+      "signature": "0ZQCli2DpNCcdhf6vFrUIKepfOODNbD3+E4XztIX5SliDmevDaftmqoedzHtFAqVs+mdWm5cwJMWA7YjFtD1Bw=="
+    }
+  ],
+  "wireBundle": {
+    "expiresAt": "2026-12-01T00:00:00.000Z",
+    "nodes": [
+      {
+        "id": "5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23",
+        "hostname": "ng-lagos-01",
+        "label": "Lagos 01",
+        "region": "ng-lagos",
+        "publicIp": "102.89.34.17",
+        "status": "online",
+        "loadScore": 12,
+        "tunnelHost": "edge.lagos.strictproxy.example",
+        "tunnelPort": 443
+      }
+    ],
+    "configs": {
+      "5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23": {
+        "protocol": "vless-reality",
+        "server": "edge.lagos.strictproxy.example",
+        "serverPort": 443,
+        "flow": "xtls-rprx-vision",
+        "publicKey": "xQ0hZ2RmY1F4R3l1eFZ4Y2hEZVZ6cXAyZGRHZjRlQUFC"
+      }
+    },
+    "keyId": "kid-fixture",
+    "signature": "RAar+UlSCEDaaU5HnGIpQT7hQTP8Qn3rkuIuwkRKQsSlGE+KF0I2unJn0xlkGnPNh3SZHMvjwdoc1y/533H8Bg==",
+    "signedCanonical": "{\"configs\":{\"5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23\":{\"flow\":\"xtls-rprx-vision\",\"protocol\":\"vless-reality\",\"publicKey\":\"xQ0hZ2RmY1F4R3l1eFZ4Y2hEZVZ6cXAyZGRHZjRlQUFC\",\"server\":\"edge.lagos.strictproxy.example\",\"serverPort\":443}},\"expiresAt\":\"2026-12-01T00:00:00.000Z\",\"nodes\":[{\"hostname\":\"ng-lagos-01\",\"id\":\"5f1c2b6e-0a1d-4c2f-9e3b-7a8d9c0e1f23\",\"label\":\"Lagos 01\",\"loadScore\":12,\"publicIp\":\"102.89.34.17\",\"region\":\"ng-lagos\",\"status\":\"online\",\"tunnelHost\":\"edge.lagos.strictproxy.example\",\"tunnelPort\":443}]}"
+  }
+}

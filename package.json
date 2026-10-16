@@ -32,6 +32,10 @@
   "devDependencies": {
     "@testcontainers/postgresql": "^12.2.1",
     "@testcontainers/redis": "^12.2.1",
+    "@types/nodemailer": "^8.0.2",
     "testcontainers": "^12.2.1"
+  },
+  "dependencies": {
+    "nodemailer": "^10.1.1"
   }
 }

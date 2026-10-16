@@ -15,6 +15,13 @@
       "when": 1792124069561,
       "tag": "0001_password_reset_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792125751000,
+      "tag": "0002_platform_settings",
+      "breakpoints": true
     }
   ]
 }

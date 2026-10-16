@@ -56,6 +56,7 @@ class ConfigBundle {
     required this.rawConfigs,
     required this.signature,
     required this.keyId,
+    required this.rawJson,
   });
 
   final DateTime expiresAt;
@@ -72,15 +73,10 @@ class ConfigBundle {
 
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 
-  /// Whether the caller has cryptographically checked [signature].
-  ///
-  /// Always false in this client: Dart has no Ed25519 in the standard library,
-  /// so verification needs a crypto dependency we do not currently take. The
-  /// bundle arrives over TLS from the authenticated controller, so transport
-  /// authenticity is what is actually relied on today. Adding `cryptography`
-  /// and verifying here is the honest fix; until then this flag keeps the gap
-  /// visible instead of implying a guarantee that does not exist.
-  bool get signatureVerified => false;
+
+  /// The raw `nodes` and `configs` exactly as received, kept so the signed
+  /// payload can be reproduced byte for byte at verification time.
+  final Map<String, dynamic> rawJson;
 
   factory ConfigBundle.fromJson(Map<String, dynamic> json) {
     final nodesJson = (json['nodes'] as List<dynamic>? ?? const []);
@@ -91,6 +87,7 @@ class ConfigBundle {
       rawConfigs: configsJson,
       signature: json['signature'] as String? ?? '',
       keyId: json['keyId'] as String? ?? '',
+      rawJson: json,
     );
   }
 }

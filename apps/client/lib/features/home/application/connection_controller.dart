@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api_client.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../../../core/config.dart';
+import '../../engine/bundle_verifier.dart';
+import '../../engine/config_bundle_loader.dart';
 import '../../engine/engine_adapter.dart';
 import '../../engine/libbox_engine.dart';
 import '../../engine/linux_singbox_engine.dart';
@@ -147,15 +149,17 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       }
       state = const EngineStateConnecting();
 
-      final api = _ref.read(apiProvider);
-      final bundleJson = await api.networkConfig();
-      final configs = bundleJson['configs'] as Map<String, dynamic>? ?? {};
-      final nodeConfig = configs[_selected!.id];
+      // Every bundle is verified by the loader before it is used; nothing else
+      // is allowed to fetch and trust raw credentials.
+      final bundle = await _ref.read(configBundleLoaderProvider).load();
+      final nodeConfig = bundle.rawConfigs[_selected!.id];
       if (nodeConfig is! Map<String, dynamic>) {
         state = const EngineStateError('Selected server configuration is unavailable');
         return;
       }
       await _ref.read(engineProvider).connect(jsonEncode(buildSingBoxTunConfig(nodeConfig)));
+    } on BundleVerificationException catch (e) {
+      state = EngineStateError(e.reason);
     } on ApiException catch (e) {
       state = EngineStateError(_describeConnectFailure(e));
     } catch (e) {

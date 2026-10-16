@@ -238,12 +238,61 @@ fails a test rather than silently dropping every payment.
 | Invented event names in the mapping | replaced with the provider's authoritative 20, exported as `OPENPAY_EVENTS` |
 | The development adapter used a different event vocabulary than production | it now accepts both, so a locally replayed webhook behaves as the real one does |
 
+### Bundle verification
+
+The controller signs every config bundle with Ed25519. The Flutter client now
+verifies that signature before any credential reaches the tunnel, via the
+`cryptography` package (`lib/features/engine/bundle_verifier.dart`). The Dart
+canonical-JSON implementation is pinned against fixtures produced by the
+controller's own signer (`test/tools/emit-canonical-fixtures.ts`), because a
+byte-level mismatch would fail every genuine bundle.
+
+Two details that are easy to get wrong and are covered by tests:
+
+- The signed payload uses the **raw `expiresAt` string** from the response.
+  Re-serialising it through a `DateTime` drops a zero fractional part
+  (`…T00:00:00.000Z` → `…T00:00:00Z`), which would fail verification and present
+  as a tampered bundle.
+- Verification **fails closed**. In a production build with no signing key
+  configured, `ConfigBundleLoader` refuses to connect rather than downgrading to
+  no verification.
+
+### Mail
+
+SMTP is configured from **Admin → Settings**, not the environment: credentials
+are per-deployment and rotate independently of a deploy.
+
+| Route | Purpose |
+|---|---|
+| `GET/PUT/DELETE /api/v1/admin/settings/email` | Read, save and remove SMTP settings |
+| `POST /api/v1/admin/settings/email/test` | Send a test message to an address you choose |
+| `POST /api/v1/admin/users/:userId/password-reset/email` | Issue a reset token *and* email it |
+| `POST /api/v1/admin/billing/lapse-notices` | Notify users whose subscription has expired |
+
+Two properties worth stating explicitly:
+
+- **The password is write-only.** It is encrypted at rest with AES-256-GCM under
+  a key derived from `SETTINGS_ENCRYPTION_KEY` (falling back to the JWT secret),
+  and no API call returns it — `describeSettings` reports only that a value
+  exists. An admin can replace the password but never read it back. Leaving the
+  field blank keeps the stored one; clearing it is a separate, explicit action.
+- **Sending never throws into a request.** `sendMail` reports what happened, and
+  each caller decides how loudly to complain, because every caller is a recovery
+  or lifecycle path — a mail outage must not turn a password reset into a 500,
+  and must not make it look like it worked.
+
+With mail configured, `POST /api/v1/auth/password/forgot` delivers the reset link
+directly. Without it, the flow still succeeds and the operator relays the token
+via `POST /api/v1/admin/users/:userId/password-reset`, which remains available.
+
+Delivery uses `nodemailer`. It ships no bundled types and `@types/nodemailer`
+is still at 8.x, so the types describe v8 while the runtime is v10; the surface
+used here (`createTransport`, `sendMail`) is unchanged between them.
+
 ### Still open
 
 | Gap | Impact | Why / where |
 |---|---|---|
-| **Client does not verify the bundle signature** | the controller signs bundles so callers *can* check them; the Flutter client parses `signature` and `keyId` but cannot verify — Dart has no Ed25519 in its standard library | add the `cryptography` package and verify in `ConfigBundle`. Today transport TLS to the authenticated controller is what is relied on. `signatureVerified` is hardcoded false so the gap is visible rather than implied |
-| **No mail transport** | no reset email, no lapse warning, no signup confirmation. Recovery is operator-mediated (`POST /api/v1/admin/users/:userId/password-reset`) until an SMTP worker exists | plug a `deliver` callback into `issuePasswordReset` |
 | **iOS build unverified** | Linux release and Android debug APK are built and verified; iOS needs macOS + Xcode | CI macOS runner |
 | **Recurring plans not auto-provisioned** | `subscription.renewed` is handled and tested, and `createPlan` is verified live, but plans are created by hand and the first purchase still opens a one-time checkout | create plans per tier from the catalog, then subscribe the saved payment method |
 | **Dispute outcome not applied** | a dispute we *win* stays revoked | `dispute.resolved` carries no outcome in the envelope — confirm the shape with the provider |
@@ -292,6 +341,8 @@ via testcontainers, so it needs Docker.
 | `test/integration/disputes.test.ts` | dispute workflow authorization and validation |
 | `test/integration/coupons.test.ts` | coupon validation and failure handling |
 | `test/integration/account.test.ts` | password reset/change, account deletion, refunds |
+| `test/integration/mail.test.ts` | secret encryption at rest, SMTP settings, delivery outcomes |
+| `test/unit/admin-spa.test.ts` | build-free dashboard: imports resolve, exports exist, secrets stay write-only |
 | `test/unit/openpay-delivery.test.ts` | replays a real captured signed delivery |
 | `test/integration/openpay-webhooks.test.ts` | signature rejection, idempotency, user resolution |
 | `test/integration/openpay-live.test.ts` | the real gateway; skipped unless `OPENPAY_API_KEY` is set |

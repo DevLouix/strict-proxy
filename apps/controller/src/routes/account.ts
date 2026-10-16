@@ -24,6 +24,7 @@ import {
 import { revokeAllUserCredentials } from '../services/nodes.js';
 import { revokeAllRefreshTokens, revokeAllRefreshTokens as revokeRefreshes } from '../services/auth.js';
 import { createOpenPayClient, describeOpenPayError, isOpenPayConfigured } from '../services/openpay.js';
+import { sendMail, passwordResetEmail } from '../services/mail.js';
 import { billingCheckouts } from '../db/schema.js';
 
 interface Ctx {
@@ -62,15 +63,27 @@ export function buildAccountRouter(ctx: Ctx): Router {
         return;
       }
 
-      const [user] = await ctx.db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+      const [user] = await ctx.db.select({ id: users.id, email: users.email }).from(users).where(eq(users.email, email)).limit(1);
       if (user) {
-        await issuePasswordReset(ctx.db, user.id);
-        // No mail transport yet, so the operator has to relay it. Logged, never
-        // returned, so this endpoint cannot be used to hijack an account.
-        console.warn('[controller] password reset requested; no mail transport configured — issue a token via the admin route');
+        const issued = await issuePasswordReset(ctx.db, user.id);
+        const template = passwordResetEmail(ctx.cfg, issued.token, RESET_TTL_MINUTES);
+        const result = await sendMail(ctx.db, ctx.cfg, { to: user.email, ...template });
+
+        if (!result.sent && result.reason === 'not_configured') {
+          // No mail transport: the token exists but cannot be delivered, so an
+          // operator has to relay it. Never returned here — that would make this
+          // endpoint a reset for anyone who knows an address.
+          console.warn(
+            '[controller] password reset requested but mail is not configured — issue a token via POST /api/v1/admin/users/:userId/password-reset',
+          );
+        } else if (!result.sent) {
+          // The token is already issued and now undeliverable. Say so loudly: it
+          // is the difference between "check your email" and "wait forever".
+          console.error(`[controller] password reset email to ${user.email} failed: ${result.detail ?? result.reason}`);
+        }
       }
 
-      res.status(202).json({ accepted: true, message: 'If that account exists, a reset has been requested.' });
+      res.status(202).json({ accepted: true, message: 'If that account exists, a reset link has been sent.' });
     }),
   );
 

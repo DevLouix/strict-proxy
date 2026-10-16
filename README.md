@@ -193,6 +193,10 @@ that JWT and the admin role.
 | `GET /api/v1/admin/billing/summary` | Revenue and checkout pipeline rollup |
 | `POST /api/v1/admin/billing/refund` | Refund a settled checkout; a full refund revokes access |
 | `GET/POST /api/v1/admin/disputes…` | List, inspect and contest a chargeback |
+| `GET/PUT/DELETE /api/v1/admin/settings/email` | SMTP credentials, admin-configured; the password is encrypted at rest and write-only |
+| `POST /api/v1/admin/settings/email/test` | Send a test message |
+| `POST /api/v1/admin/users/:userId/password-reset/email` | Issue a reset token and email it |
+| `POST /api/v1/admin/billing/lapse-notices` | Email users whose subscription has expired |
 | `POST /api/v1/admin/users/:userId/password-reset` | Issue a reset token while no mail transport exists |
 | `GET /api/v1/admin/billing/checkouts` | Individual checkouts with both references and the owning user |
 
