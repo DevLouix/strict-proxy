@@ -12,7 +12,7 @@ import { subscriptions, nodeCredentials, billingCheckouts, users } from '../db/s
 import { asyncHandler, requireJwt } from '../middleware.js';
 import { isKnownTier, tierDefinition, nextPeriodEnd } from '../services/tiers.js';
 import { BillingError, purchasableTiers, validateBillingConfig } from '../services/catalog.js';
-import { isOpenPayConfigured, describeOpenPayError } from '../services/openpay.js';
+import { isOpenPayConfigured, describeOpenPayError, createOpenPayClient } from '../services/openpay.js';
 import { createTierCheckout, latestCheckoutForUser } from '../services/billing.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from '../services/usage.js';
 import { rateLimit } from '../services/rate-limit.js';
@@ -120,6 +120,69 @@ export function buildBillingRouter(ctx: Ctx): Router {
   );
 
   /** Usage detail per node, so the client can show where bandwidth went. */
+  /**
+   * A receipt for a settled checkout.
+   *
+   * Closes most of the "no email" gap without wiring an email provider: OpenPay
+   * already renders an invoice/receipt for a charge, so we surface it on demand
+   * rather than sending it.
+   */
+  router.get(
+    '/api/v1/billing/receipt/:reference',
+    requireAuth,
+    asyncHandler(async (req: Request, res: Response) => {
+      const claims = req.auth!;
+      const reference = typeof req.params.reference === 'string' ? req.params.reference : '';
+      if (!reference) {
+        res.status(400).json({ error: 'reference is required', code: 'VALIDATION' });
+        return;
+      }
+
+      // Scoped to the caller: a reference must not reveal someone else's receipt.
+      const [row] = await ctx.db
+        .select({
+          reference: billingCheckouts.reference,
+          providerReference: billingCheckouts.providerReference,
+          status: billingCheckouts.status,
+          tier: billingCheckouts.tier,
+          amountMinor: billingCheckouts.amountMinor,
+          currency: billingCheckouts.currency,
+          paidAt: billingCheckouts.paidAt,
+        })
+        .from(billingCheckouts)
+        .where(and(eq(billingCheckouts.reference, reference), eq(billingCheckouts.userId, claims.sub)))
+        .limit(1);
+
+      if (!row) {
+        res.status(404).json({ error: 'no such checkout for this account', code: 'NOT_FOUND' });
+        return;
+      }
+
+      const receipt: Record<string, unknown> = {
+        reference: row.reference,
+        providerReference: row.providerReference,
+        status: row.status,
+        tier: row.tier,
+        amountMinor: row.amountMinor,
+        currency: row.currency,
+        paidAt: row.paidAt ? row.paidAt.toISOString() : null,
+      };
+
+      // A settled checkout can additionally be rendered as a provider receipt.
+      if (row.status === 'paid' && row.providerReference && isOpenPayConfigured(ctx.cfg)) {
+        try {
+          const client = createOpenPayClient(ctx.cfg);
+          receipt['invoice'] = await client.charges.invoice(row.providerReference, 'html');
+        } catch (err) {
+          // The ledger row stays valid even if the provider cannot render it.
+          console.error('[controller] could not render provider receipt:', err);
+        }
+      }
+
+      res.json(receipt);
+    }),
+  );
+
   router.get(
     '/api/v1/billing/usage',
     requireAuth,

@@ -37,24 +37,30 @@ export interface Infra {
 }
 
 /**
- * Applies the Drizzle schema to the target database. Uses `drizzle-kit push`
- * so tests exercise the real schema definition rather than a hand-written SQL
- * duplicate that could drift.
+ * Applies the schema to the target database.
+ *
+ * `push` introspects the live database and reconciles it, which is convenient
+ * locally but keeps no history — it cannot tell you what a given environment
+ * *should* look like. `migrate` applies the committed SQL under
+ * `apps/controller/drizzle`, which is what production uses. Both are exercised:
+ * most suites use `push`, and migrations.test.ts proves the committed files
+ * build the same schema the application expects.
  */
-async function applySchema(databaseUrl: string): Promise<void> {
-  await execFileP(
-    process.execPath,
-    [path.join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs'), 'push', '--force'],
-    {
-      cwd: controllerDir,
-      env: { ...process.env, DATABASE_URL: databaseUrl },
-      maxBuffer: 10 * 1024 * 1024,
-    },
-  );
+async function applySchema(databaseUrl: string, mode: 'push' | 'migrate' = 'push'): Promise<void> {
+  const args =
+    mode === 'migrate'
+      ? ['migrate', '--config=drizzle.config.ts']
+      : ['push', '--force', '--config=drizzle.config.ts'];
+
+  await execFileP(process.execPath, [path.join(repoRoot, 'node_modules', 'drizzle-kit', 'bin.cjs'), ...args], {
+    cwd: controllerDir,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    maxBuffer: 10 * 1024 * 1024,
+  });
 }
 
 /** Boots ephemeral Postgres + Redis and returns their connection URLs. */
-export async function startInfra(): Promise<Infra> {
+export async function startInfra(schemaMode: 'push' | 'migrate' = 'push'): Promise<Infra> {
   let postgres: StartedPostgreSqlContainer | undefined;
   let redis: StartedRedisContainer | undefined;
   try {
@@ -63,7 +69,7 @@ export async function startInfra(): Promise<Infra> {
 
     const databaseUrl = postgres.getConnectionUri();
     const redisUrl = redis.getConnectionUrl();
-    await applySchema(databaseUrl);
+    await applySchema(databaseUrl, schemaMode);
 
     const keypair = generateEd25519Keypair();
     return {
@@ -84,6 +90,8 @@ export async function startInfra(): Promise<Infra> {
 }
 
 export interface TestEnvOverrides {
+  /** 'push' (default) reconciles live; 'migrate' applies the committed SQL. */
+  schemaMode?: 'push' | 'migrate';
   rateLimitMaxAttempts?: number;
   rateLimitWindowSeconds?: number;
   /** Number of trusted reverse-proxy hops; 1 lets tests vary client IP via XFF. */

@@ -19,3 +19,14 @@ android/local.properties
 apps/client/.cache/
 apps/client/packages/libbox_bridge/android/libs/*.aar
 apps/client/packages/libbox_bridge/ios/Frameworks/*.xcframework/
+
+# Flutter host projects are generated, never committed:
+#   flutter create --platforms=linux,android .
+apps/client/android/
+apps/client/linux/
+apps/client/ios/
+apps/client/macos/
+apps/client/windows/
+apps/client/web/
+apps/client/.metadata
+apps/client/.flutter-plugins-dependencies

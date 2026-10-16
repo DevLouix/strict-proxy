@@ -216,11 +216,19 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
     }
 
     case 'subscription.deleted':
-    case 'invoice.payment_failed': {
+    case 'invoice.payment_failed':
+    case 'charge.disputed':
+    case 'charge.reversed': {
       // -> Immediate revocation of node access.
+      //
+      // A chargeback or reversal is treated as harshly as a cancellation: the
+      // money is gone, so continuing to serve the tunnel would be giving away
+      // service that was paid for and then taken back. Dunning keeps 'expired'
+      // (a payment may still be recovered); a dispute or reversal is 'revoked'.
+      const status = event.type === 'invoice.payment_failed' ? 'expired' : 'revoked';
       await db
         .update(subscriptions)
-        .set({ tier: 'free', status: event.type === 'subscription.deleted' ? 'revoked' : 'expired', currentPeriodEnd: null, updatedAt: new Date() })
+        .set({ tier: 'free', status, currentPeriodEnd: null, updatedAt: new Date() })
         .where(eq(subscriptions.userId, userId));
       await revokeAllUserCredentials(db, userId);
       await revokeAllRefreshTokens(db, userId);

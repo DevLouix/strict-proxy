@@ -216,7 +216,11 @@ export interface PublicIpsResponse {
 export type PaymentEventType =
   | 'checkout.completed'
   | 'subscription.deleted'
-  | 'invoice.payment_failed';
+  | 'invoice.payment_failed'
+  /** The bank or provider took the money back (chargeback opened). */
+  | 'charge.disputed'
+  /** The charge was reversed outright by the provider. */
+  | 'charge.reversed';
 
 export interface PaymentEvent {
   /** Provider-agnostic unique event id (idempotency key). */

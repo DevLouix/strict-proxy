@@ -43,7 +43,7 @@ npx tsx apps/controller/src/scripts/generate-env.ts
 set -a; source .env; set +a
 
 # 3. Schema + seed (prints admin password and creates a development sample node)
-npm run db:push -w apps/controller
+npm run db:migrate -w apps/controller   # applies apps/controller/drizzle/*.sql
 npm run db:seed -w apps/controller
 
 # 4. Run the controller
@@ -459,7 +459,8 @@ to `172.30.0.0/16` and is configurable with `BACKEND_NETWORK_SUBNET` and
 `BACKEND_NETWORK_GATEWAY`; select a non-overlapping RFC1918 range on each host.
 
 The controller starts only after its Postgres and Redis dependencies are healthy,
-validates the JWT/webhook/signing secrets, applies the Drizzle schema, and exposes
+validates the JWT/webhook/signing secrets, applies the committed Drizzle
+migrations (`apps/controller/drizzle/*.sql`, idempotent on every boot), and exposes
 `/readyz` only when both dependencies respond. Redis requires `REDIS_PASSWORD` and
 is bound to localhost by default. Postgres and Redis data, container resource
 limits, restart policies, host bindings, ports, log rotation, CORS, proxy hops,

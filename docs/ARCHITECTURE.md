@@ -132,6 +132,9 @@ One 30s sweep, three independent jobs. A failure in one must not stop the others
 | `expireStaleCheckouts` | abandoned checkouts -> `expired` |
 | `expireLapsedSubscriptions` | elapsed billing periods -> `expired` (keeps the tier) |
 
+A fourth job would be `reconcileWithGateway`, which is not written: the billing
+data is ours, and nothing else needs syncing.
+
 ## OpenPay integration: what we use and what we ignore
 
 The SDK exposes **32 resources**. This platform uses **three methods**, plus two
@@ -186,14 +189,34 @@ it is wrong for a VPN that meters its own bandwidth.
 
 Honest list, so nobody assumes these are handled.
 
+### Parked pending OpenPay verification
+
+| Gap | Impact | Notes |
+|---|---|---|
+| **No recurring billing** | a customer pays once, gets 30 days, then access lapses with no renewal | the webhook side already understands `subscription.renewal_failed` and `subscription.deleted`; needs OpenPay `plans` + `subscriptions.create`, and `subscription.renewed` -> extend |
+| **Webhook signature unverified against a live delivery** | implemented to spec and covered by 31 deterministic tests, but never observed on a real signed request | confirm the header name on a real delivery; `OPENPAY_SIGNATURE_HEADER` is configurable, so no code change is needed |
+
+### Fixed
+
+| Was | Fix |
+|---|---|
+| Chargebacks left the customer with access forever | `charge.disputed` / `charge.reversed` revoke as hard as a cancellation, including credentials and refresh tokens |
+| Refunds auto-revoked | deliberately **not** mapped: refunds may be partial, so it is an operator decision |
+| No versioned migrations | `apps/controller/drizzle/*.sql` committed; the container entrypoint runs `db:migrate`, idempotent on every boot |
+| Lapsed subscriptions still claimed `active` | `expireLapsedSubscriptions` reconciles the row so the admin dashboard and `/api/v1/me` stop lying |
+| Abandoned checkouts never reclaimed | `expireStaleCheckouts` wired into the periodic sweep |
+| No receipts | `GET /api/v1/billing/receipt/:reference`, scoped to the caller, renders the provider invoice |
+
+### Still open
+
 | Gap | Impact | Where it would go |
 |---|---|---|
-| **No recurring billing** | a customer pays once, gets 30 days, then access lapses with no renewal. The webhook side already understands renewal events. | OpenPay `plans` + `subscriptions.create`; map `subscription.renewed` -> extend |
-| **Webhook signature unverified against a live delivery** | the scheme is implemented to spec and unit-tested, but has never seen a real signed request | confirm the header name on a real delivery; `OPENPAY_SIGNATURE_HEADER` is configurable |
-| **No dispute / chargeback handling** | a chargeback would leave the customer with paid access indefinitely | subscribe to `charge.disputed` / `charge.reversed` and revoke |
-| **No migrations committed** | schema is applied with `drizzle-kit push` at boot; there is no versioned migration history | generate and commit `drizzle/` SQL before running more than one environment |
-| **No email** | no receipts, no "your plan lapsed" notice | OpenPay `emailTemplates`, or a worker |
-| **Android/iOS builds unverified locally** | libbox `.aar` is a build-time prerequisite; the bridge is implemented and CI-analyzed but not exercised on a device | `apps/client/tool/build-libbox.sh` |
+| **No outbound email** | no lapse warning, no signup confirmation. Receipts are available on demand but never sent. | SMTP worker; OpenPay `emailTemplates` covers provider emails only |
+| **iOS build unverified** | Linux release and Android debug APKs are built and verified; iOS requires macOS + Xcode and cannot be compiled on Linux | CI macOS runner |
+| **No dispute evidence workflow** | we revoke on a dispute but do not file or track evidence with the provider | OpenPay `disputes.listEvidenceSubmissions`, `markSubmitted` |
+| **Coupon / discount support** | no marketing discounts | OpenPay `coupons`, with the app-scoped scoping rules |
+| **Single workspace** | `app_id` scoping unused; fine for one product, limiting for a marketplace | OpenPay `apps` |
+| **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` |
 
 ## Testing map
 
@@ -210,7 +233,11 @@ via testcontainers, so it needs Docker.
 | `test/integration/admin.test.ts` | the admin authorization matrix over every admin route |
 | `test/integration/fleet.test.ts` | enrollment, HMAC internal API, nonce replay, usage isolation |
 | `test/integration/network.test.ts` | signed bundles, load-aware assignment, quota enforcement |
+| `test/integration/chargeback.test.ts` | disputes and reversals revoke; partial refunds do not |
 | `test/integration/subscription-lifecycle.test.ts` | pay -> lapse -> renew, and status honesty |
+| `test/integration/migrations.test.ts` | the committed SQL builds the schema the app expects |
+| `test/integration/receipts.test.ts` | receipt access control and provider-outage behaviour |
+| `test/integration/admin-billing.test.ts` | the checkout ledger, admin-only and filterable |
 | `test/integration/openpay-webhooks.test.ts` | signature rejection, idempotency, user resolution |
 | `test/integration/openpay-live.test.ts` | the real gateway; skipped unless `OPENPAY_API_KEY` is set |
 | `test/integration/gatekeeper.e2e.test.ts` | admit/deny, forged keys, failure modes |

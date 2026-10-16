@@ -3,16 +3,23 @@ set -eu
 
 /usr/local/bin/validate-controller-env
 
-# The database is declared healthy by Compose, but migrations can still race
-# during a fresh deployment. Retry schema application before starting the API.
+# Apply the committed schema migrations.
+#
+# `migrate` rather than `push`: push introspects whatever is already in the
+# database and reconciles it, which keeps no history and would silently accept a
+# drifted environment. migrate applies apps/controller/drizzle/*.sql in order and
+# is a no-op once caught up, so re-running it on every boot is safe.
+#
+# Compose declares Postgres healthy before this runs, but on a cold start the
+# first connection can still be refused, so retry before giving up.
 attempt=1
 max_attempts="${DB_INIT_MAX_ATTEMPTS:-30}"
-until npm run db:push -w apps/controller -- --force; do
+until npm run db:migrate -w apps/controller; do
   if [ "$attempt" -ge "$max_attempts" ]; then
-    echo "database schema initialization failed after $attempt attempts" >&2
+    echo "database migration failed after $attempt attempts" >&2
     exit 1
   fi
-  echo "database is not ready; retrying schema initialization ($attempt/$max_attempts)" >&2
+  echo "database is not ready; retrying migration ($attempt/$max_attempts)" >&2
   attempt=$((attempt + 1))
   sleep 2
 done

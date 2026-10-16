@@ -77,7 +77,7 @@ const bcryptRounds = 4; // keep test setup fast; production uses 12
 export const SEED_PASSWORD = 'correct horse battery staple';
 
 export async function createHarness(options: TestEnvOverrides = {}): Promise<Harness> {
-  const infra = await startInfra();
+  const infra = await startInfra(options.schemaMode ?? 'push');
   applyTestEnv(infra, options);
 
   const { loadConfig } = await import('../../apps/controller/src/env.js');

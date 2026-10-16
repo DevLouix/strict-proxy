@@ -191,11 +191,21 @@ export function verifyOpenPaySignature(params: {
 /**
  * OpenPay event name -> our provider-agnostic event.
  *
- * `charge.failed` is deliberately NOT mapped. A failed one-time checkout means
- * the customer never received access, so there is nothing to revoke; treating
- * it as a dunning event would strip an existing paid subscription over a
- * failed *new* purchase. Recurring failures arrive as
- * `subscription.renewal_failed` / `invoice.payment_failed` and do revoke.
+ * Two deliberate omissions:
+ *
+ * `charge.failed` is not mapped. A failed one-time checkout means the customer
+ * never received access, so there is nothing to revoke; treating it as a dunning
+ * event would strip an existing paid subscription over a failed *new* purchase.
+ * Recurring failures arrive as `subscription.renewal_failed` /
+ * `invoice.payment_failed` and do revoke.
+ *
+ * `charge.refunded` is not mapped either. A refund may be partial, and cutting
+ * a customer off because they were credited 10% would be wrong. Refunds are an
+ * operator decision (see the admin dashboard) rather than an automatic one.
+ *
+ * The dispute/reversal names cover more than one convention because the exact
+ * set the provider emits must be confirmed against a live delivery; every
+ * spelling means the same thing here, which is money taken back.
  */
 const EVENT_MAP: Record<string, PaymentEventType> = {
   'charge.success': 'checkout.completed',
@@ -205,6 +215,13 @@ const EVENT_MAP: Record<string, PaymentEventType> = {
   'subscription.cancelled': 'subscription.deleted',
   'subscription.renewal_failed': 'invoice.payment_failed',
   'invoice.payment_failed': 'invoice.payment_failed',
+  'charge.disputed': 'charge.disputed',
+  'charge.dispute': 'charge.disputed',
+  'dispute.created': 'charge.disputed',
+  'dispute.opened': 'charge.disputed',
+  'charge.reversed': 'charge.reversed',
+  'charge.reversal': 'charge.reversed',
+  'reversal.created': 'charge.reversed',
 };
 
 /**
