@@ -166,7 +166,7 @@ test('subscription cancellation revokes access', async () => {
 
   const res = await sendWebhook({
     id: 'evt_cancel_openpay',
-    type: 'subscription.deleted',
+    type: 'subscription.canceled',
     data: { object: { metadata: { user_id: user.id } } },
   });
   assert.equal(res.body.applied, true);
@@ -183,7 +183,7 @@ test('a failed renewal expires the subscription', async () => {
   const { user } = await payingUser('standard');
   const res = await sendWebhook({
     id: 'evt_renewal_failed',
-    type: 'subscription.renewal_failed',
+    type: 'subscription.payment_failed',
     data: { object: { metadata: { user_id: user.id } } },
   });
   assert.equal(res.body.applied, true);
@@ -254,7 +254,7 @@ test('replaying the same event id applies it only once', async () => {
 test('a replay cannot re-grant after a downgrade', async () => {
   const { user } = await payingUser();
   await sendWebhook({ id: 'evt_replay_guard', type: 'charge.success', data: { object: { metadata: { user_id: user.id, tier: 'pro' } } } });
-  await sendWebhook({ id: 'evt_replay_downgrade', type: 'subscription.deleted', data: { object: { metadata: { user_id: user.id } } } });
+  await sendWebhook({ id: 'evt_replay_downgrade', type: 'subscription.canceled', data: { object: { metadata: { user_id: user.id } } } });
 
   const replay = await sendWebhook({ id: 'evt_replay_guard', type: 'charge.success', data: { object: { metadata: { user_id: user.id, tier: 'pro' } } } });
   assert.equal(replay.body.applied, false);

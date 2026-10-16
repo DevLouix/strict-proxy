@@ -76,7 +76,7 @@ export function loadConfig(): ControllerConfig {
     openpayApiKey: optionalString('OPENPAY_API_KEY', ''),
     openpayBaseUrl: optionalString('OPENPAY_BASE_URL', 'https://api.openpay.example.com'),
     openpayWebhookSecret: optionalString('OPENPAY_WEBHOOK_SECRET', ''),
-    openpaySignatureHeader: optionalString('OPENPAY_SIGNATURE_HEADER', 'x-openpay-signature'),
+    openpaySignatureHeader: optionalString('OPENPAY_SIGNATURE_HEADER', 'x-webhook-signature-v1'),
     openpayTimestampToleranceSeconds: optionalInt('OPENPAY_TIMESTAMP_TOLERANCE_SECONDS', 300),
     openpayPlatformName: optionalString('OPENPAY_PLATFORM_NAME', 'StrictProxy'),
 

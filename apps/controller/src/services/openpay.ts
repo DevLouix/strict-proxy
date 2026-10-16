@@ -189,39 +189,69 @@ export function verifyOpenPaySignature(params: {
 // ---------------------------------------------------------------------------
 
 /**
+ * The event names OpenPay can deliver.
+ *
+ * Not a guess: this is the authoritative list, taken from the provider's own
+ * validation error when subscribing an endpoint to an unknown event. Events we
+ * do not act on (wallets, payouts, financial accounts) are listed so a reader
+ * can see the whole surface and know they were considered, not overlooked.
+ */
+export const OPENPAY_EVENTS = [
+  'charge.success',
+  'charge.failed',
+  'charge.refunded',
+  'subscription.created',
+  'subscription.activated',
+  'subscription.renewed',
+  'subscription.canceled',
+  'subscription.paused',
+  'subscription.resumed',
+  'subscription.payment_failed',
+  'payout.success',
+  'payout.failed',
+  'dispute.created',
+  'dispute.resolved',
+  'dispute.evidence_submitted',
+  'wallet.created',
+  'wallet.credited',
+  'wallet.debited',
+  'wallet.topup_completed',
+  'financial_account.created',
+] as const;
+
+/**
  * OpenPay event name -> our provider-agnostic event.
  *
- * Two deliberate omissions:
+ * Three deliberate omissions:
  *
- * `charge.failed` is not mapped. A failed one-time checkout means the customer
- * never received access, so there is nothing to revoke; treating it as a dunning
- * event would strip an existing paid subscription over a failed *new* purchase.
- * Recurring failures arrive as `subscription.renewal_failed` /
- * `invoice.payment_failed` and do revoke.
+ * `charge.failed` is not mapped on its own. A failed one-time checkout means the
+ * customer never received access, so there is nothing to revoke; treating it as a
+ * dunning event would strip an existing plan over a failed *new* purchase. It is
+ * mapped only when the payload shows it belongs to a subscription (see
+ * `resolveEventType`), because `subscription.payment_failed` also exists and is
+ * the primary signal.
  *
- * `charge.refunded` is not mapped either. A refund may be partial, and cutting
- * a customer off because they were credited 10% would be wrong. Refunds are an
- * operator decision (see the admin dashboard) rather than an automatic one.
+ * `charge.refunded` is not mapped. Refunds may be partial, and cutting a customer
+ * off over a 10% credit would be wrong. Refunds are an operator decision.
  *
- * The dispute/reversal names cover more than one convention because the exact
- * set the provider emits must be confirmed against a live delivery; every
- * spelling means the same thing here, which is money taken back.
+ * `dispute.resolved` is not mapped. It fires whether we won or lost, and
+ * restoring access automatically on a win would need the dispute outcome, which
+ * is not in the envelope. Left to an operator for now.
  */
 const EVENT_MAP: Record<string, PaymentEventType> = {
+  // Grant / extend.
   'charge.success': 'checkout.completed',
-  'checkout.completed': 'checkout.completed',
-  'subscription.deleted': 'subscription.deleted',
+  'subscription.activated': 'checkout.completed',
+  'subscription.renewed': 'subscription.renewed',
+
+  // Revoke.
   'subscription.canceled': 'subscription.deleted',
-  'subscription.cancelled': 'subscription.deleted',
-  'subscription.renewal_failed': 'invoice.payment_failed',
-  'invoice.payment_failed': 'invoice.payment_failed',
-  'charge.disputed': 'charge.disputed',
-  'charge.dispute': 'charge.disputed',
+  'subscription.payment_failed': 'invoice.payment_failed',
   'dispute.created': 'charge.disputed',
-  'dispute.opened': 'charge.disputed',
-  'charge.reversed': 'charge.reversed',
-  'charge.reversal': 'charge.reversed',
-  'reversal.created': 'charge.reversed',
+
+  // Lifecycle without immediate revocation.
+  'subscription.paused': 'subscription.paused',
+  'subscription.resumed': 'subscription.resumed',
 };
 
 /**

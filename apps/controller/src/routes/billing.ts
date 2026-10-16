@@ -11,7 +11,7 @@ import type { SubscriptionTier } from '@strict-proxy/types';
 import { subscriptions, nodeCredentials, billingCheckouts, users } from '../db/schema.js';
 import { asyncHandler, requireJwt } from '../middleware.js';
 import { isKnownTier, tierDefinition, nextPeriodEnd } from '../services/tiers.js';
-import { BillingError, purchasableTiers, validateBillingConfig } from '../services/catalog.js';
+import { BillingError, purchasableTiers, validateBillingConfig, priceForTier } from '../services/catalog.js';
 import { isOpenPayConfigured, describeOpenPayError, createOpenPayClient } from '../services/openpay.js';
 import { createTierCheckout, latestCheckoutForUser } from '../services/billing.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from '../services/usage.js';
@@ -88,15 +88,40 @@ export function buildBillingRouter(ctx: Ctx): Router {
         return;
       }
 
-      const body = req.body as { tier?: string; successUrl?: string; cancelUrl?: string };
+      const body = req.body as { tier?: string; successUrl?: string; cancelUrl?: string; couponCode?: string };
+      const couponCode = typeof body.couponCode === 'string' && body.couponCode.trim().length > 0
+        ? body.couponCode.trim()
+        : undefined;
+
       try {
         validateBillingConfig(ctx.cfg);
+
+        // Validate the coupon before opening a session so an invalid code fails
+        // with a clear 400 instead of surfacing as a provider error at payment
+        // time. The provider remains the authority on whether it applies.
+        if (couponCode && isOpenPayConfigured(ctx.cfg)) {
+          try {
+            const client = createOpenPayClient(ctx.cfg);
+            const price = priceForTier(ctx.cfg, (body.tier ?? 'standard') as SubscriptionTier);
+            // `amount` is required and lets the provider apply min_amount rules.
+            const verdict = await client.coupons.validate({ code: couponCode, amount: price.amountMinor });
+            if (verdict?.valid === false) {
+              res.status(400).json({ error: 'coupon is not valid for this purchase', code: 'COUPON_INVALID' });
+              return;
+            }
+          } catch (err) {
+            // A coupon-service outage must not block paying customers.
+            console.error('[controller] coupon validation unavailable, proceeding without the check:', err);
+          }
+        }
+
         const checkout = await createTierCheckout(ctx.db, ctx.cfg, {
           userId: claims.sub,
           email: claims.email,
           tier: (body.tier ?? 'standard') as SubscriptionTier,
           successUrl: body.successUrl,
           cancelUrl: body.cancelUrl,
+          couponCode,
         });
         res.status(201).json(checkout);
       } catch (err) {

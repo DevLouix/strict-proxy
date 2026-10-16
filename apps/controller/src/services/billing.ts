@@ -36,6 +36,8 @@ export async function createTierCheckout(
     tier: SubscriptionTier;
     successUrl?: string;
     cancelUrl?: string;
+    /** OpenPay coupon code; validated by the provider at checkout time. */
+    couponCode?: string;
   },
 ): Promise<BillingCheckoutPublic> {
   const price = priceForTier(cfg, params.tier);
@@ -52,11 +54,13 @@ export async function createTierCheckout(
     currency: price.currency,
     success_url: params.successUrl,
     cancel_url: params.cancelUrl,
+    ...(params.couponCode ? { coupon_code: params.couponCode } : {}),
     metadata: {
       user_id: params.userId,
       tier: params.tier,
       reference,
       source: 'strict-proxy',
+      ...(params.couponCode ? { coupon_code: params.couponCode } : {}),
     },
     // Keeps a retried request from creating a second payable session.
     idempotency_key: reference,
@@ -77,6 +81,7 @@ export async function createTierCheckout(
   return {
     reference: session.reference ?? reference,
     checkoutUrl: session.checkout_url,
+    couponCode: params.couponCode ?? null,
     tier: params.tier,
     amountMinor: price.amountMinor,
     currency: price.currency,

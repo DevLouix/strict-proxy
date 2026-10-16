@@ -146,19 +146,32 @@ agent from "helpfully" wiring up something that does not belong here.
 | Call | Where | Why |
 |---|---|---|
 | `checkout.create` | `services/billing.ts` | hosted payment page, the only way a customer pays |
-| `status.get` | live suite | reachability + provider health |
-| `currencies.list` | live suite | proves the key is accepted |
+| `checkout.create({coupon_code})` | `routes/billing.ts` | discounts, validated before the session opens |
+| `coupons.validate` | `routes/billing.ts` | reject a bad code as a 400, not at payment time |
+| `disputes.list` / `get` / `listEvidenceSubmissions` | `routes/disputes.ts` | contest a chargeback instead of losing it |
+| `disputes.submitEvidence` / `markSubmitted` | `routes/disputes.ts` | file the evidence packet |
+| `charges.invoice` | `routes/billing.ts` | renders a receipt for a settled checkout |
+| `subscriptions.createPlan` | verified live | recurring billing prerequisite |
+| `status.get` / `currencies.list` | live suite | reachability and key acceptance |
 
 ### Mapped from webhooks
 
+Every name below is real — taken from the provider's own validation error.
+
 | OpenPay event | Our effect |
 |---|---|
-| `charge.success`, `checkout.completed` | grant / extend the tier |
-| `subscription.deleted` / `canceled` / `cancelled` | revoke immediately |
-| `subscription.renewal_failed`, `invoice.payment_failed` | dunning -> revoke |
-| `charge.failed` **inside a subscription** | dunning -> revoke |
-| `charge.failed` **standalone** | ignored — a failed new purchase must not cancel an existing plan |
-| anything else | acknowledged, ignored |
+| `charge.success`, `subscription.activated` | grant / set the tier |
+| `subscription.renewed` | extend the period (recurring billing) |
+| `subscription.paused` | stop access, keep the tier and the period |
+| `subscription.resumed` | restore access with a fresh period |
+| `subscription.canceled` | revoke immediately |
+| `subscription.payment_failed` | dunning -> revoke |
+| `dispute.created` | revoke immediately (money taken back) |
+| `charge.failed` inside a subscription | dunning -> revoke |
+| `charge.failed` standalone | ignored — a failed new purchase must not cancel an existing plan |
+| `charge.refunded` | ignored — may be partial; refunds are an operator decision |
+| `dispute.resolved`, `dispute.evidence_submitted` | ignored — outcome not in the envelope |
+| `wallet.*`, `payout.*`, `financial_account.created` | not our concern |
 
 ### Deliberately NOT used, and why
 
@@ -189,34 +202,52 @@ it is wrong for a VPN that meters its own bandwidth.
 
 Honest list, so nobody assumes these are handled.
 
-### Parked pending OpenPay verification
+### Verified against the live gateway
 
-| Gap | Impact | Notes |
+The webhook signature scheme and the event vocabulary are no longer assumptions.
+Both were recovered from the provider itself: registering a webhook endpoint
+against a capture server and calling `webhooks.test()` produced a real signed
+delivery, and subscribing to an unknown event name returned the authoritative
+list.
+
+| Fact | Value | Source |
 |---|---|---|
-| **No recurring billing** | a customer pays once, gets 30 days, then access lapses with no renewal | the webhook side already understands `subscription.renewal_failed` and `subscription.deleted`; needs OpenPay `plans` + `subscriptions.create`, and `subscription.renewed` -> extend |
-| **Webhook signature unverified against a live delivery** | implemented to spec and covered by 31 deterministic tests, but never observed on a real signed request | confirm the header name on a real delivery; `OPENPAY_SIGNATURE_HEADER` is configurable, so no code change is needed |
+| Primary signature header | `x-webhook-signature-v1` | captured delivery |
+| v1 signed material | `HMAC-SHA256(secret, "<t>." + rawBody)` -> hex | computed and matched |
+| Legacy header | `x-webhook-signature` = `hex(HMAC-SHA256(secret, rawBody))` | computed and matched |
+| Event envelope | `{ id, type, created_at, data }` | captured delivery |
+| Event names | 20, listed in `OPENPAY_EVENTS` | provider validation error |
+
+`test/unit/openpay-delivery.test.ts` replays the captured request as a permanent
+fixture, so a change to the verifier, the header name or the signed material
+fails a test rather than silently dropping every payment.
 
 ### Fixed
 
 | Was | Fix |
 |---|---|
-| Chargebacks left the customer with access forever | `charge.disputed` / `charge.reversed` revoke as hard as a cancellation, including credentials and refresh tokens |
+| Chargebacks left the customer with access forever | `dispute.created` revokes as hard as a cancellation, including credentials and refresh tokens |
 | Refunds auto-revoked | deliberately **not** mapped: refunds may be partial, so it is an operator decision |
 | No versioned migrations | `apps/controller/drizzle/*.sql` committed; the container entrypoint runs `db:migrate`, idempotent on every boot |
 | Lapsed subscriptions still claimed `active` | `expireLapsedSubscriptions` reconciles the row so the admin dashboard and `/api/v1/me` stop lying |
 | Abandoned checkouts never reclaimed | `expireStaleCheckouts` wired into the periodic sweep |
 | No receipts | `GET /api/v1/billing/receipt/:reference`, scoped to the caller, renders the provider invoice |
+| No way to contest a chargeback | `routes/disputes.ts`: list, inspect, file evidence, mark hand-submitted |
+| No coupon support | `coupon_code` on checkout, validated up front so a bad code is a 400 |
+| Recurring billing absent | `subscription.renewed` extends the period; pause/resume supported; replays idempotent |
+| Invented event names in the mapping | replaced with the provider's authoritative 20, exported as `OPENPAY_EVENTS` |
+| The development adapter used a different event vocabulary than production | it now accepts both, so a locally replayed webhook behaves as the real one does |
 
 ### Still open
 
-| Gap | Impact | Where it would go |
+| Gap | Impact | Why / where |
 |---|---|---|
-| **No outbound email** | no lapse warning, no signup confirmation. Receipts are available on demand but never sent. | SMTP worker; OpenPay `emailTemplates` covers provider emails only |
-| **iOS build unverified** | Linux release and Android debug APKs are built and verified; iOS requires macOS + Xcode and cannot be compiled on Linux | CI macOS runner |
-| **No dispute evidence workflow** | we revoke on a dispute but do not file or track evidence with the provider | OpenPay `disputes.listEvidenceSubmissions`, `markSubmitted` |
-| **Coupon / discount support** | no marketing discounts | OpenPay `coupons`, with the app-scoped scoping rules |
+| **iOS build unverified** | Linux release and Android debug APK are built and verified; iOS needs macOS + Xcode | CI macOS runner |
+| **No outbound email** | no lapse warning, no signup confirmation. Receipts are on demand but never sent. | needs an SMTP worker; OpenPay `emailTemplates` covers provider emails only |
+| **Recurring plans are not auto-provisioned** | `subscription.renewed` is handled and tested, and `createPlan` is verified live, but plans are created by hand. The first purchase still opens a one-time checkout. | create plans per tier from the catalog, then subscribe the saved payment method |
+| **Dispute outcome not applied** | a dispute we *win* does not restore access; it stays revoked | `dispute.resolved` carries no outcome in the envelope — confirm the shape with the provider |
 | **Single workspace** | `app_id` scoping unused; fine for one product, limiting for a marketplace | OpenPay `apps` |
-| **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` |
+| **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
 
 ## Testing map
 
@@ -238,6 +269,10 @@ via testcontainers, so it needs Docker.
 | `test/integration/migrations.test.ts` | the committed SQL builds the schema the app expects |
 | `test/integration/receipts.test.ts` | receipt access control and provider-outage behaviour |
 | `test/integration/admin-billing.test.ts` | the checkout ledger, admin-only and filterable |
+| `test/integration/recurring-billing.test.ts` | renewal, pause/resume, cancellation, dunning, idempotency |
+| `test/integration/disputes.test.ts` | dispute workflow authorization and validation |
+| `test/integration/coupons.test.ts` | coupon validation and failure handling |
+| `test/unit/openpay-delivery.test.ts` | replays a real captured signed delivery |
 | `test/integration/openpay-webhooks.test.ts` | signature rejection, idempotency, user resolution |
 | `test/integration/openpay-live.test.ts` | the real gateway; skipped unless `OPENPAY_API_KEY` is set |
 | `test/integration/gatekeeper.e2e.test.ts` | admit/deny, forged keys, failure modes |

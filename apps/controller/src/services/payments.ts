@@ -25,7 +25,8 @@ import type { Redis } from 'ioredis';
 import type { ControllerConfig } from '../env.js';
 import { rateLimit } from './rate-limit.js';
 import { findCheckoutForEvent, candidateReferences } from './checkout-resolution.js';
-import { tierDefinition, nextPeriodEnd, isKnownTier } from './tiers.js';
+import { mapOpenPayEvent } from './openpay.js';
+import { tierDefinition, nextPeriodEnd, periodEndFrom, isKnownTier } from './tiers.js';
 import type { PaymentEvent, PaymentEventResult, PaymentEventType, SubscriptionTier } from '@strict-proxy/types';
 
 // ---------------------------------------------------------------------------
@@ -78,19 +79,34 @@ export class PlaceholderPaymentAdapter implements PaymentGatewayAdapter {
     const type = typeof body['type'] === 'string' ? body['type'] : null;
     if (!id || !type) return null;
 
-    const knownTypes: PaymentEventType[] = ['checkout.completed', 'subscription.deleted', 'invoice.payment_failed'];
-    if (!knownTypes.includes(type as PaymentEventType)) return null;
-
     const data = (body['data'] ?? {}) as Record<string, unknown>;
-    return {
+    const base = {
       id,
-      type: type as PaymentEventType,
       providerCustomerId: typeof data['customerId'] === 'string' ? data['customerId'] : null,
       providerSubscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : null,
       tier: typeof data['tier'] === 'string' ? (data['tier'] as SubscriptionTier) : null,
       currentPeriodEnd: typeof data['currentPeriodEnd'] === 'string' ? data['currentPeriodEnd'] : null,
       raw: body,
     };
+
+    // Accept this platform's own event names, so a developer can drive the flow
+    // by hand without knowing the provider's vocabulary...
+    const internal: PaymentEventType[] = [
+      'checkout.completed',
+      'subscription.renewed',
+      'subscription.deleted',
+      'invoice.payment_failed',
+      'charge.disputed',
+      'subscription.paused',
+      'subscription.resumed',
+    ];
+    if (internal.includes(type as PaymentEventType)) {
+      return { ...base, type: type as PaymentEventType };
+    }
+
+    // ...and otherwise fall back to the provider's vocabulary, so a webhook
+    // replayed against a gateway-less deployment behaves exactly as the real one.
+    return mapOpenPayEvent(body);
   }
 }
 
@@ -215,16 +231,57 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
       return { applied: true, userId, tier, tierExpiresAt: periodEnd.toISOString() };
     }
 
+    case 'subscription.renewed': {
+      // -> Extend the current period. This is the recurring-billing path: the
+      // provider charged the saved payment method and we push the end date out.
+      const current = await db
+        .select({ currentPeriodEnd: subscriptions.currentPeriodEnd })
+        .from(subscriptions)
+        .where(eq(subscriptions.userId, userId))
+        .limit(1);
+      const existing = current[0]?.currentPeriodEnd ?? null;
+      const base = existing && existing.getTime() > Date.now() ? existing : new Date();
+      const periodEnd = periodEndFrom(base);
+      await db
+        .update(subscriptions)
+        .set({ status: 'active', currentPeriodEnd: periodEnd, updatedAt: new Date() })
+        .where(eq(subscriptions.userId, userId));
+      await markPaymentEvent(db, event.id, true, null);
+      return { applied: true, userId, tierExpiresAt: periodEnd.toISOString() };
+    }
+
+    case 'subscription.paused': {
+      // -> Stop serving, but keep the tier and period. A pause is reversible and
+      // must not read as a cancellation.
+      await db
+        .update(subscriptions)
+        .set({ status: 'paused', updatedAt: new Date() })
+        .where(eq(subscriptions.userId, userId));
+      await revokeAllUserCredentials(db, userId);
+      await markPaymentEvent(db, event.id, true, null);
+      return { applied: true, userId, tierExpiresAt: null };
+    }
+
+    case 'subscription.resumed': {
+      // -> Restore an active period ending one full period from now.
+      const periodEnd = periodEndFrom(new Date());
+      await db
+        .update(subscriptions)
+        .set({ status: 'active', currentPeriodEnd: periodEnd, updatedAt: new Date() })
+        .where(eq(subscriptions.userId, userId));
+      await markPaymentEvent(db, event.id, true, null);
+      return { applied: true, userId, tierExpiresAt: periodEnd.toISOString() };
+    }
+
     case 'subscription.deleted':
     case 'invoice.payment_failed':
-    case 'charge.disputed':
-    case 'charge.reversed': {
+    case 'charge.disputed': {
       // -> Immediate revocation of node access.
       //
-      // A chargeback or reversal is treated as harshly as a cancellation: the
-      // money is gone, so continuing to serve the tunnel would be giving away
-      // service that was paid for and then taken back. Dunning keeps 'expired'
-      // (a payment may still be recovered); a dispute or reversal is 'revoked'.
+      // A dispute is treated as harshly as a cancellation: the money is gone, so
+      // continuing to serve the tunnel would give away service that was paid for
+      // and then taken back. Dunning keeps 'expired' (payment may still be
+      // recovered); a cancellation or dispute is 'revoked'.
       const status = event.type === 'invoice.payment_failed' ? 'expired' : 'revoked';
       await db
         .update(subscriptions)

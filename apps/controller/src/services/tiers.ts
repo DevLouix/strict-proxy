@@ -18,7 +18,20 @@ export function isKnownTier(tier: string): tier is SubscriptionTier {
   return tier in TIERS;
 }
 
-/** Default next period end (30 days) when the webhook omits it. */
+/** Length of a billing period, in days. */
+export const BILLING_PERIOD_DAYS = 30;
+
+/** Default next period end when a payment event omits an explicit date. */
 export function nextPeriodEnd(): Date {
-  return new Date(Date.now() + 30 * 24 * 3600 * 1000);
+  return new Date(Date.now() + BILLING_PERIOD_DAYS * 24 * 3600 * 1000);
+}
+
+/**
+ * A period end one full billing period after `from`.
+ *
+ * Used for renewals. When the stored period has already elapsed the renewal
+ * starts a fresh period rather than extending an expired one into the past.
+ */
+export function periodEndFrom(from: Date): Date {
+  return new Date(from.getTime() + BILLING_PERIOD_DAYS * 24 * 3600 * 1000);
 }

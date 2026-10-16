@@ -56,24 +56,30 @@ async function send(event: unknown) {
 // Mapping
 // ---------------------------------------------------------------------------
 
-test('every dispute spelling maps to charge.disputed', () => {
-  for (const type of ['charge.disputed', 'charge.dispute', 'dispute.created', 'dispute.opened']) {
-    assert.equal(mapOpenPayEvent({ id: `e_${type}`, type })?.type, 'charge.disputed', `${type} should map to charge.disputed`);
+test('dispute.created is the real OpenPay dispute event and maps to charge.disputed', () => {
+  assert.equal(mapOpenPayEvent({ id: 'e_dispute', type: 'dispute.created' })?.type, 'charge.disputed');
+});
+
+test('the other dispute events do not act on the subscription', () => {
+  // dispute.resolved fires whether we won or lost, and the outcome is not in
+  // the envelope, so restoring access automatically would be wrong.
+  // dispute.evidence_submitted is us talking to the provider.
+  for (const type of ['dispute.resolved', 'dispute.evidence_submitted']) {
+    assert.equal(mapOpenPayEvent({ id: `e_${type}`, type }), null, `${type} must not change a subscription`);
   }
 });
 
-test('every reversal spelling maps to charge.reversed', () => {
-  for (const type of ['charge.reversed', 'charge.reversal', 'reversal.created']) {
-    assert.equal(mapOpenPayEvent({ id: `e_${type}`, type })?.type, 'charge.reversed', `${type} should map to charge.reversed`);
-  }
+test('there is no charge.reversed event; only dispute.created is', () => {
+  // Guard against reintroducing a name the provider does not emit.
+  assert.equal(mapOpenPayEvent({ id: 'e_x', type: 'charge.reversed' }), null);
+  assert.equal(mapOpenPayEvent({ id: 'e_y', type: 'charge.reversed' }), null);
 });
 
 test('a refund does NOT automatically revoke', () => {
-  // Refunds may be partial; cutting a customer off over a 10% credit is wrong.
-  // This is an operator decision, so the event is acknowledged and ignored.
-  for (const type of ['charge.refunded', 'charge.refund', 'refund.created']) {
-    assert.equal(mapOpenPayEvent({ id: `e_${type}`, type }), null, `${type} must not auto-revoke`);
-  }
+  // charge.refunded is a real event, and deliberately inert: refunds may be
+  // partial, so cutting a customer off over a 10% credit is wrong. It stays an
+  // operator decision.
+  assert.equal(mapOpenPayEvent({ id: 'e_refund', type: 'charge.refunded' }), null);
 });
 
 test('a dispute resolving a charge reference is applied', async () => {
@@ -85,7 +91,7 @@ test('a dispute resolving a charge reference is applied', async () => {
 
   const res = await send({
     id: 'evt_dispute_1',
-    type: 'charge.disputed',
+    type: 'dispute.created',
     data: { object: { reference: 'spx_disputed', dispute: { reason: 'fraud' } } },
   });
   assert.equal(res.status, 200);
@@ -98,7 +104,7 @@ test('a chargeback revokes the plan and cuts access', async () => {
 
   const res = await send({
     id: 'evt_chargeback_1',
-    type: 'charge.disputed',
+    type: 'dispute.created',
     data: { object: { metadata: { user_id: user.id } } },
   });
   assert.equal(res.body.applied, true);
@@ -117,7 +123,7 @@ test('a chargeback revokes the plan and cuts access', async () => {
 test('a reversal revokes as well', async () => {
   const { user, tokens } = await paidCustomerWithAccess('reversed@example.test');
 
-  const res = await send({ id: 'evt_reversal_1', type: 'charge.reversed', data: { object: { metadata: { user_id: user.id } } } });
+  const res = await send({ id: 'evt_reversal_1', type: 'dispute.created', data: { object: { metadata: { user_id: user.id } } } });
   assert.equal(res.body.applied, true);
 
   const sub = await h.query<any>(`SELECT status FROM subscriptions WHERE user_id = '${user.id}'`);
@@ -127,7 +133,7 @@ test('a reversal revokes as well', async () => {
 
 test('a chargeback drops the refresh tokens so the app cannot reconnect', async () => {
   const { user } = await paidCustomerWithAccess('chargeback-refresh@example.test');
-  await send({ id: 'evt_cb_refresh', type: 'charge.disputed', data: { object: { metadata: { user_id: user.id } } } });
+  await send({ id: 'evt_cb_refresh', type: 'dispute.created', data: { object: { metadata: { user_id: user.id } } } });
 
   const live = await h.query<any>(`SELECT count(*)::int AS n FROM refresh_tokens WHERE user_id = '${user.id}' AND revoked_at IS NULL`);
   assert.equal(live[0].n, 0);
@@ -135,7 +141,7 @@ test('a chargeback drops the refresh tokens so the app cannot reconnect', async 
 
 test('a replayed chargeback is idempotent', async () => {
   const { user } = await paidCustomerWithAccess('chargeback-replay@example.test');
-  const event = { id: 'evt_cb_replay', type: 'charge.disputed', data: { object: { metadata: { user_id: user.id } } } };
+  const event = { id: 'evt_cb_replay', type: 'dispute.created', data: { object: { metadata: { user_id: user.id } } } };
 
   assert.equal((await send(event)).body.applied, true);
   const second = await send(event);
@@ -147,19 +153,19 @@ test('a replayed chargeback is idempotent', async () => {
 test('a chargeback is recorded in the admin audit trail', async () => {
   const { user } = await paidCustomerWithAccess('chargeback-audit@example.test');
   const admin = await h.adminToken();
-  await send({ id: 'evt_cb_audit', type: 'charge.disputed', data: { object: { metadata: { user_id: user.id } } } });
+  await send({ id: 'evt_cb_audit', type: 'dispute.created', data: { object: { metadata: { user_id: user.id } } } });
 
   const events = await h.request('GET', '/api/v1/admin/payments/events', { token: admin });
   const row = events.body.events.find((e: any) => e.id === 'evt_cb_audit');
   assert.ok(row, 'the dispute must be auditable');
   assert.equal(row.applied, true);
-  assert.equal(row.type, 'charge.disputed');
+  assert.equal(row.type, 'charge.disputed', 'the ledger records our mapped type; the provider envelope is kept in payload');
 });
 
 test('an unsigned chargeback is rejected', async () => {
   const { user } = await paidCustomerWithAccess('chargeback-unsigned@example.test');
   const res = await h.request('POST', '/webhooks/payments', {
-    rawBody: JSON.stringify({ id: 'evt_cb_unsigned', type: 'charge.disputed', data: { object: { metadata: { user_id: user.id } } } }),
+    rawBody: JSON.stringify({ id: 'evt_cb_unsigned', type: 'dispute.created', data: { object: { metadata: { user_id: user.id } } } }),
   });
   assert.equal(res.status, 401, 'a chargeback still requires a valid signature');
 
@@ -168,7 +174,7 @@ test('an unsigned chargeback is rejected', async () => {
 });
 
 test('a dispute for an unknown customer is recorded but not applied', async () => {
-  const res = await send({ id: 'evt_cb_unknown', type: 'charge.disputed', data: { object: { customer_id: 'cus_nobody' } } });
+  const res = await send({ id: 'evt_cb_unknown', type: 'dispute.created', data: { object: { customer_id: 'cus_nobody' } } });
   assert.equal(res.status, 200);
   assert.equal(res.body.applied, false);
   assert.equal(res.body.reason, 'unknown_customer');

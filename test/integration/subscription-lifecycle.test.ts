@@ -155,7 +155,7 @@ test('a renewal without our metadata still resolves via the checkout ledger', as
   // A renewal event typically carries no metadata we stamped.
   const body = JSON.stringify({
     id: 'evt_ledger_renewal',
-    type: 'subscription.renewal_failed',
+    type: 'subscription.payment_failed',
     data: { object: { subscription_id: 'sub_x', metadata: { reference: 'spx-renew' } } },
   });
   await h.request('POST', '/webhooks/payments', { rawBody: body, headers: { [h.openpay.header]: h.openPaySignature(body) } });

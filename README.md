@@ -216,7 +216,7 @@ placeholder adapter to the real one automatically:
 OPENPAY_API_KEY=pk_live_...
 OPENPAY_BASE_URL=https://api.openpay.example.com
 OPENPAY_WEBHOOK_SECRET=whsec_...
-OPENPAY_SIGNATURE_HEADER=x-openpay-signature
+OPENPAY_SIGNATURE_HEADER=x-webhook-signature-v1
 OPENPAY_TIMESTAMP_TOLERANCE_SECONDS=300
 ```
 
@@ -227,9 +227,14 @@ Configure OpenPay to deliver events to `https://controller.example.com/webhooks/
 Signatures are Stripe-style:
 
 ```
-x-openpay-signature: t=<unix-seconds>,v1=<hex>
-signed material:     HMAC-SHA256(secret, "<t>." + rawRequestBody)
+x-webhook-signature-v1: t=<unix-seconds>,v1=<hex>
+signed material:        HMAC-SHA256(secret, "<t>." + rawRequestBody) -> hex
 ```
+
+Both facts were confirmed against a real delivery — registering an endpoint and
+calling `webhooks.test()` — and are replayed as a permanent fixture in
+`test/unit/openpay-delivery.test.ts`. OpenPay also sends a legacy
+`x-webhook-signature: hex(HMAC-SHA256(secret, rawBody))`, which we ignore.
 
 Verification fails closed on a missing header, a malformed header, a stale or
 far-future timestamp (outside `OPENPAY_TIMESTAMP_TOLERANCE_SECONDS`), or any

@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "A REAL OpenPay webhook delivery, captured by registering a webhook endpoint",
+    "pointed at a capture server and calling webhooks.test(). Do not hand-edit:",
+    "regenerate from a fresh capture if the signature scheme changes.",
+    "",
+    "Captured 2026-10-16 against https://api.openpay.fiatden.com.",
+    "The secret below is a throwaway registered for this capture and has been",
+    "revoked; it is not used by any deployment."
+  ],
+  "secret": "whsec_35ab096531b030881f6bbaa00fbbd0c601dd6e6b60f6c93810c624972cc520f1",
+  "method": "POST",
+  "path": "/webhooks/payments",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "node",
+    "x-webhook-event": "webhook.test",
+    "x-webhook-timestamp": "1792121456",
+    "x-webhook-signature": "88b10064c29ed7483b77358494f08f4ca0b90f899621b06ec3a3b71d9d87f306",
+    "x-webhook-signature-v1": "t=1792121456,v1=22e31c0c5110d20e803b3512a3ef42cbe6eeaf6add3f1ddcfb297cb1b3420b83"
+  },
+  "rawBody": "{\"id\":\"evt_test_1792121456980\",\"type\":\"webhook.test\",\"created_at\":\"2026-10-16T03:30:56.980Z\",\"data\":{\"message\":\"This is a test event from the platform\"}}"
+}

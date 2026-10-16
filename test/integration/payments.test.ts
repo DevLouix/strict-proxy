@@ -166,7 +166,7 @@ test('subscription.deleted revokes the tier and all credentials immediately', as
 
   const { rawBody, headers } = signed({
     id: 'evt-cancel-1',
-    type: 'subscription.deleted',
+    type: 'subscription.canceled',
     data: { customerId: 'cus_churn@example.test' },
   });
   const res = await h.request('POST', '/webhooks/payments', { rawBody, headers });
@@ -207,7 +207,7 @@ test('invoice.payment_failed marks the subscription expired', async () => {
 
 test('a cancellation event is idempotent', async () => {
   await userWithProviderRef('twice@example.test');
-  const payload = { id: 'evt-cancel-2', type: 'subscription.deleted', data: { customerId: 'cus_twice@example.test' } };
+  const payload = { id: 'evt-cancel-2', type: 'subscription.canceled', data: { customerId: 'cus_twice@example.test' } };
 
   assert.equal((await h.request('POST', '/webhooks/payments', signed(payload))).body.applied, true);
   const second = await h.request('POST', '/webhooks/payments', signed(payload));

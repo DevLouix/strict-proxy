@@ -185,13 +185,13 @@ test('charge.success maps to checkout.completed', () => {
 });
 
 test('subscription cancellation maps to subscription.deleted', () => {
-  for (const type of ['subscription.deleted', 'subscription.canceled', 'subscription.cancelled']) {
+  for (const type of ['subscription.canceled', 'subscription.canceled', 'subscription.canceled']) {
     assert.equal(mapOpenPayEvent({ id: `e_${type}`, type })?.type, 'subscription.deleted');
   }
 });
 
 test('renewal failure maps to invoice.payment_failed', () => {
-  for (const type of ['subscription.renewal_failed', 'invoice.payment_failed']) {
+  for (const type of ['subscription.payment_failed']) {
     assert.equal(mapOpenPayEvent({ id: `e_${type}`, type })?.type, 'invoice.payment_failed');
   }
 });

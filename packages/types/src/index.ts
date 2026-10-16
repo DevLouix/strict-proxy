@@ -214,13 +214,20 @@ export interface PublicIpsResponse {
 // ---------------------------------------------------------------------------
 
 export type PaymentEventType =
+  /** A paid purchase that grants or sets the tier. */
   | 'checkout.completed'
+  /** A successful renewal that extends the current period. */
+  | 'subscription.renewed'
+  /** The subscription was cancelled; access ends. */
   | 'subscription.deleted'
+  /** A renewal attempt failed (dunning). */
   | 'invoice.payment_failed'
-  /** The bank or provider took the money back (chargeback opened). */
+  /** The provider opened a dispute; the money is being taken back. */
   | 'charge.disputed'
-  /** The charge was reversed outright by the provider. */
-  | 'charge.reversed';
+  /** The subscription was paused by the customer; no access, but not cancelled. */
+  | 'subscription.paused'
+  /** A paused subscription was resumed; the existing period applies again. */
+  | 'subscription.resumed';
 
 export interface PaymentEvent {
   /** Provider-agnostic unique event id (idempotency key). */
@@ -268,6 +275,8 @@ export interface TierPrice {
 export interface BillingCheckoutPublic {
   reference: string;
   checkoutUrl: string;
+  /** Echoed back so the client can show the applied discount. */
+  couponCode: string | null;
   tier: SubscriptionTier;
   amountMinor: number;
   currency: string;
