@@ -110,4 +110,46 @@ class AuthController extends StateNotifier<AuthState> {
     await store.clear();
     state = state.copyWith(status: AuthStatus.unauthenticated, email: null, tier: null);
   }
+
+  /// Deletes the account server-side, then clears local credentials.
+  ///
+  /// Returns an error message to show, or null on success. Local state is only
+  /// cleared once the server confirms: clearing first would leave the account
+  /// intact while the app pretended it was gone.
+  Future<String?> deleteAccount(String password) async {
+    try {
+      await _ref.read(apiProvider).deleteAccount(password);
+    } on ApiException catch (e) {
+      return e.message;
+    }
+    await _ref.read(tokenStoreProvider).clear();
+    state = state.copyWith(status: AuthStatus.unauthenticated, email: null, tier: null);
+    return null;
+  }
+
+  /// Asks the server to email a reset link. Returns an error message, or null.
+  ///
+  /// A null result means "the request was accepted", not "the address exists" —
+  /// the server answers identically either way on purpose.
+  Future<String?> requestPasswordReset(String email) async {
+    try {
+      await _ref.read(apiProvider).requestPasswordReset(email);
+      return null;
+    } on ApiException catch (e) {
+      return e.message;
+    }
+  }
+
+  /// Sets a new password from a reset token. Returns an error message, or null.
+  ///
+  /// The server signs out every session on success, so the caller should send
+  /// the user back to sign in rather than assuming a session was created.
+  Future<String?> resetPassword(String token, String newPassword) async {
+    try {
+      await _ref.read(apiProvider).resetPassword(token, newPassword);
+      return null;
+    } on ApiException catch (e) {
+      return e.message;
+    }
+  }
 }

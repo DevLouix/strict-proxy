@@ -127,6 +127,51 @@ class ControllerApi {
     );
   }
 
+  /// Asks the server to start a password reset.
+  ///
+  /// The server answers the same way whether or not the address exists, so this
+  /// cannot be used to discover which emails have accounts. Retries are off: the
+  /// endpoint is unauthenticated, so a 401 is not a token expiry.
+  Future<Map<String, dynamic>> requestPasswordReset(String email) {
+    return _send(
+      () => _client.post(
+        _uri('/api/v1/auth/password/forgot'),
+        headers: _headers(auth: false),
+        body: jsonEncode({'email': email}),
+      ),
+      retryOn401: false,
+    );
+  }
+
+  /// Completes a password reset with a token from the email or an operator.
+  ///
+  /// Unauthenticated, so as with the request above a 401 is not a token expiry.
+  Future<Map<String, dynamic>> resetPassword(String token, String newPassword) {
+    return _send(
+      () => _client.post(
+        _uri('/api/v1/auth/password/reset'),
+        headers: _headers(auth: false),
+        body: jsonEncode({'token': token, 'password': newPassword}),
+      ),
+      retryOn401: false,
+    );
+  }
+
+  /// Deletes the signed-in account. The password is required by the server so a
+  /// stolen access token alone cannot destroy the account.
+  ///
+  /// Retries are left on here, unlike the password-reset calls: a 401 from this
+  /// endpoint is ambiguous — an expired access token, or a wrong password — and
+  /// the refresh-then-retry path resolves the first while still surfacing the
+  /// second as `INVALID_CREDENTIALS`.
+  Future<Map<String, dynamic>> deleteAccount(String password) {
+    return _send(() => _client.delete(
+          _uri('/api/v1/me'),
+          headers: _headers(),
+          body: jsonEncode({'password': password}),
+        ));
+  }
+
   /// Signed dynamic sing-box config bundle (per-node VLESS+REALITY).
   Future<Map<String, dynamic>> networkConfig() =>
       _send(() => _client.get(_uri('/api/v1/network/config'), headers: _headers()));

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth/presentation/auth_controller.dart';
 import 'auth/presentation/login_screen.dart';
+import 'auth/presentation/password_reset_screen.dart';
 import 'home/presentation/home_screen.dart';
 import 'servers/presentation/servers_screen.dart';
 import 'billing/presentation/account_screen.dart';
@@ -30,6 +31,10 @@ Route<dynamic>? onGenerateRoute(RouteSettings settings) {
       return MaterialPageRoute(builder: (_) => const ServersScreen());
     case '/account':
       return MaterialPageRoute(builder: (_) => const AccountScreen());
+    case '/reset-password':
+      // A reset link can point here; the screen accepts the code pasted in, so
+      // no per-platform deep-link parsing is required for it to work.
+      return MaterialPageRoute(builder: (_) => const PasswordResetScreen());
     default:
       return null;
   }

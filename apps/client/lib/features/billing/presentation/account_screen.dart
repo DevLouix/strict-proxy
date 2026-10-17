@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/billing_models.dart';
+import '../../auth/presentation/auth_controller.dart';
 import '../application/billing_controller.dart';
 
 /// Account and subscription screen: current plan, limits, bandwidth usage and
@@ -95,10 +96,41 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
               style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
               textAlign: TextAlign.center,
             ),
+            const SizedBox(height: 24),
+            _DangerZone(onDelete: _confirmDelete),
           ],
         ),
       ),
     );
+  }
+
+  /// Confirms with the account password, because deletion is irreversible and an
+  /// unprotected tap (or a stolen access token) must not be enough.
+  Future<void> _confirmDelete() async {
+    final password = await showDialog<String>(
+      context: context,
+      builder: (_) => const _DeleteAccountDialog(),
+    );
+    if (!mounted) return;
+    if (password == null) return; // cancelled
+    if (password.isEmpty) {
+      _showMessage('Enter your password to confirm.');
+      return;
+    }
+
+    final err = await ref.read(authStateProvider.notifier).deleteAccount(password);
+    if (!mounted) return;
+    if (err != null) {
+      _showMessage(err);
+      return;
+    }
+    // The account is gone; return to the root so the login screen shows rather
+    // than leaving this route on top of it.
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _startCheckout(String tier) async {
@@ -116,6 +148,103 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
       ),
     );
     notifier.consumeCheckout();
+  }
+}
+
+/// Asks for the account password before an irreversible deletion.
+///
+/// A stateful widget so it owns its [TextEditingController]: creating one in the
+/// caller and disposing it as soon as `showDialog` returns tears the controller
+/// down while the dialog route is still animating out.
+class _DeleteAccountDialog extends StatefulWidget {
+  const _DeleteAccountDialog();
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  final _password = TextEditingController();
+
+  @override
+  void dispose() {
+    _password.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Delete account?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'This permanently deletes your account and ends every session. It cannot be undone.',
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _password,
+            obscureText: true,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Confirm your password'),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+          onPressed: () => Navigator.of(context).pop(_password.text),
+          child: const Text('Delete account'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Destructive account actions, set apart from the billing controls above.
+class _DangerZone extends StatelessWidget {
+  const _DangerZone({required this.onDelete});
+  final Future<void> Function() onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      color: Colors.redAccent.withValues(alpha: 0.06),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Text('Delete account', style: theme.textTheme.labelMedium),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'Removes your account and ends every session immediately.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: OutlinedButton(
+                onPressed: () => onDelete(),
+                style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
+                child: const Text('Delete account'),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

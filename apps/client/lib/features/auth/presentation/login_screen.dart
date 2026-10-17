@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth_controller.dart';
+import 'password_reset_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -41,6 +42,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _error = err;
       });
     }
+  }
+
+  void _openReset() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const PasswordResetScreen()),
+    );
   }
 
   @override
@@ -99,6 +106,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     child: Text(_isRegister
                         ? 'Already have an account? Sign in'
                         : 'No account? Create one'),
+                  ),
+                  TextButton(
+                    // Only useful when signing in; hidden while registering so
+                    // the screen does not offer to recover an account the user
+                    // is in the middle of creating.
+                    onPressed: _busy || _isRegister ? null : _openReset,
+                    child: const Text('Forgot password?'),
                   ),
                 ],
               ),

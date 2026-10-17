@@ -256,6 +256,9 @@ fails a test rather than silently dropping every payment.
 | The Docker controller never received `PUBLIC_APP_URL` or `SETTINGS_ENCRYPTION_KEY` | both were documented but not forwarded by compose, so secrets fell back to a JWT-derived key and reset emails linked to `localhost`; both are forwarded now |
 | A node's public IP had to be supplied by hand, and a re-addressed VPS kept a stale allowlist entry | enrollment accepts the address the node connected from when none is given, the agent detects its own address and reports it on every heartbeat, and the controller applies it (`NODE_IP_AUTODETECT`, on by default); private addresses are refused and the dashboard shows whether an address was auto-detected or set by an admin |
 | "Is billing broken, and is it us?" could only be answered by curling the provider | `GET /api/v1/admin/billing/providers` surfaces the gateway's readiness, health, and the saved connection test's real error in the Plans view, so a bad key is distinguishable from an unready merchant account before a customer hits it; **Test connection** (`POST …/providers/test`) runs the provider's own check, which is what clears the stale failure history that otherwise makes a valid key unroutable |
+| The shipped defaults were development defaults | `NODE_ENV=production` now refuses to boot on the two settings that must be deliberate — `CORS_ORIGINS=*` (which used to be the default) and a `localhost` `PUBLIC_APP_URL` — and warns on the softer ones (HSTS off, no gateway key, placeholder gateway URL, empty `SETTINGS_ENCRYPTION_KEY`, short `JWT_SECRET`). `CORS_ORIGINS` defaults to *empty* rather than `*`, and compose ships `ENABLE_HSTS=true`, so a lazy deploy cannot inherit the open posture |
+| A user who forgot their password, or wanted to leave, had no in-app path | the client has a recovery screen (request a link, or paste the code/link an operator relays) reached from **Forgot password?**, and an account-deletion flow guarded by a password confirm; both call the already-tested controller routes |
+| `drizzle-orm` was pinned at `0.38`, which carried a high-severity identifier-escaping advisory | bumped to `0.45.4` (with `drizzle-kit` `0.31.11`). The advisory was unreachable here — nothing calls `sql.raw()` — but the "seven-minor jump is breaking" worry was only that: no query in this codebase needed changing, and `migrations.test.ts` still applies the committed SQL |
 
 ### Bundle verification
 
@@ -437,7 +440,6 @@ than the caller.
 | **Single workspace** | `app_id` scoping unused; one app (`Core`) exists and plans inherit it | OpenPay `apps` |
 | **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
 | **No disputes view in the dashboard** | a chargeback must be answered with curl before the provider's deadline | the API is complete and tested (`routes/disputes.ts`); only the dashboard views are missing |
-| **The client has no password-recovery or account-deletion screen** | a user who forgets their password needs the API or an operator-issued link | the controller routes exist and are tested (`account.ts`); only the Dart screens are missing |
 | **No admin audit log** | a price change or settings write records the acting admin in the row it wrote, but node edits, deletions and refunds record nothing | there is no `admin_audit_log` table |
 | **Node-agent internals are untested** | a regression in `agent.ts`, `usage.ts` or `controller-client.ts` is not caught by `npm test` | no test imports them; `npm run server:smoke` exercises them end to end against a running controller |
 
@@ -484,6 +486,15 @@ Reset tokens are single-use, expire after 30 minutes, are superseded by a newer
 issue, and sign out every other session and node credential — so an intercepted
 link cannot leave an attacker holding a live refresh token or a working tunnel.
 
+The client now surfaces both self-service paths. **Forgot password?** on the sign-in
+screen opens `password_reset_screen.dart`, which asks the controller to email a
+link and, in the same screen, accepts the code (or a whole pasted link, from which
+it extracts the token) when mail is not configured and an operator relays one.
+Deletion lives in the account screen's danger zone and confirms with the password,
+so a stolen access token alone cannot destroy the account. `test/account_recovery_test.dart`
+pins the contract, including that a *rejected* deletion leaves the local session
+intact.
+
 ## Testing map
 
 Run `npm test` (unit + integration). Integration boots real Postgres and Redis
@@ -495,6 +506,7 @@ via testcontainers, so it needs Docker.
 | `test/unit/openpay.test.ts` | signature parsing/verification, event mapping, gateway error translation |
 | `test/unit/policy.test.ts` | tier catalogue, load scoring, node ranking |
 | `test/unit/admin-ui.test.ts` | every dashboard view rendered and every button fired, via a DOM shim |
+| `test/unit/production-config.test.ts` | the boot guard: production refuses `CORS_ORIGINS=*` and a `localhost` `PUBLIC_APP_URL`, warns on the rest, and leaves development alone |
 | `test/integration/auth.test.ts` | register/login/refresh rotation/logout/seats, including that logout revokes the refresh token |
 | `test/integration/admin.test.ts` | the admin authorization matrix over every admin route |
 | `test/integration/fleet.test.ts` | enrollment, HMAC internal API, nonce replay, usage isolation |
