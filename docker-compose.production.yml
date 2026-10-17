@@ -91,10 +91,10 @@ services:
       HEARTBEAT_TTL_SECONDS: ${HEARTBEAT_TTL_SECONDS:-90}
       HMAC_TIMESTAMP_TOLERANCE_SECONDS: ${HMAC_TIMESTAMP_TOLERANCE_SECONDS:-300}
       DEFAULT_REALITY_SERVER_NAME: ${DEFAULT_REALITY_SERVER_NAME:-www.microsoft.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
       NODE_IP_AUTODETECT: ${NODE_IP_AUTODETECT:-true}
-      ENABLE_HSTS: ${ENABLE_HSTS:-false}
+      ENABLE_HSTS: ${ENABLE_HSTS:-true}
       HSTS_MAX_AGE_SECONDS: ${HSTS_MAX_AGE_SECONDS:-31536000}
       RATE_LIMIT_MAX_ATTEMPTS: ${RATE_LIMIT_MAX_ATTEMPTS:-10}
       RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
@@ -111,7 +111,9 @@ services:
       # never forwarded into the container: settings secrets silently fell back
       # to a key derived from JWT_SECRET, and outbound mail linked to
       # http://localhost:3000 instead of the real deployment.
-      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
+      # Required, and validated at boot: a localhost value is refused in
+      # production, because reset and receipt links would then be unusable.
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:?PUBLIC_APP_URL is required — the public URL users reach}
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       DB_INIT_MAX_ATTEMPTS: ${DB_INIT_MAX_ATTEMPTS:-30}
     ports:

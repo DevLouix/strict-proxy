@@ -544,7 +544,8 @@ docker compose --profile edge --env-file .env.docker \\
 Caddy persists certificates in the configured data volume. It refuses managed mode
 unless the site address uses `https://`, and disabled mode never requests an ACME
 certificate. Put the edge in front of the controller before exposing the API and
-set `CORS_ORIGINS` to the actual client origins rather than `*`.
+set `CORS_ORIGINS` to the actual client origins — with `NODE_ENV=production` the
+controller refuses to boot on `*`, and on a `localhost` `PUBLIC_APP_URL`.
 
 ### Docker node agent
 

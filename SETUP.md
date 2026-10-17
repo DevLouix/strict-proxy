@@ -174,10 +174,10 @@ Edit the file. The rows that matter:
 | `SIGNING_KEY_ID` | leave as `primary` unless you are rotating keys |
 | `PAYMENT_WEBHOOK_SECRET` | from step 3 |
 | `SETTINGS_ENCRYPTION_KEY` | from step 3 |
-| `CORS_ORIGINS` | your client's web origin, or `*` while testing |
-| `PUBLIC_APP_URL` | the public URL, e.g. `https://api.example.com`. Password-reset emails link here. |
+| `CORS_ORIGINS` | the origins of any browser client, comma-separated. Leave empty for a mobile-only deployment: a wildcard `*` is refused at boot in production. |
+| `PUBLIC_APP_URL` | the public URL, e.g. `https://app.example.com`. Password-reset emails link here. Required in production; a `localhost` value is refused at boot. |
 | `CONTROLLER_BIND_ADDRESS` | keep `127.0.0.1` and put a TLS proxy in front |
-| `ENABLE_HSTS` | `true` **only** once TLS is in front of the controller |
+| `ENABLE_HSTS` | on by default. Set `false` only while the controller is not behind TLS. |
 
 Leave `OPENPAY_*` empty for now (see [section 6](#6-take-payments-openpay)).
 
@@ -186,6 +186,13 @@ Leave `OPENPAY_*` empty for now (see [section 6](#6-take-payments-openpay)).
 > your own compose file, forward them yourself — forgetting
 > `SETTINGS_ENCRYPTION_KEY` makes secrets fall back to a JWT-derived key, and
 > forgetting `PUBLIC_APP_URL` makes reset emails point at `localhost`.
+
+> **The controller checks this at boot.** With `NODE_ENV=production` it *refuses*
+> to start on the two settings that must be deliberate — `CORS_ORIGINS=*` and a
+> `localhost` `PUBLIC_APP_URL` — and logs a *warning* for the softer ones
+> (`ENABLE_HSTS` off, no `OPENPAY_API_KEY`, the placeholder `OPENPAY_BASE_URL`,
+> an empty `SETTINGS_ENCRYPTION_KEY`, a short `JWT_SECRET`). Development is
+> unaffected, so `CORS_ORIGINS=*` still works locally.
 
 ### Step 5 — Check the file before you trust it
 
@@ -591,9 +598,11 @@ Before you call it done:
 - [ ] `.env.docker` and `signing-key.pem` are outside version control, with
       file permissions `600`.
 - [ ] `CONTROLLER_BIND_ADDRESS` is `127.0.0.1` and TLS terminates in front.
-- [ ] `ENABLE_HSTS=true` — **only** after TLS works.
+- [ ] `NODE_ENV=production`, so the boot-time guard is active. `ENABLE_HSTS=` is
+      left at its `true` default (or explained in a comment if TLS is not in front).
 - [ ] Postgres and Redis are bound to `127.0.0.1`, never `0.0.0.0`.
-- [ ] `CORS_ORIGINS` names your real origin rather than `*`.
+- [ ] `CORS_ORIGINS` is empty (mobile-only) or names your real origins — never `*`.
+- [ ] `PUBLIC_APP_URL` is the public HTTPS URL, not `localhost`.
 - [ ] The admin password from the seed has been changed, and each operator has
       their own account (**Users → change role**).
 - [ ] Backups run *and* have been restored once successfully.
@@ -626,6 +635,7 @@ client**; only do it if you can ship new builds.
 | Client shows "tampered configuration" | signing key mismatch between controller and client build | rebuild the client with the controller's current public key and `SIGNING_KEY_ID` |
 | Client refuses to connect before login | production build with no signing key | rebuild with `STRICT_SIGNING_PUBLIC_KEY`; this is intentional |
 | Password-reset email links to `localhost` | `PUBLIC_APP_URL` not set (and, in Docker, not forwarded) | set it in `.env.docker` and restart |
+| Controller refuses to start: `unsafe production configuration` | `NODE_ENV=production` with `CORS_ORIGINS=*` or a `localhost` `PUBLIC_APP_URL` | the message names the setting; set real origins and a public URL, or run with `NODE_ENV=development` for a local trial |
 | Outbound email stopped after a key rotation | stored SMTP password was encrypted with the old `SETTINGS_ENCRYPTION_KEY` | re-enter the password in **Settings** |
 | A plan shows **price drift** | catalog price and provider plan disagree | use **Change** when you mean to reprice |
 | Customer paid but has no access | webhook never arrived, or was rejected | **Payments** shows verified events; check the provider's delivery log and the webhook secret |
