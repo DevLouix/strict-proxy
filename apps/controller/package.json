@@ -19,7 +19,7 @@
     "@strict-proxy/types": "*",
     "bcryptjs": "^2.4.3",
     "dotenv": "^17.4.2",
-    "drizzle-orm": "^0.38.0",
+    "drizzle-orm": "^0.45.4",
     "express": "^4.21.2",
     "ioredis": "^5.4.2",
     "jsonwebtoken": "^9.0.2",
@@ -32,7 +32,7 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
-    "drizzle-kit": "^0.30.0",
+    "drizzle-kit": "^0.31.11",
     "tsx": "^4.19.2",
     "typescript": "^5.7.0"
   }
