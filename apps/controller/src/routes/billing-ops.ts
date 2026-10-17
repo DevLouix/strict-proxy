@@ -128,9 +128,10 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
         const currency = priceForTier(ctx.cfg, 'standard', overrides).currency;
         // Fees are a convenience: a gateway that refuses them must not blank
         // out the readiness information that actually matters.
-        const [readiness, health, fees] = await Promise.all([
+        const [readiness, health, configs, fees] = await Promise.all([
           client.providers.getReadiness({ merchant_id: merchantId, currency }),
           client.providers.getHealth(),
+          client.providers.listConfigs().catch(() => null),
           client.providers.getFees().catch(() => null),
         ]);
         res.json({
@@ -139,9 +140,86 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
           currency,
           generatedAt: readiness.data.generated_at,
           providers: readiness.data.providers,
+          // Readiness answers "should this work?"; the saved config carries the
+          // last real connection test's verdict and error, which is the field
+          // that names an account-side problem in the provider's own words.
+          configs: (configs?.data ?? []).map((c) => ({
+            provider: c.provider,
+            appId: c.app_id ?? null,
+            isActive: c.is_active,
+            isDefault: c.is_default,
+            keyMode: c.key_mode ?? null,
+            connectionStatus: c.connection_status ?? null,
+            connectionError: c.connection_error ?? null,
+            checkedAt: c.connection_checked_at ?? null,
+            secretKeyConfigured: (c as { secret_key_configured?: boolean }).secret_key_configured ?? null,
+            webhookSecretConfigured: (c as { webhook_secret_configured?: boolean }).webhook_secret_configured ?? null,
+          })),
           health: health.data,
           fees: fees?.data ?? null,
         });
+      } catch (err) {
+        const described = describeOpenPayError(err);
+        res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });
+      }
+    }),
+  );
+
+  /**
+   * Runs the provider's own "Test connection", per workspace.
+   *
+   * This is not a cosmetic check. A workspace whose credentials are unverified,
+   * or whose recent failures have tripped the router's threshold, has every call
+   * refused with "open Provider Configuration > Test connection" — and a passing
+   * test is what clears that stale history. Confirmed against the live gateway:
+   * after this ran, a checkout stopped failing at the router and began reporting
+   * the real account problem instead. It moves no money.
+   */
+  router.post(
+    '/api/v1/admin/billing/providers/test',
+    ...adminOnly,
+    asyncHandler(async (req: Request, res: Response) => {
+      if (!requireGateway(res)) return;
+      const client = createOpenPayClient(ctx.cfg);
+      try {
+        const body = req.body as { provider?: string };
+        // Test what is actually configured rather than a caller-named provider,
+        // so this cannot be pointed at a provider the workspace does not use.
+        const listed = await client.providers.listConfigs().catch(() => null);
+        const targets = (listed?.data ?? []).filter((c) => c.is_active && (!body.provider || c.provider === body.provider));
+        if (targets.length === 0) {
+          res.status(404).json({ error: 'no active provider configuration to test', code: 'NO_PROVIDER_CONFIG' });
+          return;
+        }
+
+        const results: Array<Record<string, unknown>> = [];
+        for (const config of targets) {
+          try {
+            const check = await client.providers.validateConfig({
+              provider: config.provider as 'paystack' | 'flutterwave' | 'korapay' | 'hyperswitch',
+              source: 'saved',
+              app_id: config.app_id ?? null,
+              update_saved_status: true,
+            });
+            results.push({
+              provider: config.provider,
+              ok: check.connection.status === 'valid',
+              status: check.connection.status,
+              code: check.connection.code,
+              message: check.connection.message,
+              remediation: check.connection.remediation,
+              keyMode: check.connection.keyMode,
+            });
+          } catch (err) {
+            // One provider failing must not hide the others' results.
+            const described = describeOpenPayError(err);
+            results.push({ provider: config.provider, ok: false, status: 'error', code: described.code, message: described.message, remediation: null, keyMode: null });
+          }
+        }
+
+        // Health is re-read so the caller can see whether routing was freed.
+        const health = await client.providers.getHealth().catch(() => null);
+        res.json({ results, health: health?.data ?? null });
       } catch (err) {
         const described = describeOpenPayError(err);
         res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });

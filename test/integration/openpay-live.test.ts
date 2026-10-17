@@ -93,6 +93,27 @@ test('the API key is accepted by the live gateway', { skip }, async () => {
   assert.ok(Array.isArray(currencies.data));
 });
 
+test('the provider diagnostic works against the live gateway', { skip }, async () => {
+  // This is the endpoint an operator trusts to answer "can we take money?".
+  // Running it live is what catches the SDK moving or renaming these calls.
+  const admin = await h!.adminToken();
+  const res = await h!.request<{
+    gateway: string;
+    providers: Array<{ provider: string; available: boolean }>;
+    configs: Array<{ provider: string }>;
+    health: { status: string };
+  }>('GET', '/api/v1/admin/billing/providers', { token: admin });
+
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.gateway, 'openpay');
+  assert.ok(Array.isArray(res.body.providers), 'readiness must list providers');
+  assert.ok(res.body.providers.length > 0, 'at least one provider should be described');
+  for (const p of res.body.providers) {
+    assert.equal(typeof p.available, 'boolean', `${p.provider} must report whether it can charge`);
+  }
+  assert.ok(typeof res.body.health.status === 'string');
+});
+
 test('the free tier is never purchasable against the live gateway', { skip }, async () => {
   const token = await login();
   const res = await h!.request('POST', '/api/v1/billing/checkout', { token, body: { tier: 'free' } });

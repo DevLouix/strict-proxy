@@ -277,7 +277,7 @@ chosen path.
 | **Enrollments** | One-time tokens used to add a new VPS. Issue, inspect, revoke. |
 | **Payments** | Every verified payment event, with whether it was applied and why. This is where you find out why a purchase did not grant access. |
 | **Usage** | Bandwidth per node. |
-| **Plans** | What each tier costs, side by side: the price your catalog advertises and the price the provider will actually bill. Includes the **Change** control (section 8), and a **Payment gateway** panel that says whether the provider can take money right now and, if not, whether the fault is yours (a bad key) or the provider account's. |
+| **Plans** | What each tier costs, side by side: the price your catalog advertises and the price the provider will actually bill. Includes the **Change** control (section 8), and a **Payment gateway** panel with a **Test connection** button that says whether the provider can take money right now — and, if not, whether the fault is yours (a bad key) or the provider account's. |
 | **Subscriptions** | Live subscriptions at the payment provider, and a cancel button. |
 | **Settings** | Outbound email (SMTP). |
 
@@ -629,7 +629,7 @@ client**; only do it if you can ship new builds.
 | Outbound email stopped after a key rotation | stored SMTP password was encrypted with the old `SETTINGS_ENCRYPTION_KEY` | re-enter the password in **Settings** |
 | A plan shows **price drift** | catalog price and provider plan disagree | use **Change** when you mean to reprice |
 | Customer paid but has no access | webhook never arrived, or was rejected | **Payments** shows verified events; check the provider's delivery log and the webhook secret |
-| Card payments fail with a provider error ("no active channel", "credential rejected") | the payment account cannot take money, or your key is wrong | **Plans → Payment gateway** tells the two apart and shows the provider's own "what to do" text |
+| Card payments fail with a provider error ("no active channel", "credential rejected") | the payment account cannot take money, or your key is wrong | **Plans → Payment gateway** shows the provider's own last-test error, and **Test connection** re-runs it (a passing test also clears the stale failure history that otherwise leaves even a valid key unroutable) |
 
 ### Getting more detail
 

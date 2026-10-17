@@ -15,7 +15,7 @@
     "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts"
   },
   "dependencies": {
-    "@fiatden/openpay": "^0.0.6",
+    "@fiatden/openpay": "^0.0.7",
     "@strict-proxy/types": "*",
     "bcryptjs": "^2.4.3",
     "dotenv": "^17.4.2",

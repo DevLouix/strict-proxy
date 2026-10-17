@@ -9,7 +9,7 @@
  * plan changes what existing subscribers are billed, so that is never an
  * automatic action.
  */
-import { h, mount, toast, money, badge } from './dom.js';
+import { h, mount, toast, money, badge, date } from './dom.js';
 
 export async function plansView(api) {
   const host = h('div', {});
@@ -32,6 +32,10 @@ export async function plansView(api) {
    * Whether the gateway can actually take money right now, and if not, whether
    * the problem is ours (a bad key) or the merchant's account. The two look
    * identical in a failed charge, so this is shown before one happens.
+   *
+   * The last real connection test is shown too: readiness answers "should this
+   * work?", but the saved test verdict is the one that names an account-side
+   * failure in the provider's own words.
    */
   function providerPanel() {
     if (!providers) return null;
@@ -41,30 +45,61 @@ export async function plansView(api) {
         h('div', { class: 'empty' }, `Could not read provider status: ${providers.error}`),
       );
     }
+
     const rows = providers.providers ?? [];
+    const configs = new Map((providers.configs ?? []).map((c) => [c.provider, c]));
+
+    const testBtn = h('button', { class: 'btn sm' }, 'Test connection');
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      testBtn.textContent = 'Testing…';
+      try {
+        const result = await api.post('/api/v1/admin/billing/providers/test', {});
+        const bad = (result.results ?? []).filter((r) => !r.ok);
+        if (bad.length === 0) toast('Provider connection test passed');
+        else toast(bad[0].message || 'Provider connection test failed', 'err');
+        await load();
+      } catch (err) {
+        toast(err.message, 'err');
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = 'Test connection';
+      }
+    });
+
     return h('div', { class: 'panel' },
       h('header', {},
         h('h3', {}, 'Payment gateway'),
-        h('span', { class: 'muted small' }, `${providers.currency} · health ${providers.health?.status ?? 'unknown'}`),
+        h('div', { class: 'row' },
+          h('span', { class: 'muted small' }, `${providers.currency} · health ${providers.health?.status ?? 'unknown'}`),
+          testBtn,
+        ),
       ),
       h('div', { class: 'table-wrap' },
         h('table', {},
           h('thead', {}, h('tr', {},
             h('th', {}, 'Provider'),
             h('th', {}, 'Can charge'),
-            h('th', {}, 'Credentials'),
-            h('th', {}, 'Key mode'),
-            h('th', {}, 'Settlement'),
+            h('th', {}, 'Key'),
+            h('th', {}, 'Last test'),
             h('th', {}, 'What to do'),
           )),
-          h('tbody', {}, ...rows.map((p) => h('tr', {},
-            h('td', {}, p.provider),
-            h('td', {}, badge(p.available ? 'online' : p.configured ? 'degraded' : 'offline')),
-            h('td', { class: 'small' }, p.credentials ?? '—'),
-            h('td', { class: 'small mono' }, p.key_mode ?? '—'),
-            h('td', { class: 'small' }, p.settlement?.mode ?? '—'),
-            h('td', { class: 'small muted' }, (p.next_steps?.length ? p.next_steps : p.reasons ?? []).join(' ') || '—'),
-          ))),
+          h('tbody', {}, ...rows.map((p) => {
+            const config = configs.get(p.provider);
+            const testText = config?.connectionError
+              ? config.connectionError
+              : config?.connectionStatus
+                ? `${config.connectionStatus}${config.checkedAt ? ` (${date(config.checkedAt)})` : ''}`
+                : 'not tested';
+            const advice = p.next_steps?.length ? p.next_steps.join(' ') : (config?.connectionError ? '' : (p.reasons ?? []).join(' '));
+            return h('tr', {},
+              h('td', {}, p.provider),
+              h('td', {}, badge(p.available ? 'online' : p.configured ? 'degraded' : 'offline')),
+              h('td', { class: 'small mono' }, p.key_mode ?? config?.keyMode ?? '—'),
+              h('td', { class: 'small' }, testText),
+              h('td', { class: 'small muted' }, advice || '—'),
+            );
+          })),
         ),
       ),
     );
