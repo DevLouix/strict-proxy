@@ -1,7 +1,8 @@
 /**
- * Node Agent configuration. A fresh VPS needs only CONTROLLER_URL,
- * NODE_ENROLLMENT_TOKEN, and NODE_PUBLIC_IP; the issued node identity is
- * persisted locally after enrollment.
+ * Node Agent configuration. A fresh VPS needs only CONTROLLER_URL and
+ * NODE_ENROLLMENT_TOKEN; the issued node identity is persisted locally after
+ * enrollment. NODE_PUBLIC_IP is optional: when it is unset the agent detects
+ * its own public address and reports it to the controller.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { optionalInt, optionalString, requireInt, requireString } from '@strict-proxy/types';
@@ -27,7 +28,11 @@ export interface AgentConfig {
   heartbeatIntervalSeconds: number;
   syncIntervalSeconds: number;
   usageIntervalSeconds: number;
-  publicIp: string;
+  /** Operator-pinned public IP; null means "detect it" (see `publicIpEchoUrl`). */
+  publicIp: string | null;
+  /** Echo service used to detect the node's own public IP; null disables detection. */
+  publicIpEchoUrl: string | null;
+  publicIpDetectIntervalSeconds: number;
   tunnelPort: number;
   hostname: string;
   label: string | null;
@@ -38,6 +43,21 @@ export interface AgentConfig {
 function optionalEnv(name: string): string | null {
   const value = process.env[name]?.trim();
   return value ? value : null;
+}
+
+/**
+ * Resolves the IP-echo service the agent uses to learn its own public address.
+ *
+ * Defaults to a well-known service when unset; setting the variable to an empty
+ * value, `off`, `none` or `disabled` turns detection off so the node reports
+ * only its configured `NODE_PUBLIC_IP`.
+ */
+function resolvePublicIpEchoUrl(): string | null {
+  const raw = process.env.NODE_PUBLIC_IP_ECHO_URL;
+  if (raw === undefined) return 'https://api.ipify.org';
+  const value = raw.trim();
+  if (!value || ['off', 'none', 'disabled'].includes(value.toLowerCase())) return null;
+  return value;
 }
 
 function loadPersistedIdentity(path: string): PersistedNodeIdentity | null {
@@ -73,7 +93,9 @@ export function loadAgentConfig(): AgentConfig {
     heartbeatIntervalSeconds: optionalInt('HEARTBEAT_INTERVAL_SECONDS', 30),
     syncIntervalSeconds: optionalInt('SYNC_INTERVAL_SECONDS', 60),
     usageIntervalSeconds: optionalInt('USAGE_INTERVAL_SECONDS', 60),
-    publicIp: requireString('NODE_PUBLIC_IP', 'public IPv4 of this exit node'),
+    publicIp: optionalEnv('NODE_PUBLIC_IP'),
+    publicIpEchoUrl: resolvePublicIpEchoUrl(),
+    publicIpDetectIntervalSeconds: optionalInt('NODE_PUBLIC_IP_DETECT_INTERVAL_SECONDS', 600),
     tunnelPort: requireInt('NODE_TUNNEL_PORT', 'VLESS+REALITY listen port, e.g. 443'),
     hostname: optionalString('NODE_HOSTNAME', 'node.local'),
     label: optionalEnv('NODE_LABEL'),

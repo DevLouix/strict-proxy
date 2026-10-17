@@ -6,8 +6,10 @@ if [ -z "${NODE_ENROLLMENT_TOKEN:-}" ] && [ ! -s "${NODE_IDENTITY_PATH:-/var/lib
   exit 1
 fi
 
-if [ "${NODE_PUBLIC_IP:-}" = "127.0.0.1" ] || [ -z "${NODE_PUBLIC_IP:-}" ]; then
-  echo "NODE_PUBLIC_IP must be set to the node's public address" >&2
+# NODE_PUBLIC_IP is optional: when it is empty the agent detects the node's
+# public address (NODE_PUBLIC_IP_ECHO_URL) and reports it to the controller.
+if [ "${NODE_PUBLIC_IP:-}" = "127.0.0.1" ]; then
+  echo "NODE_PUBLIC_IP must be a public address, or empty to auto-detect it" >&2
   exit 1
 fi
 

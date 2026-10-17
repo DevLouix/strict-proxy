@@ -9,15 +9,65 @@
  * plan changes what existing subscribers are billed, so that is never an
  * automatic action.
  */
-import { h, mount, toast, money } from './dom.js';
+import { h, mount, toast, money, badge } from './dom.js';
 
 export async function plansView(api) {
   const host = h('div', {});
   let state = null;
+  let providers = null;
 
   async function load() {
     state = await api.get('/api/v1/admin/billing/plans');
+    // Asked separately so a gateway hiccup cannot blank the plan table; the
+    // panel reports the failure instead of the whole screen going empty.
+    try {
+      providers = await api.get('/api/v1/admin/billing/providers');
+    } catch (err) {
+      providers = { error: err.message || String(err) };
+    }
     render();
+  }
+
+  /**
+   * Whether the gateway can actually take money right now, and if not, whether
+   * the problem is ours (a bad key) or the merchant's account. The two look
+   * identical in a failed charge, so this is shown before one happens.
+   */
+  function providerPanel() {
+    if (!providers) return null;
+    if (providers.error) {
+      return h('div', { class: 'panel' },
+        h('header', {}, h('h3', {}, 'Payment gateway')),
+        h('div', { class: 'empty' }, `Could not read provider status: ${providers.error}`),
+      );
+    }
+    const rows = providers.providers ?? [];
+    return h('div', { class: 'panel' },
+      h('header', {},
+        h('h3', {}, 'Payment gateway'),
+        h('span', { class: 'muted small' }, `${providers.currency} · health ${providers.health?.status ?? 'unknown'}`),
+      ),
+      h('div', { class: 'table-wrap' },
+        h('table', {},
+          h('thead', {}, h('tr', {},
+            h('th', {}, 'Provider'),
+            h('th', {}, 'Can charge'),
+            h('th', {}, 'Credentials'),
+            h('th', {}, 'Key mode'),
+            h('th', {}, 'Settlement'),
+            h('th', {}, 'What to do'),
+          )),
+          h('tbody', {}, ...rows.map((p) => h('tr', {},
+            h('td', {}, p.provider),
+            h('td', {}, badge(p.available ? 'online' : p.configured ? 'degraded' : 'offline')),
+            h('td', { class: 'small' }, p.credentials ?? '—'),
+            h('td', { class: 'small mono' }, p.key_mode ?? '—'),
+            h('td', { class: 'small' }, p.settlement?.mode ?? '—'),
+            h('td', { class: 'small muted' }, (p.next_steps?.length ? p.next_steps : p.reasons ?? []).join(' ') || '—'),
+          ))),
+        ),
+      ),
+    );
   }
 
   function render() {
@@ -60,6 +110,7 @@ export async function plansView(api) {
         ),
         syncBtn,
       ),
+      providerPanel(),
       h('div', { class: 'panel' },
         h('header', {},
           h('h3', {}, 'Catalog vs provider'),

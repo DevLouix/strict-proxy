@@ -28,7 +28,9 @@ export class ControllerClient {
         token: this.cfg.enrollmentToken,
         hostname: this.cfg.hostname,
         label: this.cfg.label,
-        publicIp: this.cfg.publicIp,
+        // Omitted when unknown so the controller can derive it from the
+        // enrolling connection instead of being sent a placeholder.
+        ...(this.cfg.publicIp ? { publicIp: this.cfg.publicIp } : {}),
         tunnelPort: this.cfg.tunnelPort,
         realityServerName: this.cfg.realityServerName,
         realityShortIds: Array.from({ length: 8 }, () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0')),
@@ -43,7 +45,7 @@ export class ControllerClient {
     return this.request('GET', '/internal/v1/node/bootstrap');
   }
 
-  heartbeat(report: { cpuPercent: number; memoryPercent: number; bandwidthBytes: number; uplinkRttMs: number; uptimeSeconds: number; engineVersion: string }): Promise<{ ok: boolean; controllerTime: string }> {
+  heartbeat(report: { cpuPercent: number; memoryPercent: number; bandwidthBytes: number; uplinkRttMs: number; uptimeSeconds: number; engineVersion: string; observedPublicIp?: string }): Promise<{ ok: boolean; controllerTime: string }> {
     return this.request('POST', '/internal/v1/node/heartbeat', report);
   }
 

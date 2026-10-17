@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import si from 'systeminformation';
 import { assertAuthenticatedConfig, loadAgentConfig, type AgentConfig, type PersistedNodeIdentity } from './config.js';
 import { ControllerClient } from './controller-client.js';
+import { detectPublicIp } from './public-ip.js';
 import { collectUserUsage } from './usage.js';
 import {
   renderSingBoxConfig,
@@ -77,13 +78,33 @@ class Agent {
   private realityServerName = '';
   private credentials: Credential[] = [];
   private running = true;
+  /** Most recent detection of this node's own public address. */
+  private detectedPublicIp: string | null = null;
+  private publicIpCheckedAt = 0;
 
   constructor(private readonly cfg: AgentConfig) {
     this.client = new ControllerClient(cfg);
   }
 
+  /**
+   * The address to advertise, re-detected at most once per configured interval.
+   * Falls back to the configured `NODE_PUBLIC_IP` when detection is off or
+   * unreachable, which is what makes a provider re-addressing transparent.
+   */
+  private async resolvePublicIp(force = false): Promise<string | null> {
+    const fresh = this.publicIpCheckedAt !== 0 && Date.now() - this.publicIpCheckedAt < this.cfg.publicIpDetectIntervalSeconds * 1000;
+    if (!force && fresh) return this.detectedPublicIp;
+    const detected = await detectPublicIp(this.cfg);
+    this.detectedPublicIp = detected;
+    this.publicIpCheckedAt = Date.now();
+    return detected;
+  }
+
   async enrollIfNeeded(): Promise<void> {
     if (this.cfg.nodeId && this.cfg.hmacSecret) return;
+    // Detect before enrolling so the controller records the real address even
+    // when the operator did not pin one.
+    this.cfg.publicIp = await this.resolvePublicIp(true);
     const enrolled = await this.client.enroll();
     await persistIdentity(this.cfg.identityPath, {
       nodeId: enrolled.nodeId,
@@ -99,7 +120,10 @@ class Agent {
   async bootstrap(): Promise<void> {
     assertAuthenticatedConfig(this.cfg);
     const boot = await this.client.bootstrap();
-    if (boot.publicIp !== this.cfg.publicIp) log('warn', `public IP mismatch: controller=${boot.publicIp} local=${this.cfg.publicIp}; trusting controller`);
+    const advertised = this.cfg.publicIp ?? (await this.resolvePublicIp(true));
+    if (advertised && boot.publicIp !== advertised) {
+      log('warn', `public IP mismatch: controller=${boot.publicIp} local=${advertised}; the next heartbeat will reconcile it`);
+    }
     this.realityPrivateKey = boot.reality.privateKey;
     this.realityShortIds = boot.reality.shortIds;
     this.realityServerName = boot.reality.serverName;
@@ -109,6 +133,7 @@ class Agent {
   async heartbeatOnce(): Promise<void> {
     const [cpu, mem, net, osUptime] = await Promise.all([si.currentLoad(), si.mem(), si.networkStats(), si.time()]);
     const bandwidthBytes = net.reduce((acc, n) => acc + (n.rx_sec ?? 0) + (n.tx_sec ?? 0), 0);
+    const observedPublicIp = await this.resolvePublicIp();
     await this.client.heartbeat({
       cpuPercent: Number((cpu.currentLoad ?? 0).toFixed(2)),
       memoryPercent: Number((mem.active / Math.max(1, mem.total) * 100).toFixed(2)),
@@ -116,6 +141,7 @@ class Agent {
       uplinkRttMs: await this.measureUplinkRtt(),
       uptimeSeconds: Math.floor(osUptime.uptime),
       engineVersion: await this.singBoxVersion(),
+      ...(observedPublicIp ? { observedPublicIp } : {}),
     });
     log('debug', 'heartbeat sent');
   }

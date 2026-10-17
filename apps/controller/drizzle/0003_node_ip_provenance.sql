@@ -1,0 +1,2 @@
+ALTER TABLE "nodes" ADD COLUMN "public_ip_source" text DEFAULT 'enrollment' NOT NULL;--> statement-breakpoint
+ALTER TABLE "nodes" ADD COLUMN "public_ip_updated_at" timestamp with time zone DEFAULT now() NOT NULL;

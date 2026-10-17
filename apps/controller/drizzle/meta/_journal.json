@@ -22,6 +22,13 @@
       "when": 1792125751000,
       "tag": "0002_platform_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792214600134,
+      "tag": "0003_node_ip_provenance",
+      "breakpoints": true
     }
   ]
 }

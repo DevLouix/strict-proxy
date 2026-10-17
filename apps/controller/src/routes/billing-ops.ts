@@ -21,6 +21,7 @@ import {
   isUsablePlan,
   isOurPlan,
   removeTierPlan,
+  resolveMerchantId,
   PLAN_TIER_METADATA_KEY,
   MERCHANT_SETTING_KEY,
 } from '../services/plans.js';
@@ -99,6 +100,48 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
           usable: isUsablePlan(p as unknown as Record<string, unknown>),
         }));
         res.json({ merchantId, tiers, providerPlans, gateway: 'openpay' });
+      } catch (err) {
+        const described = describeOpenPayError(err);
+        res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });
+      }
+    }),
+  );
+
+  /**
+   * Provider readiness, straight from the gateway.
+   *
+   * "Billing is broken" has two very different causes — our key is wrong, or
+   * the merchant's account is not ready to take money — and they look the same
+   * in a failed charge. The gateway distinguishes them, so we ask it here and
+   * surface its own reasons and remediation, rather than leaving an operator to
+   * guess from a provider error string.
+   */
+  router.get(
+    '/api/v1/admin/billing/providers',
+    ...adminOnly,
+    asyncHandler(async (_req: Request, res: Response) => {
+      if (!requireGateway(res)) return;
+      const client = createOpenPayClient(ctx.cfg);
+      try {
+        const merchantId = await resolveMerchantId(ctx.db, ctx.cfg, client);
+        const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
+        const currency = priceForTier(ctx.cfg, 'standard', overrides).currency;
+        // Fees are a convenience: a gateway that refuses them must not blank
+        // out the readiness information that actually matters.
+        const [readiness, health, fees] = await Promise.all([
+          client.providers.getReadiness({ merchant_id: merchantId, currency }),
+          client.providers.getHealth(),
+          client.providers.getFees().catch(() => null),
+        ]);
+        res.json({
+          gateway: 'openpay',
+          merchantId,
+          currency,
+          generatedAt: readiness.data.generated_at,
+          providers: readiness.data.providers,
+          health: health.data,
+          fees: fees?.data ?? null,
+        });
       } catch (err) {
         const described = describeOpenPayError(err);
         res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });

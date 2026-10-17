@@ -10,7 +10,7 @@ import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
 import { eq, sql, and, asc, desc, inArray, isNull } from 'drizzle-orm';
-import { generateEd25519Keypair, signJson, loadSigningPrivateKey } from '@strict-proxy/types';
+import { generateEd25519Keypair, signJson, loadSigningPrivateKey, isPublicIpAddress, normalizeIpAddress } from '@strict-proxy/types';
 import type { PublicIpsResponse, SubscriptionTier, UserPublic } from '@strict-proxy/types';
 import type { Db } from './db/client.js';
 import { devices, nodeEnrollments, nodes, nodeCredentials, paymentEvents, refreshTokens, subscriptions, usageRollups, users } from './db/schema.js';
@@ -25,7 +25,8 @@ import {
 } from './services/auth.js';
 import { tierDefinition, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
-import { computeLoadScore, createNodeEnrollmentToken, enrollNode, registerNode, revokeAllUserCredentials } from './services/nodes.js';
+import { applyObservedNodeIp, computeLoadScore, createNodeEnrollmentToken, enrollNode, registerNode, revokeAllUserCredentials } from './services/nodes.js';
+import { publicIpFromRequest } from './services/client-ip.js';
 import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
 import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
@@ -367,15 +368,35 @@ export function buildRouter(ctx: Ctx): Router {
 
   router.post('/api/v1/nodes/enroll', limit('nodes.enroll'), asyncHandler(async (req, res) => {
     const body = req.body as { token?: string; hostname?: string; label?: string; publicIp?: string; tunnelPort?: number; realityServerName?: string; realityShortIds?: string[]; engineVersion?: string };
-    if (!body.token || !body.hostname || !body.publicIp || !body.realityServerName || !body.realityShortIds?.length) {
-      res.status(400).json({ error: 'token, hostname, publicIp, realityServerName and realityShortIds are required', code: 'VALIDATION' });
+    if (!body.token || !body.hostname || !body.realityServerName || !body.realityShortIds?.length) {
+      res.status(400).json({ error: 'token, hostname, realityServerName and realityShortIds are required', code: 'VALIDATION' });
       return;
     }
+
+    // The operator may pin the address; otherwise fall back to the address the
+    // enrolling node connected from. Either way it must be a public address —
+    // `nodes.public_ip` is published in the list origins trust.
+    const suppliedRaw = typeof body.publicIp === 'string' ? body.publicIp.trim() : '';
+    const supplied = suppliedRaw ? normalizeIpAddress(suppliedRaw) : null;
+    if (suppliedRaw && (supplied === null || !isPublicIpAddress(supplied))) {
+      res.status(400).json({ error: 'publicIp must be a public address', code: 'VALIDATION' });
+      return;
+    }
+    const publicIp = supplied ?? publicIpFromRequest(req);
+    if (!publicIp) {
+      res.status(400).json({
+        error: 'could not determine a public IP for this node; set NODE_PUBLIC_IP on the node, or make sure TRUST_PROXY_HOPS matches your reverse proxies',
+        code: 'PUBLIC_IP_REQUIRED',
+      });
+      return;
+    }
+
     const enrolled = await enrollNode(ctx.db, {
       token: body.token,
       hostname: body.hostname,
       label: body.label,
-      publicIp: body.publicIp,
+      publicIp,
+      publicIpSource: supplied ? 'enrollment' : 'autodetect',
       tunnelPort: Number(body.tunnelPort ?? 443),
       realityServerName: body.realityServerName,
       realityShortIds: body.realityShortIds,
@@ -385,7 +406,7 @@ export function buildRouter(ctx: Ctx): Router {
   }));
 
   router.get('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (_req, res) => {
-    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
+    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
     res.json({ nodes: rows });
   }));
 
@@ -418,14 +439,18 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(400).json({ error: 'valid status is required', code: 'VALIDATION' });
       return;
     }
+    if (body.publicIp !== undefined && !isPublicIpAddress(body.publicIp)) {
+      res.status(400).json({ error: 'publicIp must be a public address', code: 'VALIDATION' });
+      return;
+    }
     const [updated] = await ctx.db.update(nodes).set({
       ...(body.status === undefined ? {} : { status: body.status }),
       ...(body.hostname === undefined ? {} : { hostname: body.hostname.trim() }),
       ...(body.region === undefined ? {} : { region: body.region.trim() }),
       ...(body.label === undefined ? {} : { label: body.label?.trim() || null }),
-      ...(body.publicIp === undefined ? {} : { publicIp: body.publicIp.trim() }),
+      ...(body.publicIp === undefined ? {} : { publicIp: normalizeIpAddress(body.publicIp)!, publicIpSource: 'manual', publicIpUpdatedAt: new Date() }),
       ...(body.tunnelPort === undefined ? {} : { tunnelPort: body.tunnelPort }),
-    }).where(eq(nodes.id, nodeId)).returning({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, tunnelPort: nodes.tunnelPort, status: nodes.status });
+    }).where(eq(nodes.id, nodeId)).returning({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status });
     if (!updated) {
       res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
       return;
@@ -539,6 +564,8 @@ export function buildRouter(ctx: Ctx): Router {
         uplinkRttMs?: number;
         uptimeSeconds?: number;
         engineVersion?: string;
+        /** The address the node sees for itself (from its IP echo service). */
+        observedPublicIp?: string;
       };
       const cpu = Number(body.cpuPercent ?? 0);
       const mem = Number(body.memoryPercent ?? 0);
@@ -557,6 +584,13 @@ export function buildRouter(ctx: Ctx): Router {
           lastHeartbeatAt: new Date(),
         })
         .where(eq(nodes.id, nodeId));
+
+      // Keep the Gatekeeper allowlist pointing at where the node actually is.
+      const ipChange = await applyObservedNodeIp(ctx.db, ctx.cfg, nodeId, body.observedPublicIp);
+      if (ipChange.changed) {
+        console.warn(`[controller] node ${nodeId} public IP auto-updated to ${ipChange.publicIp}`);
+      }
+
       res.json({ ok: true, controllerTime: new Date().toISOString() });
     }),
   );

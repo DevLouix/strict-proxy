@@ -143,6 +143,7 @@ test('every operator billing route has a control in the dashboard', async () => 
   const source = await readFile(path.join(ADMIN_DIR, 'billing-ops-view.js'), 'utf8');
   const calls = [
     "api.get('/api/v1/admin/billing/plans')",
+    "api.get('/api/v1/admin/billing/providers')",
     "api.post('/api/v1/admin/billing/plans/sync'",
     "api.put('/api/v1/admin/billing/plans/price'",
     "api.del(`/api/v1/admin/billing/plans/price/${t.tier}`)",

@@ -140,6 +140,14 @@ export const nodes = pgTable(
     region: text('region').notNull(),
     label: text('label'),
     publicIp: text('public_ip').notNull(),
+    /**
+     * How `public_ip` was last written: 'enrollment' (operator supplied it at
+     * enrollment), 'autodetect' (the node reported it, or it was derived from
+     * the enrollment connection), or 'manual' (an admin edited the node).
+     * Surfaced so an address that moved on its own is visible in the dashboard.
+     */
+    publicIpSource: text('public_ip_source').notNull().default('enrollment'),
+    publicIpUpdatedAt: timestamp('public_ip_updated_at', { withTimezone: true }).notNull().defaultNow(),
     tunnelPort: integer('tunnel_port').notNull().default(443),
     /** 'online' | 'degraded' | 'offline' | 'draining' */
     status: text('status').notNull().default('offline'),

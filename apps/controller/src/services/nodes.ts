@@ -5,7 +5,7 @@ import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { and, eq, gt, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { nodeCredentials, nodeEnrollments, nodes, subscriptions } from '../db/schema.js';
-import { generateRealityKeypair } from '@strict-proxy/types';
+import { generateRealityKeypair, isPublicIpAddress, normalizeIpAddress } from '@strict-proxy/types';
 
 /** Generates a one-time enrollment token and its database hash. */
 export function createNodeEnrollmentToken(): { token: string; tokenHash: string } {
@@ -29,6 +29,11 @@ export async function enrollNode(
     hostname: string;
     label?: string;
     publicIp: string;
+    /**
+     * Provenance of `publicIp`. Defaults to 'enrollment'; pass 'autodetect'
+     * when the address came from the enrolling connection rather than the body.
+     */
+    publicIpSource?: 'enrollment' | 'autodetect' | 'manual';
     tunnelPort: number;
     realityServerName: string;
     realityShortIds: string[];
@@ -53,6 +58,8 @@ export async function enrollNode(
         region: enrollment.region,
         label: params.label ?? null,
         publicIp: params.publicIp,
+        publicIpSource: params.publicIpSource ?? 'enrollment',
+        publicIpUpdatedAt: now,
         tunnelPort: params.tunnelPort,
         realityPrivateKey: reality.privateKeyB64,
         realityPublicKey: reality.publicKeyB64,
@@ -112,6 +119,8 @@ export async function registerNode(
       region: params.region,
       label: params.label ?? null,
       publicIp: params.publicIp,
+      publicIpSource: 'manual',
+      publicIpUpdatedAt: new Date(),
       tunnelPort: params.tunnelPort,
       realityPrivateKey: priv,
       realityPublicKey: pub,
@@ -128,6 +137,8 @@ export async function registerNode(
         region: params.region,
         label: params.label ?? null,
         publicIp: params.publicIp,
+        publicIpSource: 'manual',
+        publicIpUpdatedAt: new Date(),
         tunnelPort: params.tunnelPort,
         realityPrivateKey: priv,
         realityPublicKey: pub,
@@ -143,6 +154,37 @@ export async function registerNode(
 
   if (!row) throw new Error('failed to register node');
   return { nodeId: row.id, hmacSecret };
+}
+
+/**
+ * Applies a node's self-reported public IP, when the deployment allows it.
+ *
+ * The Gatekeeper's trusted IP list is derived from `nodes.public_ip`, so a node
+ * whose provider re-issues its address would otherwise stay allowlisted at a
+ * stale address (and be missing from the real one) until an admin noticed. The
+ * agent reports what it observes on every heartbeat; this accepts it only when
+ * auto-detection is enabled and the value is a public address, records that it
+ * was auto-detected, and reports whether anything changed so the caller can log.
+ */
+export async function applyObservedNodeIp(
+  db: Db,
+  cfg: { nodeIpAutodetect: boolean },
+  nodeId: string,
+  observedIp: string | undefined,
+): Promise<{ changed: boolean; publicIp: string | null }> {
+  const [node] = await db.select({ publicIp: nodes.publicIp }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+  if (!node) return { changed: false, publicIp: null };
+
+  const normalized = observedIp === undefined ? null : normalizeIpAddress(observedIp);
+  if (!cfg.nodeIpAutodetect || normalized === null || !isPublicIpAddress(normalized) || normalized === node.publicIp) {
+    return { changed: false, publicIp: node.publicIp };
+  }
+
+  await db
+    .update(nodes)
+    .set({ publicIp: normalized, publicIpSource: 'autodetect', publicIpUpdatedAt: new Date() })
+    .where(eq(nodes.id, nodeId));
+  return { changed: true, publicIp: normalized };
 }
 
 /** Ensures a VLESS credential exists for (user, node). */

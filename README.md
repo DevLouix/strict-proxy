@@ -72,11 +72,15 @@ Content-Type: application/json
 ```bash
 sudo CONTROLLER_URL=https://controller.example.com \
   NODE_ENROLLMENT_TOKEN='<one-time-token>' \
-  NODE_PUBLIC_IP='<vps-public-ip>' \
   NODE_HOSTNAME='fra-1.example.com' \
   NODE_LABEL='Frankfurt 1' \
   bash apps/node-agent/deploy/install-node.sh
 ```
+
+`NODE_PUBLIC_IP` is optional: when it is omitted the agent detects the VPS's own
+public address and reports it, and the controller uses the address the node
+enrolled from if detection is unavailable. Pin it only when the VPS has no
+outbound access to an IP-echo service.
 
 3. Deploy the built `apps/node-agent` files and the systemd units, then start the
 agent. On first boot it calls `POST /api/v1/nodes/enroll`, receives a node id,
@@ -551,12 +555,15 @@ docker compose --profile node --env-file .env.docker \\
   -f docker-compose.production.yml up -d --build
 ```
 
-On first boot provide `NODE_ENROLLMENT_TOKEN`, `NODE_PUBLIC_IP`, and
-`NODE_HOSTNAME`. The node image contains Node 22, the agent dependencies, and the
-pinned sing-box release. It runs sing-box in managed mode because Docker does not
-provide systemd; node identity persists in `NODE_IDENTITY_VOLUME`. The entrypoint
-fails closed when enrollment or the public endpoint is missing. Run one node-agent
-container per VPS with a unique enrollment token; do not expose its stats listener.
+On first boot provide `NODE_ENROLLMENT_TOKEN` and `NODE_HOSTNAME`. `NODE_PUBLIC_IP`
+is optional — leave it empty and the agent detects the VPS's public address (via
+`NODE_PUBLIC_IP_ECHO_URL`, default `https://api.ipify.org`) and reports it on
+enrollment and every heartbeat, so a re-addressed node heals itself. The node
+image contains Node 22, the agent dependencies, and the pinned sing-box release.
+It runs sing-box in managed mode because Docker does not provide systemd; node
+identity persists in `NODE_IDENTITY_VOLUME`. The entrypoint fails closed when
+enrollment or the public endpoint is missing. Run one node-agent container per
+VPS with a unique enrollment token; do not expose its stats listener.
 
 ### CI, artifacts, and live smoke test
 

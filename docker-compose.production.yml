@@ -93,6 +93,7 @@ services:
       DEFAULT_REALITY_SERVER_NAME: ${DEFAULT_REALITY_SERVER_NAME:-www.microsoft.com}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      NODE_IP_AUTODETECT: ${NODE_IP_AUTODETECT:-true}
       ENABLE_HSTS: ${ENABLE_HSTS:-false}
       HSTS_MAX_AGE_SECONDS: ${HSTS_MAX_AGE_SECONDS:-31536000}
       RATE_LIMIT_MAX_ATTEMPTS: ${RATE_LIMIT_MAX_ATTEMPTS:-10}
@@ -207,7 +208,9 @@ services:
     environment:
       CONTROLLER_URL: ${NODE_CONTROLLER_URL:-http://127.0.0.1:8080}
       NODE_ENROLLMENT_TOKEN: ${NODE_ENROLLMENT_TOKEN:-}
-      NODE_PUBLIC_IP: ${NODE_PUBLIC_IP:-127.0.0.1}
+      # Empty means "detect the public IP and report it to the controller".
+      NODE_PUBLIC_IP: ${NODE_PUBLIC_IP:-}
+      NODE_PUBLIC_IP_ECHO_URL: ${NODE_PUBLIC_IP_ECHO_URL:-https://api.ipify.org}
       NODE_TUNNEL_PORT: ${NODE_TUNNEL_PORT:-443}
       NODE_HOSTNAME: ${NODE_HOSTNAME:-strict-proxy-node-agent}
       NODE_LABEL: ${NODE_LABEL:-}

@@ -123,7 +123,7 @@ node ──POST /internal/v1/node/usage      (HMAC)──> bandwidth windows
 | `subscriptions` | tier, status, period end | status is reconciled by a sweep |
 | `payment_events` | every verified webhook | PK = provider event id => idempotency |
 | `billing_checkouts` | checkouts we opened | links provider reference -> user |
-| `nodes` | fleet registry, load, status, HMAC secret | `offline` until first heartbeat |
+| `nodes` | fleet registry, load, status, HMAC secret, IP provenance | `offline` until first heartbeat; `public_ip_source` records whether the address was supplied, auto-detected or set by an admin |
 | `node_enrollments` | hashed one-time tokens | consumed atomically, never replayed |
 | `node_credentials` | VLESS UUID + short-id per user/node | revoked = cut off |
 | `usage_rollups` | bandwidth windows | unique `(credential, windowStart, windowEnd)` |
@@ -254,6 +254,8 @@ fails a test rather than silently dropping every payment.
 | "Logout" left the refresh token valid | `POST /api/v1/auth/logout` also revokes the refresh token the client sends, so logout ends the session rather than just the access token |
 | The Enrollments tab's "Issue new" button did nothing | it selected `[data-open-enroll]`, which nothing ever rendered; the enrollment dialog is now a shared function both the Nodes and Enrollments views call |
 | The Docker controller never received `PUBLIC_APP_URL` or `SETTINGS_ENCRYPTION_KEY` | both were documented but not forwarded by compose, so secrets fell back to a JWT-derived key and reset emails linked to `localhost`; both are forwarded now |
+| A node's public IP had to be supplied by hand, and a re-addressed VPS kept a stale allowlist entry | enrollment accepts the address the node connected from when none is given, the agent detects its own address and reports it on every heartbeat, and the controller applies it (`NODE_IP_AUTODETECT`, on by default); private addresses are refused and the dashboard shows whether an address was auto-detected or set by an admin |
+| "Is billing broken, and is it us?" could only be answered by curling the provider | `GET /api/v1/admin/billing/providers` surfaces the gateway's own readiness, health and remediation in the Plans view, so a bad key is distinguishable from an unready merchant account before a customer hits it |
 
 ### Bundle verification
 
@@ -430,7 +432,7 @@ than the caller.
 
 | Gap | Impact | Why / where |
 |---|---|---|
-| **Recurring checkout not reachable yet** | plans are provisioned and `subscription.renewed` is handled and tested, but a subscription needs a tokenised payment method and `checkout.create` takes an amount, not a plan — so the first purchase is still a one-time checkout | `charges.tokenize` fails on this merchant with `Provider API error (401): Invalid authorization key` — the merchant's *settlement provider* credential is invalid, which is an account setting, not a code path. Fix the provider key and `subscriptions.create({plan_id, customer_id, payment_method_id})` becomes usable; the server side is in place. |
+| **Recurring checkout not reachable yet** | plans are provisioned and `subscription.renewed` is handled and tested, but a subscription needs a tokenised payment method and `checkout.create` takes an amount, not a plan — so the first purchase is still a one-time checkout | Two **provider-side** failures remain, neither in our code (scope is not the cause: passing `app_id`/`merchant_id` explicitly changes nothing). **(1)** Every `charges.create`/`checkout.create` returns `Provider API error (400): No active channel to process transaction. Please contact merchant` for card, bank, ussd *and* qr — the merchant's Paystack account has no payment channel enabled (its `kyc_status` is `pending`). **(2)** `charges.tokenize` returns HTTP 500 `Tokenization failed` because the provider answered with an HTML page, not JSON (`Unexpected token '<', "<!doctype "...`). The settlement *key* is now valid (`providers.validateConfig` → `credentials_valid`), so the earlier 401 is gone. Fix the account channels with the provider, and their tokenize endpoint, and `subscriptions.create({plan_id, customer_id, payment_method_id})` becomes usable; the server side is in place. |
 | **iOS verified in CI only** | Linux release and Android debug APK are built and verified locally; iOS needs macOS + Xcode so it is built by `ios-verification` in CI with `--no-codesign` (compile verification, not signing) | an Apple team identity is required to sign a real build |
 | **Single workspace** | `app_id` scoping unused; one app (`Core`) exists and plans inherit it | OpenPay `apps` |
 | **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
@@ -452,7 +454,10 @@ each one changed a decision:
 | `subscriptions.deletePlan` exists from SDK 0.0.6 | plans can be cleaned up; a delete leaves an *archived* plan when history references it |
 | The controller pinned `^0.0.5` while the root pinned `^0.0.6` | npm installed a second SDK copy for the controller, which is why `instanceof OpenPayError` failed; both now declare `^0.0.6` |
 | `deletePlan` archives rather than deletes when referenced | archived plans are replaced on the next sync, and the replacement is reported |
-| `charges.tokenize` needs a valid settlement-provider key | the recurring gap is an account credential, see the table above |
+| `charges.tokenize` needs a valid settlement-provider key | the credential is now valid, so the earlier 401 is gone; tokenize still 500s because the provider answered with HTML, not JSON — an endpoint-side fault (see *Still open*) |
+| `providers.validateConfig`/`getReadiness`/`getHealth` separate our key from the account | `validateConfig({source:'saved'})` proves whether *our* secret is accepted; a `Provider API error (400)` on a charge then points at the merchant's account (channels/KYC), not at us |
+| A Paystack account with no active channel rejects every charge regardless of the `channel` requested | `channel: 'card' | 'bank' | 'ussd' | 'qr'` all return `No active channel to process transaction`, so this is an account setting, not a per-call choice |
+| Passing `app_id`/`merchant_id` explicitly does not change provider selection here | the API key is already app-scoped, so a failure cannot be blamed on a missing workspace scope |
 | A provider 401/403 means *our* key is wrong, not the caller's | mapped to 502 rather than echoed: the admin dashboard signs an operator out on any 401/403 from this API, so echoing it would log them out mid-session over our own misconfiguration |
 
 One observation about the provider's API, not our code: `merchants.list` returns

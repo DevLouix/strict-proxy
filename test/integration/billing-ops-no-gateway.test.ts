@@ -21,6 +21,7 @@ after(async () => {
 
 const ROUTES = [
   ['GET', '/api/v1/admin/billing/plans', undefined],
+  ['GET', '/api/v1/admin/billing/providers', undefined],
   ['POST', '/api/v1/admin/billing/plans/sync', {}],
   ['PUT', '/api/v1/admin/billing/plans/price', { tier: 'standard', amountMinor: 1000 }],
   ['DELETE', '/api/v1/admin/billing/plans/price/standard', undefined],

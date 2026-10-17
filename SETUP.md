@@ -277,7 +277,7 @@ chosen path.
 | **Enrollments** | One-time tokens used to add a new VPS. Issue, inspect, revoke. |
 | **Payments** | Every verified payment event, with whether it was applied and why. This is where you find out why a purchase did not grant access. |
 | **Usage** | Bandwidth per node. |
-| **Plans** | What each tier costs, side by side: the price your catalog advertises and the price the provider will actually bill. Includes the **Change** control (section 8). |
+| **Plans** | What each tier costs, side by side: the price your catalog advertises and the price the provider will actually bill. Includes the **Change** control (section 8), and a **Payment gateway** panel that says whether the provider can take money right now and, if not, whether the fault is yours (a bad key) or the provider account's. |
 | **Subscriptions** | Live subscriptions at the payment provider, and a cancel button. |
 | **Settings** | Outbound email (SMTP). |
 
@@ -368,11 +368,16 @@ curl -X POST https://<your controller>/api/v1/admin/node-enrollments \
 ```bash
 sudo CONTROLLER_URL=https://<your controller> \
      NODE_ENROLLMENT_TOKEN='<the token you just copied>' \
-     NODE_PUBLIC_IP='<the VPS public IP>' \
      NODE_HOSTNAME='fra-1.example.com' \
      NODE_LABEL='Frankfurt 1' \
      bash apps/node-agent/deploy/install-node.sh
 ```
+
+You do **not** need to know the VPS's IP. The agent finds it on its own (it asks
+an IP-echo service, by default `https://api.ipify.org`) and reports it; if that
+ever fails, the controller falls back to the address the node enrolled from.
+Leave `NODE_PUBLIC_IP` unset and this all happens by itself. Pin it only if the
+VPS cannot reach the internet on the way out.
 
 On first boot the agent exchanges the token for its permanent identity (node id,
 HMAC secret, REALITY keypair) and saves it at
@@ -391,6 +396,32 @@ The node starts as `offline` and flips to `online` after its first heartbeat
 bundle the client fetches.
 
 If it does not appear, see [Troubleshooting](#troubleshooting).
+
+### How the "trusted IP" list looks after itself
+
+Your origins only accept traffic from your fleet. That list is not a file you
+edit — it is built live from the nodes that are `online` or `degraded`:
+
+- a node that comes online **adds itself**;
+- a node that goes offline **removes itself**;
+- a node whose public IP changes **updates itself** on the next heartbeat, so a
+  provider re-addressing a VPS cannot silently leave you allowlisting an address
+  you no longer control.
+
+What still needs a human is the one-time enrollment token. That is deliberate:
+without it, anyone who starts a machine on your network could add their IP to the
+list your origins trust. Minting the token is one click.
+
+The controller refuses to store a private address (loopback, `10.x`, `192.168.x`,
+`172.16–31.x`, link-local, CGNAT) as a node's public IP, because such a value
+would allowlist something meaningless. Under **Nodes**, an address that moved on
+its own is labelled **auto-detected**, and one you edited is labelled **set by
+admin**.
+
+> **Automatic IP updates can be turned off.** Set `NODE_IP_AUTODETECT=false` in
+> the controller environment and nodes can no longer move their own allowlist
+> entry; an admin must edit the node instead. The default is on, which is what
+> makes a re-addressed VPS heal itself.
 
 ---
 
@@ -589,7 +620,8 @@ client**; only do it if you can ship new builds.
 | Logged out of the dashboard immediately | the controller answered `401`/`403` | your session expired; log in again. Anything else is a bug. |
 | Payments show as **not applied** | provider event did not match a checkout | open **Payments** — the reason is listed per event |
 | `OPENPAY_API_KEY is set but OPENPAY_WEBHOOK_SECRET is empty` | half-configured gateway | set both, or neither |
-| Node stays `offline` | agent cannot reach the controller, or wrong public IP | `journalctl -u strict-proxy-agent -n 100` on the VPS; check `NODE_PUBLIC_IP` |
+| Node stays `offline` | agent cannot reach the controller, or enrollment failed | `journalctl -u strict-proxy-agent -n 100` on the VPS |
+| Enrollment says "could not determine a public IP" | the VPS could not reach the IP-echo service, so set `NODE_PUBLIC_IP` explicitly | set `NODE_PUBLIC_IP=<vps public ip>` in `agent.env` and restart |
 | Node enrollment token rejected | expired (default 30 min) or already used | issue a new one — they are single-use and time-limited |
 | Client shows "tampered configuration" | signing key mismatch between controller and client build | rebuild the client with the controller's current public key and `SIGNING_KEY_ID` |
 | Client refuses to connect before login | production build with no signing key | rebuild with `STRICT_SIGNING_PUBLIC_KEY`; this is intentional |
@@ -597,6 +629,7 @@ client**; only do it if you can ship new builds.
 | Outbound email stopped after a key rotation | stored SMTP password was encrypted with the old `SETTINGS_ENCRYPTION_KEY` | re-enter the password in **Settings** |
 | A plan shows **price drift** | catalog price and provider plan disagree | use **Change** when you mean to reprice |
 | Customer paid but has no access | webhook never arrived, or was rejected | **Payments** shows verified events; check the provider's delivery log and the webhook secret |
+| Card payments fail with a provider error ("no active channel", "credential rejected") | the payment account cannot take money, or your key is wrong | **Plans → Payment gateway** tells the two apart and shows the provider's own "what to do" text |
 
 ### Getting more detail
 

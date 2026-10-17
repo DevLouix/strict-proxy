@@ -277,7 +277,7 @@ function issueEnrollmentDialog(api, onIssued) {
               h('div', { class: 'copy' }, res.token),
               h('button', { class: 'btn sm', onClick: () => copyText(res.token) }, 'Copy token'),
               h('p', { class: 'muted small' },
-                'On the VPS: bash apps/node-agent/deploy/install-node.sh with CONTROLLER_URL, NODE_ENROLLMENT_TOKEN, NODE_PUBLIC_IP and NODE_HOSTNAME set.'),
+                'On the VPS: bash apps/node-agent/deploy/install-node.sh with CONTROLLER_URL, NODE_ENROLLMENT_TOKEN and NODE_HOSTNAME set. NODE_PUBLIC_IP is optional — the node detects and reports it.'),
             );
             // Let the caller re-read the list so the token it just issued shows
             // up in the screen the operator was looking at.
@@ -347,7 +347,14 @@ export async function nodesView(api) {
                   n.label ? h('span', { class: 'muted small' }, n.label) : null,
                 ),
                 h('td', { class: 'small' }, n.region),
-                h('td', { class: 'mono' }, n.publicIp),
+                h('td', {},
+                  h('div', { class: 'mono' }, n.publicIp),
+                  n.publicIpSource === 'autodetect'
+                    ? h('span', { class: 'muted small', title: `Auto-detected ${date(n.publicIpUpdatedAt)}` }, 'auto-detected')
+                    : n.publicIpSource === 'manual'
+                      ? h('span', { class: 'muted small' }, 'set by admin')
+                      : null,
+                ),
                 h('td', {}, badge(n.status)),
                 h('td', {}, h('span', { class: 'small' }, `${n.loadScore}%`)),
                 h('td', { class: 'small muted', title: date(n.lastHeartbeatAt) }, ago(n.lastHeartbeatAt)),

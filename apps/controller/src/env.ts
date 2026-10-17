@@ -2,7 +2,7 @@
  * Central Controller configuration. Every deployment-specific value comes
  * from the environment; the process refuses to boot with missing secrets.
  */
-import { optionalInt, optionalString, requireInt, requireString } from '@strict-proxy/types';
+import { optionalBool, optionalInt, optionalString, requireInt, requireString } from '@strict-proxy/types';
 
 export interface ControllerConfig {
   port: number;
@@ -25,6 +25,12 @@ export interface ControllerConfig {
   defaultRealityServerName: string;
   corsOrigins: string[];
   trustProxyHops: number;
+  /**
+   * Whether a node's self-reported public IP is written to `nodes.public_ip`
+   * (and therefore the Gatekeeper allowlist). On by default so a re-addressed
+   * node heals itself; set `NODE_IP_AUTODETECT=false` to require manual edits.
+   */
+  nodeIpAutodetect: boolean;
   enableHsts: boolean;
   hstsMaxAgeSeconds: number;
   /** Requests allowed per IP per window on the auth + webhook surfaces. */
@@ -79,6 +85,7 @@ export function loadConfig(): ControllerConfig {
     defaultRealityServerName: optionalString('DEFAULT_REALITY_SERVER_NAME', 'www.microsoft.com'),
     corsOrigins: optionalString('CORS_ORIGINS', '*').split(',').map((s) => s.trim()),
     trustProxyHops: optionalInt('TRUST_PROXY_HOPS', 1),
+    nodeIpAutodetect: optionalBool('NODE_IP_AUTODETECT', true),
     enableHsts: optionalString('ENABLE_HSTS', 'false').toLowerCase() === 'true',
     hstsMaxAgeSeconds: optionalInt('HSTS_MAX_AGE_SECONDS', 31536000),
     rateLimitMaxAttempts: optionalInt('RATE_LIMIT_MAX_ATTEMPTS', 10),

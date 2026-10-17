@@ -4,13 +4,15 @@ set -euo pipefail
 # Install the node agent on a Debian/Ubuntu VPS.
 # Usage:
 #   sudo CONTROLLER_URL=https://controller.example.com \
-#     NODE_ENROLLMENT_TOKEN=... NODE_PUBLIC_IP=203.0.113.10 \
+#     NODE_ENROLLMENT_TOKEN=... \
 #     NODE_HOSTNAME=fra-1 NODE_LABEL='Frankfurt 1' \
 #     bash install-node.sh
+#
+# NODE_PUBLIC_IP is optional: when it is unset the agent detects the VPS's own
+# public address and the controller records it automatically.
 
 : "${CONTROLLER_URL:?CONTROLLER_URL is required}"
 : "${NODE_ENROLLMENT_TOKEN:?NODE_ENROLLMENT_TOKEN is required}"
-: "${NODE_PUBLIC_IP:?NODE_PUBLIC_IP is required}"
 : "${NODE_HOSTNAME:?NODE_HOSTNAME is required}"
 
 apt-get update
@@ -25,7 +27,9 @@ cat > "$env_file" <<EOF
 CONTROLLER_URL=$CONTROLLER_URL
 NODE_ENROLLMENT_TOKEN=$NODE_ENROLLMENT_TOKEN
 NODE_IDENTITY_PATH=/etc/strict-proxy/node-identity.json
-NODE_PUBLIC_IP=$NODE_PUBLIC_IP
+# Optional. Leave unset to auto-detect the VPS's public IP.
+NODE_PUBLIC_IP=${NODE_PUBLIC_IP:-}
+NODE_PUBLIC_IP_ECHO_URL=${NODE_PUBLIC_IP_ECHO_URL:-https://api.ipify.org}
 NODE_TUNNEL_PORT=${NODE_TUNNEL_PORT:-443}
 NODE_HOSTNAME=$NODE_HOSTNAME
 NODE_LABEL=${NODE_LABEL:-$NODE_HOSTNAME}
