@@ -5,6 +5,7 @@ import { ApiClient, getSession, clearSession, setUnauthorizedHandler } from './a
 import { h, mount, toast } from './dom.js';
 import { overviewView, usersView, nodesView, enrollmentsView, paymentsView, usageView } from './views.js';
 import { settingsView } from './settings-view.js';
+import { plansView, subscriptionsView } from './billing-ops-view.js';
 
 const api = new ApiClient();
 const root = document.getElementById('root');
@@ -16,6 +17,8 @@ const VIEWS = [
   { id: 'enrollments', label: 'Enrollments', render: enrollmentsView },
   { id: 'payments', label: 'Payments', render: paymentsView },
   { id: 'usage', label: 'Usage', render: usageView },
+  { id: 'plans', label: 'Plans', render: plansView },
+  { id: 'subscriptions', label: 'Subscriptions', render: subscriptionsView },
   { id: 'settings', label: 'Settings', render: settingsView },
 ];
 

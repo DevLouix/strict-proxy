@@ -1,0 +1,242 @@
+/**
+ * Operator billing actions: provider plans and subscription cancellation.
+ *
+ * Plans used to be created by hand in the provider's dashboard. This view makes
+ * them a first-class, inspectable thing: what the catalog intends, what the
+ * provider actually has, and where the two disagree.
+ *
+ * A price mismatch is called out rather than fixed. Silently repricing a live
+ * plan changes what existing subscribers are billed, so that is never an
+ * automatic action.
+ */
+import { h, mount, toast, money } from './dom.js';
+
+export async function plansView(api) {
+  const host = h('div', {});
+  let state = null;
+
+  async function load() {
+    state = await api.get('/api/v1/admin/billing/plans');
+    render();
+  }
+
+  function render() {
+    const providerPlans = state?.providerPlans ?? [];
+    // A tier's tag can sit on more than one plan when a delete archived one and a
+    // replacement was created. Show the one that can actually be sold, so the
+    // dashboard agrees with what provisioning will use.
+    const byTier = new Map();
+    for (const p of providerPlans) {
+      if (!p.tier) continue;
+      const seen = byTier.get(p.tier);
+      if (!seen || (!seen.usable && p.usable)) byTier.set(p.tier, p);
+    }
+    const syncBtn = h('button', { class: 'btn primary' }, 'Create missing plans');
+
+    syncBtn.addEventListener('click', async () => {
+      syncBtn.disabled = true;
+      syncBtn.textContent = 'Syncing…';
+      try {
+        const result = await api.post('/api/v1/admin/billing/plans/sync', {});
+        const bits = [];
+        if (result.created) bits.push(`${result.created} created`);
+        if (result.reused) bits.push(`${result.reused} already present`);
+        if (result.replaced?.length) bits.push(`${result.replaced.length} replaced`);
+        if (result.errors?.length) bits.push(`${result.errors.length} failed`);
+        toast(bits.join(', ') || 'Nothing to do');
+        await load();
+      } catch (err) {
+        toast(err.message || 'Sync failed', 'error');
+        syncBtn.disabled = false;
+        syncBtn.textContent = 'Create missing plans';
+      }
+    });
+
+    mount(host,
+      h('div', { class: 'page-head' },
+        h('div', {},
+          h('h2', {}, 'Plans'),
+          h('p', {}, 'Recurring billing needs a provider plan per tier. These are created from the catalog, not by hand.'),
+        ),
+        syncBtn,
+      ),
+      h('div', { class: 'panel' },
+        h('header', {},
+          h('h3', {}, 'Catalog vs provider'),
+          state?.merchantId ? h('span', { class: 'muted small' }, `merchant ${state.merchantId}`) : null,
+        ),
+        h('div', { class: 'table-wrap' },
+          h('table', {},
+            h('thead', {}, h('tr', {},
+              h('th', {}, 'Tier'),
+              h('th', {}, 'Catalog price'),
+              h('th', {}, 'Provider price'),
+              h('th', {}, 'Interval'),
+              h('th', {}, 'Status'),
+            )),
+            h('tbody', {}, ...(state?.tiers ?? []).map((t) => {
+              const plan = byTier.get(t.tier);
+              const mismatch = plan && plan.amount !== t.expectedAmountMinor;
+              return h('tr', {},
+                h('td', {}, t.label),
+                h('td', {}, money(t.expectedAmountMinor, t.currency)),
+                h('td', {}, plan ? money(plan.amount, plan.currency) : h('span', { class: 'muted' }, 'not created')),
+                h('td', {}, plan?.interval ?? '—'),
+                h('td', {},
+                  !plan
+                    ? h('span', { class: 'badge pending' }, 'missing')
+                    : !plan.usable
+                      // An archived plan is what a delete leaves behind when
+                      // history references it — it cannot be subscribed to, and
+                      // syncing now creates a replacement for it.
+                      ? h('span', { class: 'badge failed', title: 'Kept by the provider for billing history, but it cannot be subscribed to. Syncing creates a replacement from the catalog price.' }, plan.status)
+                      : mismatch
+                        ? h('span', { class: 'badge degraded', title: 'The provider price does not match the catalog. Repricing a live plan would change what subscribers are billed, so this is not fixed automatically.' }, 'price drift')
+                        : h('span', { class: 'badge active' }, 'in sync'),
+                ),
+              );
+            })),
+          ),
+        ),
+      ),
+      h('div', { class: 'panel' },
+        h('header', {},
+          h('h3', {}, 'Plans at the provider'),
+          h('p', { class: 'muted small' }, 'Everything the provider holds. Removing a plan the provider cannot drop outright leaves it archived — that is reported, because the tier is then left without a sellable plan.'),
+        ),
+        providerPlans.length === 0
+          ? h('div', { class: 'empty' }, 'No plans at the provider yet.')
+          : h('div', { class: 'table-wrap' },
+              h('table', {},
+                h('thead', {}, h('tr', {},
+                  h('th', {}, 'Name'),
+                  h('th', {}, 'Price'),
+                  h('th', {}, 'Interval'),
+                  h('th', {}, 'Tier'),
+                  h('th', {}, 'Status'),
+                  h('th', {}, ''),
+                )),
+                h('tbody', {}, ...providerPlans.map((p) => h('tr', {},
+                  h('td', {}, p.name),
+                  h('td', {}, money(p.amount, p.currency)),
+                  h('td', {}, p.interval),
+                  h('td', {}, p.tier
+                    ? h('span', { class: 'small' }, p.tier)
+                    : h('span', { class: 'muted small', title: 'Not created by this platform, so it is never adopted or modified.' }, 'not ours')),
+                  h('td', {},
+                    !p.usable
+                      ? h('span', {
+                          class: 'badge failed',
+                          title: 'Cannot be subscribed to. An archived plan is what a delete leaves behind when billing history references it.',
+                        }, p.status)
+                      : h('span', { class: 'badge active' }, p.status),
+                  ),
+                  h('td', {}, removeButton(p)),
+                ))),
+              ),
+            ),
+      ),
+    );
+  }
+
+  function removeButton(p) {
+    const btn = h('button', { class: 'btn sm danger' }, 'Remove');
+    btn.addEventListener('click', async () => {
+      // Plan deletion cannot be undone, and a plan with subscribers behind it
+      // will be archived rather than removed — say so before acting.
+      if (!confirm(`Remove plan "${p.name}"? If any charge references it, the provider will archive it instead of deleting it.`)) return;
+      btn.disabled = true;
+      try {
+        const result = await api.post('/api/v1/admin/billing/plans/delete', { planId: p.id });
+        toast(
+          result.archived
+            ? 'Archived, not removed: billing history references this plan. That tier now has no sellable plan.'
+            : 'Plan removed',
+          result.archived ? 'error' : undefined,
+        );
+        await load();
+      } catch (err) {
+        toast(err.message || 'Remove failed', 'error');
+        btn.disabled = false;
+      }
+    });
+    return btn;
+  }
+
+  await load();
+  return host;
+}
+
+/**
+ * Lists the provider's subscriptions so an operator can cancel one.
+ *
+ * Read-only apart from the cancel action, which asks first — it ends a paying
+ * customer's service immediately.
+ */
+export async function subscriptionsView(api) {
+  const host = h('div', {});
+  let rows = [];
+
+  async function load() {
+    const data = await api.get('/api/v1/admin/billing/subscriptions');
+    rows = data.subscriptions ?? [];
+    render();
+  }
+
+  function render() {
+    mount(host,
+      h('div', { class: 'page-head' },
+        h('div', {},
+          h('h2', {}, 'Subscriptions'),
+          h('p', {}, 'Recurring subscriptions at the provider.'),
+        ),
+        h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
+      ),
+      rows.length === 0
+        ? h('div', { class: 'panel' }, h('div', { class: 'empty' }, 'No subscriptions at the provider yet.'))
+        : h('div', { class: 'panel' },
+            h('div', { class: 'table-wrap' },
+              h('table', {},
+                h('thead', {}, h('tr', {},
+                  h('th', {}, 'Subscription'),
+                  h('th', {}, 'Local user'),
+                  h('th', {}, 'Status'),
+                  h('th', {}, 'Current period ends'),
+                  h('th', {}, ''),
+                )),
+                h('tbody', {}, ...rows.map((s) => h('tr', {},
+                  h('td', { class: 'small mono' }, s.id),
+                  h('td', {}, s.userId ? h('span', { class: 'small' }, s.userId) : h('span', { class: 'muted' }, 'unknown')),
+                  h('td', {}, h('span', { class: `badge ${s.status === 'active' ? 'active' : 'muted'}` }, s.status)),
+                  h('td', { class: 'small' }, s.currentPeriodEnd ? new Date(s.currentPeriodEnd).toLocaleDateString() : '—'),
+                  h('td', {}, cancelButton(s)),
+                ))),
+              ),
+            ),
+          ),
+    );
+  }
+
+  function cancelButton(s) {
+    const btn = h('button', { class: 'btn sm danger' }, 'Cancel');
+    btn.addEventListener('click', async () => {
+      if (!confirm(`Cancel subscription ${s.id}? This ends the customer's access immediately.`)) return;
+      btn.disabled = true;
+      try {
+        await api.post('/api/v1/admin/billing/subscriptions/cancel', {
+          providerSubscriptionId: s.id,
+          ...(s.userId ? { userId: s.userId } : {}),
+        });
+        toast('Subscription cancelled');
+        await load();
+      } catch (err) {
+        toast(err.message || 'Cancel failed', 'error');
+        btn.disabled = false;
+      }
+    });
+    return btn;
+  }
+
+  await load();
+  return host;
+}

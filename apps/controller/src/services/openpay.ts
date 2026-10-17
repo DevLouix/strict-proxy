@@ -15,7 +15,7 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { OpenPayApi, OpenPayError } from '@fiatden/openpay';
-import type { PaymentEvent, PaymentEventType, SubscriptionTier } from '@strict-proxy/types';
+import type { PaymentEvent, PaymentEventType, SubscriptionTier, DisputeOutcome } from '@strict-proxy/types';
 import type { Request } from 'express';
 import type { PaymentGatewayAdapter } from './payments.js';
 import type { ControllerConfig } from '../env.js';
@@ -59,6 +59,38 @@ export function isOpenPayError(err: unknown): err is OpenPayError {
   return err instanceof OpenPayError;
 }
 
+/**
+ * HTTP status carried by an error, or null.
+ *
+ * Deliberately duck-typed rather than `instanceof OpenPayError`. Brand checks
+ * fail whenever the class identity does not hold: two copies of the SDK in the
+ * dependency tree, a provider SDK upgrade, or an error that has crossed a module
+ * or worker boundary. A control-flow decision like "is this plan simply gone?"
+ * must not depend on that — reading the status is what is actually meaningful.
+ */
+export function httpStatusOf(err: unknown): number | null {
+  if (typeof err !== 'object' || err === null) return null;
+  const status = (err as { status?: unknown }).status;
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+/**
+ * Whether an error carries a provider-supplied HTTP status, without relying on
+ * class identity.
+ *
+ * `instanceof OpenPayError` is deliberately not used for control flow: the
+ * brand check fails whenever class identity does not hold — two copies of the
+ * SDK in the dependency tree, an SDK upgrade, or an error that has crossed a
+ * module boundary. A control-flow decision like "is this plan simply gone?" must
+ * not depend on that. Verified against the installed SDK: the class is
+ * `FTDNApiError` (exported as `OpenPayError`), and `status`/`code`/`type`/`name`
+ * are its own enumerable properties, so a numeric `status` survives both
+ * serialisation and a failed brand check.
+ */
+export function hasProviderStatus(err: unknown): boolean {
+  return httpStatusOf(err) !== null;
+}
+
 export interface GatewayErrorShape {
   /** HTTP status to return to our caller. */
   status: number;
@@ -82,7 +114,12 @@ export interface GatewayErrorShape {
  * identifier and is kept as `providerCode` instead.
  */
 export function describeOpenPayError(err: unknown): GatewayErrorShape {
-  if (!isOpenPayError(err)) {
+  // Duck-typed, not `instanceof`: the brand check does not hold in every
+  // context (see `hasProviderStatus`). A provider error that fails it must still
+  // be described by its own status and reason rather than flattened into
+  // "provider unavailable", which would hide the cause from the operator who has
+  // to act on it.
+  if (!isOpenPayError(err) && !hasProviderStatus(err)) {
     return {
       status: 502,
       code: 'BILLING_PROVIDER_UNAVAILABLE',
@@ -92,20 +129,34 @@ export function describeOpenPayError(err: unknown): GatewayErrorShape {
     };
   }
 
-  const rawCode = typeof err.code === 'string' ? err.code.trim() : '';
-  const rawMessage = typeof err.message === 'string' ? err.message.trim() : '';
+  // From here the error carries a provider HTTP status, whether or not it is
+  // literally an OpenPayError instance.
+  const status = httpStatusOf(err) ?? 502;
+  const shaped = (err ?? {}) as { code?: unknown; message?: unknown; status?: number };
+  const rawCode = typeof shaped.code === 'string' ? shaped.code.trim() : '';
+  const rawMessage = typeof shaped.message === 'string' ? shaped.message.trim() : '';
   const message = rawCode && /\s/.test(rawCode) ? rawCode : rawMessage || rawCode || 'payment provider error';
   const providerCode = rawCode || null;
 
-  // 4xx: the request (or our credentials) is the problem, so pass the status
-  // through and keep the provider's own reason.
-  if (err.status >= 400 && err.status < 500) {
+  // The provider rejecting our credentials (401/403) is *our* configuration
+  // problem, not the caller's. Echoing it would be wrong in a way that bites:
+  // the admin dashboard signs an operator out on any 401/403 from this API, so
+  // an invalid provider key would log them out mid-session and read as an
+  // expired login. Reported as an upstream failure instead, with the provider's
+  // own reason kept so the operator can see it is the key that is wrong.
+  if (status === 401 || status === 403) {
+    return { status: 502, code: 'BILLING_PROVIDER_ERROR', message, providerCode, retryable: false };
+  }
+
+  // 4xx: the request itself is the problem, so pass the status through and keep
+  // the provider's own reason.
+  if (status >= 400 && status < 500) {
     return {
-      status: err.status,
-      code: err.status === 429 ? 'BILLING_RATE_LIMITED' : 'BILLING_REJECTED',
+      status,
+      code: status === 429 ? 'BILLING_RATE_LIMITED' : 'BILLING_REJECTED',
       message,
       providerCode,
-      retryable: err.status === 429,
+      retryable: status === 429,
     };
   }
 
@@ -234,9 +285,11 @@ export const OPENPAY_EVENTS = [
  * `charge.refunded` is not mapped. Refunds may be partial, and cutting a customer
  * off over a 10% credit would be wrong. Refunds are an operator decision.
  *
- * `dispute.resolved` is not mapped. It fires whether we won or lost, and
- * restoring access automatically on a win would need the dispute outcome, which
- * is not in the envelope. Left to an operator for now.
+ * `dispute.resolved` is mapped, but only acts on a stated outcome. Verified
+ * against the provider's `Dispute` shape: the verdict is the dispute's `status`
+ * (`won` | `lost` | `resolved`) with `resolution` as free text. `resolved` means
+ * closed without saying who prevailed, so it is carried as a null outcome and
+ * changes nothing — access is never restored on an ambiguous signal.
  */
 const EVENT_MAP: Record<string, PaymentEventType> = {
   // Grant / extend.
@@ -248,6 +301,7 @@ const EVENT_MAP: Record<string, PaymentEventType> = {
   'subscription.canceled': 'subscription.deleted',
   'subscription.payment_failed': 'invoice.payment_failed',
   'dispute.created': 'charge.disputed',
+  'dispute.resolved': 'charge.dispute_resolved',
 
   // Lifecycle without immediate revocation.
   'subscription.paused': 'subscription.paused',
@@ -317,6 +371,15 @@ export function mapOpenPayEvent(body: unknown): PaymentEvent | null {
   };
 
   const tierRaw = str(metadata['tier']) ?? str(object['tier']);
+
+  // A dispute's verdict is its `status`, not a dedicated field. Anything that
+  // is not a decided outcome (notably `resolved`) stays null so the caller
+  // cannot mistake "closed" for "won".
+  const disputeStatusRaw =
+    str(object['status']) ?? str(data['dispute_status']) ?? str(data['status']) ?? str(root['status']);
+  const disputeOutcome: DisputeOutcome | null =
+    disputeStatusRaw === 'won' ? 'won' : disputeStatusRaw === 'lost' ? 'lost' : null;
+
   const periodEnd =
     str(object['current_period_end']) ??
     str(object['period_end']) ??
@@ -336,6 +399,9 @@ export function mapOpenPayEvent(body: unknown): PaymentEvent | null {
     userId: str(metadata['user_id']) ?? str(metadata['userId']),
     tier: tierRaw && tierRaw in { free: 1, standard: 1, pro: 1 } ? (tierRaw as SubscriptionTier) : null,
     currentPeriodEnd: periodEnd,
+    disputeOutcome,
+    providerDisputeId:
+      str(object['id']) ?? str(object['dispute_id']) ?? str(data['dispute_id']) ?? str(root['dispute_id']),
     raw: root,
   };
 }

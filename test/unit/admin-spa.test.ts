@@ -111,19 +111,22 @@ test('every view registered in navigation has a renderer', async () => {
   // The view ids and their renderers live in one VIEWS table; a typo there
   // silently drops a tab or throws on click.
   const entries = [...app.matchAll(/\{\s*id:\s*'([a-z-]+)',\s*label:\s*'([^']+)',\s*render:\s*([A-Za-z_$][\w$]*)\s*\}/g)];
-  assert.ok(entries.length >= 7, `expected the full view set, found ${entries.length}`);
+  assert.ok(entries.length >= 9, `expected the full view set, found ${entries.length}`);
 
   const viewsSource = await readFile(path.join(ADMIN_DIR, 'views.js'), 'utf8');
   const settingsSource = await readFile(path.join(ADMIN_DIR, 'settings-view.js'), 'utf8');
-  const exported = new Set([...declaredExports(viewsSource), ...declaredExports(settingsSource)]);
+  const opsSource = await readFile(path.join(ADMIN_DIR, 'billing-ops-view.js'), 'utf8');
+  const exported = new Set([...declaredExports(viewsSource), ...declaredExports(settingsSource), ...declaredExports(opsSource)]);
 
   for (const [, , , renderer] of entries) {
     assert.ok(exported.has(renderer), `navigation references ${renderer}, which no view module exports`);
   }
 
-  // Settings is the newest view and the one an operator needs for mail, so it
-  // must be reachable rather than defined and forgotten.
-  assert.ok(entries.some(([, , label]) => label === 'Settings'), 'the Settings tab is missing from navigation');
+  // The operator tabs must be reachable rather than defined and forgotten:
+  // each one exists because the platform could not do something without it.
+  for (const label of ['Settings', 'Plans', 'Subscriptions']) {
+    assert.ok(entries.some(([, , l]) => l === label), `the ${label} tab is missing from navigation`);
+  }
 });
 
 test('the settings view never renders a stored secret back into the form', async () => {
@@ -131,4 +134,21 @@ test('the settings view never renders a stored secret back into the form', async
   // A read-back path would make the write-only guarantee cosmetic.
   assert.ok(!/\.summary\.password\b/.test(source), 'the view must not read summary.password');
   assert.match(source, /passwordSet/, 'the form should still say whether a password exists');
+});
+
+test('every operator billing route has a control in the dashboard', async () => {
+  // A route with no UI is a route an operator has to curl, which is how the
+  // original gap ("plans must be created in the provider's dashboard") existed
+  // in the first place.
+  const source = await readFile(path.join(ADMIN_DIR, 'billing-ops-view.js'), 'utf8');
+  const calls = [
+    "api.get('/api/v1/admin/billing/plans')",
+    "api.post('/api/v1/admin/billing/plans/sync'",
+    "api.post('/api/v1/admin/billing/plans/delete'",
+    "api.get('/api/v1/admin/billing/subscriptions')",
+    "api.post('/api/v1/admin/billing/subscriptions/cancel'",
+  ];
+  for (const call of calls) {
+    assert.ok(source.includes(call), `no dashboard control calls ${call}`);
+  }
 });

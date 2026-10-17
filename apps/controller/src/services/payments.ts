@@ -24,7 +24,7 @@ import { setNx } from '../redis.js';
 import type { Redis } from 'ioredis';
 import type { ControllerConfig } from '../env.js';
 import { rateLimit } from './rate-limit.js';
-import { findCheckoutForEvent, candidateReferences } from './checkout-resolution.js';
+import { findCheckoutForEvent, findChargeForEvent, candidateReferences } from './checkout-resolution.js';
 import { mapOpenPayEvent } from './openpay.js';
 import { tierDefinition, nextPeriodEnd, periodEndFrom, isKnownTier } from './tiers.js';
 import type { PaymentEvent, PaymentEventResult, PaymentEventType, SubscriptionTier } from '@strict-proxy/types';
@@ -97,6 +97,7 @@ export class PlaceholderPaymentAdapter implements PaymentGatewayAdapter {
       'subscription.deleted',
       'invoice.payment_failed',
       'charge.disputed',
+      'charge.dispute_resolved',
       'subscription.paused',
       'subscription.resumed',
     ];
@@ -291,6 +292,59 @@ export async function applyPaymentEvent(db: Db, redis: Redis, event: PaymentEven
       await revokeAllRefreshTokens(db, userId);
       await markPaymentEvent(db, event.id, true, null);
       return { applied: true, userId, tier: 'free', tierExpiresAt: null };
+    }
+
+    case 'charge.dispute_resolved': {
+      // -> Act only on a stated verdict.
+      //
+      // A dispute is opened and closed as separate events, so this must be safe
+      // to receive twice, and it must not undo a revocation unless the provider
+      // actually said we won. `resolved` (closed without a verdict) and a
+      // missing outcome both leave the revocation in place: cutting someone off
+      // is recoverable by an operator, granting paid-for service on an
+      // ambiguous signal is not.
+      const outcome = event.disputeOutcome ?? null;
+
+      if (outcome !== 'won') {
+        // Handled, and deliberately nothing changed: a loss confirms the
+        // revocation that already happened when the dispute opened, and an
+        // unstated outcome means the provider never said who prevailed.
+        await markPaymentEvent(
+          db,
+          event.id,
+          false,
+          outcome === 'lost' ? 'dispute lost; access stays revoked' : 'dispute closed with no stated outcome; access unchanged',
+        );
+        return { applied: false, reason: 'no_change_required', userId };
+      }
+
+      // Restore exactly what was taken: the tier is read from the disputed
+      // charge rather than from the current (free) subscription row, which no
+      // longer records it. The charge is settled by now, so this has to bypass
+      // the unsettled-only lookup.
+      const checkout = await findChargeForEvent(db, event);
+      const tier = checkout && isKnownTier(checkout.tier) ? (checkout.tier as SubscriptionTier) : null;
+      if (!tier) {
+        // Won the money back but cannot tell what was purchased. Restoring the
+        // free tier would silently swallow the win; an operator has to look.
+        await markPaymentEvent(db, event.id, false, 'dispute won but no checkout found to restore from');
+        return { applied: false, reason: 'unknown_customer', userId };
+      }
+
+      // The period restarts from the resolution rather than being reconstructed
+      // from the original purchase: the original end date is long past by the
+      // time a dispute settles, and the customer has been without service the
+      // whole time. They paid, so they get a full period from here.
+      const periodEnd = periodEndFrom(new Date());
+      await db
+        .update(subscriptions)
+        .set({ tier, status: 'active', currentPeriodEnd: periodEnd, updatedAt: new Date() })
+        .where(eq(subscriptions.userId, userId));
+
+      // Credentials were revoked when the dispute opened; the next config
+      // request mints fresh ones for the restored tier.
+      await markPaymentEvent(db, event.id, true, null);
+      return { applied: true, userId, tier, tierExpiresAt: periodEnd.toISOString() };
     }
 
     default:

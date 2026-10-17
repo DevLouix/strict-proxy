@@ -224,6 +224,13 @@ export type PaymentEventType =
   | 'invoice.payment_failed'
   /** The provider opened a dispute; the money is being taken back. */
   | 'charge.disputed'
+  /**
+   * The provider closed a dispute. `disputeOutcome` says which way: `won`
+   * restores access, `lost` confirms the revocation. A provider that closes a
+   * dispute without recording an outcome yields a null outcome and nothing is
+   * changed — access is never restored on an ambiguous signal.
+   */
+  | 'charge.dispute_resolved'
   /** The subscription was paused by the customer; no access, but not cancelled. */
   | 'subscription.paused'
   /** A paused subscription was resumed; the existing period applies again. */
@@ -248,14 +255,41 @@ export interface PaymentEvent {
   tier: SubscriptionTier | null;
   /** Subscription period end (ISO) when extending access. */
   currentPeriodEnd: string | null;
+  /**
+   * How a dispute ended: `won`, `lost`, or null when the provider closed it
+   * without stating an outcome.
+   */
+  disputeOutcome?: DisputeOutcome | null;
+  /** Provider's dispute reference, for correlating evidence and outcomes. */
+  providerDisputeId?: string | null;
   /** Raw provider payload retained for audit/debugging. */
   raw: unknown;
 }
 
+/**
+ * Outcome of a chargeback.
+ *
+ * The provider reports this as the dispute's status, not a separate field —
+ * `won` and `lost` are terminal outcomes, while `resolved` means closed
+ * without stating which side prevailed and must not be treated as a win.
+ */
+export type DisputeOutcome = 'won' | 'lost';
+
 /** Result of applying a payment event to a user's subscription. */
 export interface PaymentEventResult {
   applied: boolean;
-  reason?: 'unknown_customer' | 'duplicate_event' | 'unknown_event_type' | 'already_active' | 'free_tier_not_purchasable';
+  reason?:
+    | 'unknown_customer'
+    | 'duplicate_event'
+    | 'unknown_event_type'
+    | 'already_active'
+    | 'free_tier_not_purchasable'
+    /**
+     * Handled and deliberately changed nothing — a dispute that closed without a
+     * verdict, or one we lost and left revoked. Distinct from
+     * `unknown_event_type`, which means the event was not understood at all.
+     */
+    | 'no_change_required';
   userId?: string;
   tier?: SubscriptionTier;
   tierExpiresAt?: string | null;

@@ -79,7 +79,7 @@ test('subscription.renewed is what extends a subscription', () => {
 
 test('every event we act on is a real OpenPay event name', () => {
   // Our mapped types are internal, so map them back through the provider list.
-  const acted = new Set(['checkout.completed', 'subscription.renewed', 'subscription.deleted', 'invoice.payment_failed', 'charge.disputed', 'subscription.paused', 'subscription.resumed']);
+  const acted = new Set(['checkout.completed', 'subscription.renewed', 'subscription.deleted', 'invoice.payment_failed', 'charge.disputed', 'charge.dispute_resolved', 'subscription.paused', 'subscription.resumed']);
   for (const type of OPENPAY_EVENTS) {
     const mapped = mapOpenPayEvent({ id: `e_${type}`, type });
     if (mapped) assert.ok(acted.has(mapped.type), `${type} mapped to unexpected ${mapped.type}`);

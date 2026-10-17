@@ -53,7 +53,7 @@ flutter build linux --release
 flutter build apk --debug
 ```
 
-CI runs the same workflow in `.github/workflows/client-linux-android.yml`.
+CI runs the same workflow in `.github/workflows/client.yml`.
 
 ## Android
 

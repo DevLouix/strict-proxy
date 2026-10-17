@@ -3,7 +3,7 @@
  * Split out of billing.ts so payments.ts can use it without pulling in the
  * provider SDK (webhook handling must not depend on outbound HTTP config).
  */
-import { and, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { billingCheckouts } from '../db/schema.js';
 import type { PaymentEvent } from '@strict-proxy/types';
@@ -32,12 +32,23 @@ export function candidateReferences(event: PaymentEvent): string[] {
   push(object['id']);
   push((object['metadata'] as Record<string, unknown> | undefined)?.['reference']);
 
+  // A dispute is raised against an already-settled charge and names it by
+  // `transaction_id`, which is the provider reference we stored. Without this
+  // the lookup below could not connect the dispute to the purchase.
+  push(object['transaction_id']);
+  push(object['transactionId']);
+  push(data['transaction_id']);
+
   return [...out];
 }
 
 /**
  * Finds the checkout this event settles, if we opened one.
  * Returns the matched row so callers can also settle the ledger entry.
+ *
+ * Only matches rows that have not been settled yet. That restriction is what
+ * stops a replayed `charge.success` from re-granting a tier against a checkout
+ * that is already paid — see {@link findChargeForEvent} for the settled case.
  */
 export async function findCheckoutForEvent(
   db: Db,
@@ -61,4 +72,44 @@ export async function findCheckoutForEvent(
 
   if (rows.length > 0) return { userId: rows[0]!.userId, tier: rows[0]!.tier, reference: rows[0]!.reference };
   return null;
+}
+
+/**
+ * Finds the settled purchase an event refers to, regardless of status.
+ *
+ * Needed for events that concern a charge *after* it settled — a dispute is the
+ * case that matters. Restoring a wrongly-revoked subscription has to read the
+ * tier off the checkout row, and by then that row is `paid`, so
+ * {@link findCheckoutForEvent} deliberately will not return it.
+ *
+ * Prefers the most recently settled match, since a user may have transacted
+ * more than once.
+ */
+export async function findChargeForEvent(
+  db: Db,
+  event: PaymentEvent,
+): Promise<{ userId: string; tier: string; reference: string } | null> {
+  const candidates = candidateReferences(event);
+  if (candidates.length === 0) return null;
+
+  const rows = await db
+    .select({
+      userId: billingCheckouts.userId,
+      tier: billingCheckouts.tier,
+      reference: billingCheckouts.reference,
+      status: billingCheckouts.status,
+      createdAt: billingCheckouts.createdAt,
+    })
+    .from(billingCheckouts)
+    .where(
+      or(
+        inArray(billingCheckouts.reference, candidates),
+        inArray(billingCheckouts.providerReference, candidates),
+      ),
+    )
+    .orderBy(desc(billingCheckouts.createdAt));
+
+  const settled = rows.find((r) => r.status === 'paid') ?? rows[0];
+  if (!settled) return null;
+  return { userId: settled.userId, tier: settled.tier, reference: settled.reference };
 }

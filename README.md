@@ -192,6 +192,9 @@ that JWT and the admin role.
 | `GET /api/v1/admin/payments/events` | Audit verified payment events and outcomes |
 | `GET /api/v1/admin/billing/summary` | Revenue and checkout pipeline rollup |
 | `POST /api/v1/admin/billing/refund` | Refund a settled checkout; a full refund revokes access |
+| `GET /api/v1/admin/billing/plans` + `POST …/plans/sync` | Provider plans per tier, provisioned from the catalog |
+| `POST /api/v1/admin/billing/plans/delete` | Remove a provider plan the tier should no longer use |
+| `GET /api/v1/admin/billing/subscriptions` + `POST …/cancel` | List and cancel provider subscriptions |
 | `GET/POST /api/v1/admin/disputes…` | List, inspect and contest a chargeback |
 | `GET/PUT/DELETE /api/v1/admin/settings/email` | SMTP credentials, admin-configured; the password is encrypted at rest and write-only |
 | `POST /api/v1/admin/settings/email/test` | Send a test message |
@@ -433,10 +436,12 @@ export SING_BOX_LIBBOX_REF=<40-character-reviewed-commit-sha>
 ./apps/client/tool/build-libbox.sh
 ```
 
-`.github/workflows/client-linux-android.yml` runs tests and analysis for client
-changes. On pushes to `main` and `release/*`, it also uploads versioned Linux and
-Android build artifacts. The workflow intentionally does not publish client
-binaries for pull requests or development branches.
+`.github/workflows/client.yml` runs tests and analysis for client changes. On
+pushes to `main` and `release/*`, it also uploads versioned Linux and Android
+build artifacts. It always builds the iOS client on a macOS runner with
+`--no-codesign`, which proves the iOS build compiles even though signing needs a
+release identity. The workflow intentionally does not publish client binaries for
+pull requests or development branches.
 
 The Android host project is generated because it is intentionally not committed:
 

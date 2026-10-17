@@ -11,6 +11,7 @@ import { buildBillingRouter } from './routes/billing.js';
 import { buildDisputesRouter } from './routes/disputes.js';
 import { buildAccountRouter } from './routes/account.js';
 import { buildMailRouter } from './routes/mail.js';
+import { buildBillingOpsRouter } from './routes/billing-ops.js';
 import { createPaymentWebhookRouter, PlaceholderPaymentAdapter, type PaymentGatewayAdapter } from './services/payments.js';
 import { createOpenPayAdapter } from './services/openpay.js';
 import { errorHandler } from './middleware.js';
@@ -86,6 +87,7 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
   app.use(buildDisputesRouter({ db, cfg, redis }));
   app.use(buildAccountRouter({ db, cfg, redis }));
   app.use(buildMailRouter({ db, cfg }));
+  app.use(buildBillingOpsRouter({ db, cfg }));
 
   // Admin dashboard (static bundle). Must be mounted BEFORE the main router:
   // that router ends with a catch-all JSON 404 which would otherwise swallow

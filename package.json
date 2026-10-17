@@ -36,6 +36,7 @@
     "testcontainers": "^12.2.1"
   },
   "dependencies": {
+    "@fiatden/openpay": "^0.0.6",
     "nodemailer": "^10.1.1"
   }
 }

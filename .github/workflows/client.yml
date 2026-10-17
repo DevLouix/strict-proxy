@@ -1,17 +1,17 @@
-name: client-linux-android
+name: client
 
 on:
   pull_request:
     paths:
       - 'apps/client/**'
-      - '.github/workflows/client-linux-android.yml'
+      - '.github/workflows/client.yml'
   push:
     branches:
       - main
       - 'release/**'
     paths:
       - 'apps/client/**'
-      - '.github/workflows/client-linux-android.yml'
+      - '.github/workflows/client.yml'
 
 permissions:
   contents: read
@@ -61,6 +61,45 @@ jobs:
       - name: Analyze Flutter sources
         working-directory: apps/client
         run: flutter analyze
+
+  ios-verification:
+    name: Verify the iOS client builds
+    needs: verify
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      # iOS could not be verified locally: it needs macOS and Xcode. This closes
+      # that gap for every push, so a change that breaks the iOS build is caught
+      # by CI rather than at release time.
+      #
+      # `--no-codesign` deliberately: this proves the Dart and native code
+      # compile for iOS. Signing is a release step needing an Apple team
+      # identity and provisioning profiles, which cannot live in CI.
+      - name: Generate iOS host project and build
+        working-directory: apps/client
+        run: |
+          flutter create --platforms=ios .
+          flutter pub get
+          flutter build ios --release --no-codesign \
+            --dart-define=STRICT_ENV=${CLIENT_ENV} \
+            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
+
+      # A build that compiles is not the same as a client that works: assert the
+      # native engine bridge and the signing-key configuration actually landed,
+      # the way the Linux and Android artifacts are checked.
+      - name: Verify the built iOS app
+        working-directory: apps/client
+        run: |
+          APP=$(find build/ios/iphoneos -maxdepth 2 -name '*.app' -print -quit)
+          if [ -z "$APP" ]; then echo "no .app produced" >&2; exit 1; fi
+          echo "built: $APP"
+          test -f "$APP/Frameworks/App.framework/App" \
+            || { echo "App.framework missing — the Dart entrypoint did not link" >&2; exit 1; }
 
   linux-artifact:
     name: Build Linux client artifact

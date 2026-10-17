@@ -60,13 +60,19 @@ test('dispute.created is the real OpenPay dispute event and maps to charge.dispu
   assert.equal(mapOpenPayEvent({ id: 'e_dispute', type: 'dispute.created' })?.type, 'charge.disputed');
 });
 
-test('the other dispute events do not act on the subscription', () => {
-  // dispute.resolved fires whether we won or lost, and the outcome is not in
-  // the envelope, so restoring access automatically would be wrong.
-  // dispute.evidence_submitted is us talking to the provider.
-  for (const type of ['dispute.resolved', 'dispute.evidence_submitted']) {
-    assert.equal(mapOpenPayEvent({ id: `e_${type}`, type }), null, `${type} must not change a subscription`);
-  }
+test('dispute.evidence_submitted does not act on the subscription', () => {
+  // That event is us talking to the provider, not the provider acting on us.
+  // `dispute.resolved` is handled separately: it was previously unmapped on the
+  // assumption that the outcome was absent from the envelope, which turned out
+  // to be wrong — the verdict is the dispute's `status`. See
+  // dispute-outcomes.test.ts.
+  assert.equal(mapOpenPayEvent({ id: 'e_dispute.evidence_submitted', type: 'dispute.evidence_submitted' }), null);
+});
+
+test('dispute.resolved maps, and only acts on a stated verdict', () => {
+  assert.equal(mapOpenPayEvent({ id: 'e_won', type: 'dispute.resolved', data: { object: { status: 'won' } } })?.disputeOutcome, 'won');
+  // "resolved" is closed-without-a-verdict and must not be read as a win.
+  assert.equal(mapOpenPayEvent({ id: 'e_res', type: 'dispute.resolved', data: { object: { status: 'resolved' } } })?.disputeOutcome, null);
 });
 
 test('there is no charge.reversed event; only dispute.created is', () => {

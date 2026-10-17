@@ -30,13 +30,19 @@ packages/gatekeeper/     Express middleware. Fetches + verifies the signed fleet
 apps/controller/         The brain.
   src/routes.ts            Public + admin API (auth, network, admin, node HMAC).
   src/routes/billing.ts    Billing API for users and the billing summary for admins.
+  src/routes/billing-ops.ts Provider plans + subscription cancellation, admin only.
+  src/routes/account.ts     Password reset/change, account self-deletion, refunds.
+  src/routes/mail.ts        SMTP settings and the test send.
   src/middleware.ts        JWT, admin role, node HMAC, error handler.
   src/services/
     openpay.ts             OpenPay adapter: signature verification + event mapping.
     payments.ts            Webhook pipeline: verify -> map -> apply (idempotent).
     billing.ts             Opens hosted checkouts, writes the checkout ledger.
+    plans.ts               Provider plan per tier, provisioned from the catalog.
     checkout-resolution.ts Webhook -> user resolution. No SDK import, by design.
     catalog.ts             Tier -> price mapping, validated at boot.
+    settings.ts            Platform settings; secrets encrypted at rest (AES-256-GCM).
+    mail.ts                SMTP transport, templates, delivery outcomes.
     usage.ts               Rolling-window bandwidth accounting for quotas.
     rate-limit.ts          Redis fixed-window limiter for unauthenticated routes.
     config.ts              Signed config bundle; ranks nodes by health and load.
@@ -289,15 +295,119 @@ Delivery uses `nodemailer`. It ships no bundled types and `@types/nodemailer`
 is still at 8.x, so the types describe v8 while the runtime is v10; the surface
 used here (`createTransport`, `sendMail`) is unchanged between them.
 
+### Dispute outcomes
+
+`dispute.resolved` was previously unmapped on the assumption that the envelope
+carried no verdict. That assumption was wrong, and has been corrected against the
+provider's own `Dispute` type:
+
+```ts
+interface Dispute {
+  status: 'open' | 'under_review' | 'won' | 'lost' | 'resolved';
+  resolution?: string;  // free text
+  ...
+}
+```
+
+The verdict **is** the status. `won` and `lost` are terminal; `resolved` means
+closed without stating who prevailed, and is deliberately treated as *no
+verdict* rather than as a win — restoring paid-for service on an ambiguous
+signal is the irreversible error, while leaving a revocation in place is
+recoverable by an operator.
+
+| Outcome | Effect |
+|---|---|
+| `won` | restores the tier read from the **disputed charge**, with a fresh period |
+| `lost` | leaves access revoked (already revoked when the dispute opened) |
+| `resolved` / absent | changes nothing, either direction |
+
+Two things that were wrong on the first attempt, both now covered by tests:
+
+- The tier must come from the settled charge, not the current subscription row
+  (which the dispute itself already flattened to `free`), and
+  `findCheckoutForEvent` only matches *unsettled* rows by design — so a
+  settled-charge lookup was added.
+- `transaction_id` was not among the candidate references, so a dispute could
+  not be connected to the purchase at all.
+
+`resolution` is free text and never decides anything; a narrative containing the
+word "won" must not restore access.
+
+### Plan provisioning
+
+A provider plan per tier is required before a subscription can be started, and
+`checkout.create` takes an amount rather than a plan — so plans used to be
+created by hand, letting the catalog prices and the billed prices drift apart
+silently.
+
+Plans are now created from the catalog and found again by a tier tag written
+into the plan's `metadata`. The `platform_settings` cache is only ever a hint:
+it is verified against the provider on every lookup, and a plan deleted out of
+band is rebuilt rather than reused.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/admin/billing/plans` | Catalog vs provider, side by side |
+| `POST /api/v1/admin/billing/plans/sync` | Create any missing plan |
+| `POST /api/v1/admin/billing/plans/delete` | Remove a plan the tier should no longer use |
+| `GET /api/v1/admin/billing/subscriptions` | Provider subscriptions, joined to local users |
+| `POST /api/v1/admin/billing/subscriptions/cancel` | Cancel and stop serving |
+
+Deliberate behaviours:
+
+- **A drifted price is reported, never pushed.** Repricing a live plan changes
+  what existing subscribers are billed, so it is never automatic.
+- **A plan we did not create is never adopted.** A hand-made plan is left alone.
+- **An archived plan is replaced, and the replacement is reported.** A plan can
+  only be recognised as ours by the tag in its metadata, so a plan that a delete
+  archived — the provider's substitute for deleting a plan that billing history
+  references — would keep matching that tag and be reused forever, leaving the
+  tier unsellable. Syncing creates a replacement and names the plan it replaced.
+- **A deactivated plan is left alone.** Unlike an archive, `inactive` is a
+  decision someone made. Creating a second plan over it would override that, so
+  it is reported and nothing is created.
+
+The merchant id is derived from the app record. `merchants.list` is *not* usable
+for this — verified live, it returns child merchants under the account rather
+than the caller.
+
+> **Symptom to know about:** an `instanceof` brand check on the provider SDK's
+> error class failed here because the controller resolved a *different copy* of
+> the SDK than the tests did — `apps/controller` pinned `^0.0.5` while the root
+> pinned `^0.0.6`, so npm installed a second copy under
+> `apps/controller/node_modules`. The error mapping duck-types the HTTP status
+> instead of relying on class identity, and the two declarations are now kept in
+> step. Check `ls apps/controller/node_modules/@fiatden` if an SDK type starts
+> behaving strangely.
+
 ### Still open
 
 | Gap | Impact | Why / where |
 |---|---|---|
-| **iOS build unverified** | Linux release and Android debug APK are built and verified; iOS needs macOS + Xcode | CI macOS runner |
-| **Recurring plans not auto-provisioned** | `subscription.renewed` is handled and tested, and `createPlan` is verified live, but plans are created by hand and the first purchase still opens a one-time checkout | create plans per tier from the catalog, then subscribe the saved payment method |
-| **Dispute outcome not applied** | a dispute we *win* stays revoked | `dispute.resolved` carries no outcome in the envelope — confirm the shape with the provider |
-| **Single workspace** | `app_id` scoping unused | OpenPay `apps` |
+| **Recurring checkout not reachable yet** | plans are provisioned and `subscription.renewed` is handled and tested, but a subscription needs a tokenised payment method and `checkout.create` takes an amount, not a plan — so the first purchase is still a one-time checkout | `charges.tokenize` fails on this merchant with `Provider API error (401): Invalid authorization key` — the merchant's *settlement provider* credential is invalid, which is an account setting, not a code path. Fix the provider key and `subscriptions.create({plan_id, customer_id, payment_method_id})` becomes usable; the server side is in place. |
+| **iOS verified in CI only** | Linux release and Android debug APK are built and verified locally; iOS needs macOS + Xcode so it is built by `ios-verification` in CI with `--no-codesign` (compile verification, not signing) | an Apple team identity is required to sign a real build |
+| **Single workspace** | `app_id` scoping unused; one app (`Core`) exists and plans inherit it | OpenPay `apps` |
 | **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
+
+### Provider contract facts
+
+Verified against the live provider and the SDK, not inferred. Recorded because
+each one changed a decision:
+
+| Fact | Consequence |
+|---|---|
+| `Dispute.status` is the verdict (`won`/`lost`/`resolved`) | dispute outcomes can be applied; `resolved` means "closed, no verdict" |
+| `PlanCreateParams` requires `merchant_id` | it must be derived; `merchants.list` returns *child* merchants, so the app record is used instead |
+| `PlanCreateParams` omits `metadata`, but the API stores it | the tier tag is cast through rather than dropped; discovery depends on it |
+| `subscriptions.deletePlan` exists from SDK 0.0.6 | plans can be cleaned up; a delete leaves an *archived* plan when history references it |
+| The controller pinned `^0.0.5` while the root pinned `^0.0.6` | npm installed a second SDK copy for the controller, which is why `instanceof OpenPayError` failed; both now declare `^0.0.6` |
+| `deletePlan` archives rather than deletes when referenced | archived plans are replaced on the next sync, and the replacement is reported |
+| `charges.tokenize` needs a valid settlement-provider key | the recurring gap is an account credential, see the table above |
+| A provider 401/403 means *our* key is wrong, not the caller's | mapped to 502 rather than echoed: the admin dashboard signs an operator out on any 401/403 from this API, so echoing it would log them out mid-session over our own misconfiguration |
+
+One observation about the provider's API, not our code: `merchants.list` returns
+`password_hash` for each merchant. That is the provider leaking a credential
+field over the API and is worth raising with them.
 
 ### Account recovery
 
@@ -342,6 +452,9 @@ via testcontainers, so it needs Docker.
 | `test/integration/coupons.test.ts` | coupon validation and failure handling |
 | `test/integration/account.test.ts` | password reset/change, account deletion, refunds |
 | `test/integration/mail.test.ts` | secret encryption at rest, SMTP settings, delivery outcomes |
+| `test/integration/dispute-outcomes.test.ts` | dispute verdicts: restore on a win, never on an ambiguous signal |
+| `test/integration/billing-ops.test.ts` | plan provisioning, reuse, price drift, cancellation |
+| `test/integration/billing-ops-no-gateway.test.ts` | the operator routes still gate correctly with no gateway |
 | `test/unit/admin-spa.test.ts` | build-free dashboard: imports resolve, exports exist, secrets stay write-only |
 | `test/unit/openpay-delivery.test.ts` | replays a real captured signed delivery |
 | `test/integration/openpay-webhooks.test.ts` | signature rejection, idempotency, user resolution |

@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { parseSignatureHeader, verifyOpenPaySignature, mapOpenPayEvent, describeOpenPayError } from '../../apps/controller/src/services/openpay.js';
+import { parseSignatureHeader, verifyOpenPaySignature, mapOpenPayEvent, describeOpenPayError, httpStatusOf, hasProviderStatus } from '../../apps/controller/src/services/openpay.js';
 import { OpenPayError } from '@fiatden/openpay';
 
 const SECRET = 'whsec_unit_test_secret';
@@ -334,4 +334,48 @@ test('an error with no message still produces something to show', () => {
   const described = describeOpenPayError(new OpenPayError('', 500));
   assert.equal(described.message, 'payment provider error');
   assert.equal(typeof described.code, 'string');
+});
+
+test('a provider error that crosses a boundary is still described by its own status', () => {
+  // Two copies of the SDK, or an error that has been serialised and revived,
+  // fails an `instanceof` check. Flattening it to 502 would hide the provider's
+  // own reason from the operator who has to act on it.
+  const revived = { status: 402, code: 'card_declined', message: 'Card declined', name: 'FTDNApiError' };
+  const described = describeOpenPayError(revived);
+  assert.equal(described.status, 402);
+  assert.equal(described.code, 'BILLING_REJECTED');
+  assert.equal(described.providerCode, 'card_declined');
+  assert.equal(described.message, 'Card declined');
+});
+
+test('a provider error with no code still keeps its own status', () => {
+  // Real errors from the SDK can omit `code`. Flattening one to 502 would hide
+  // the rate-limit signal the caller is supposed to act on.
+  const described = describeOpenPayError({ status: 429, message: 'Too many requests', name: 'FTDNApiError' });
+  assert.equal(described.status, 429);
+  assert.equal(described.code, 'BILLING_RATE_LIMITED');
+  assert.equal(described.retryable, true);
+});
+
+test('a provider credential failure is not echoed as a caller-facing 401', () => {
+  // The admin dashboard signs an operator out on any 401/403 from this API, so
+  // passing the provider's 401 through would log them out mid-session over a
+  // problem that is ours (a bad provider key), not theirs.
+  const described = describeOpenPayError({ status: 401, message: 'Invalid authorization key', code: 'invalid_key' });
+  assert.equal(described.status, 502);
+  assert.equal(described.code, 'BILLING_PROVIDER_ERROR');
+  assert.equal(described.message, 'Invalid authorization key', 'but the operator still sees the real cause');
+  assert.equal(described.retryable, false, 'retrying with the same key cannot help');
+});
+
+test('httpStatusOf reads only a plausible HTTP status', () => {
+  assert.equal(httpStatusOf({ status: 404 }), 404);
+  assert.equal(httpStatusOf({ status: 401.5 }), null, 'a non-integer is not an HTTP status');
+  assert.equal(httpStatusOf({ status: 0 }), null);
+  assert.equal(httpStatusOf({ status: 999 }), null);
+  assert.equal(httpStatusOf({ status: '404' }), null, 'a stringified status is not trusted');
+  assert.equal(httpStatusOf(null), null);
+  assert.equal(httpStatusOf(new Error('boom')), null);
+  assert.equal(hasProviderStatus({ status: 404 }), true);
+  assert.equal(hasProviderStatus(new Error('boom')), false);
 });
