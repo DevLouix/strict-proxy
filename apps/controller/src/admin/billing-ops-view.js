@@ -33,9 +33,11 @@ export async function plansView(api) {
    * the problem is ours (a bad key) or the merchant's account. The two look
    * identical in a failed charge, so this is shown before one happens.
    *
-   * The last real connection test is shown too: readiness answers "should this
-   * work?", but the saved test verdict is the one that names an account-side
-   * failure in the provider's own words.
+   * Both verdicts are shown because they disagree in practice: readiness says
+   * whether the provider is routable at all, while the saved test says whether
+   * the key is accepted. A green key check with an unroutable provider is a
+   * real state — it is what a merchant account that cannot take money looks
+   * like — so neither verdict is allowed to stand in for the other.
    */
   function providerPanel() {
     if (!providers) return null;
@@ -80,23 +82,32 @@ export async function plansView(api) {
           h('thead', {}, h('tr', {},
             h('th', {}, 'Provider'),
             h('th', {}, 'Can charge'),
-            h('th', {}, 'Key'),
-            h('th', {}, 'Last test'),
+            h('th', {}, 'Key mode'),
+            h('th', {}, 'Credentials'),
             h('th', {}, 'What to do'),
           )),
           h('tbody', {}, ...rows.map((p) => {
             const config = configs.get(p.provider);
-            const testText = config?.connectionError
+            // Two different verdicts, and they disagree in practice: the routing
+            // view (`credentials`) is what actually gates a charge, while the
+            // saved test only proves the key is accepted. Showing the key check
+            // alone would let a green result imply payments work when they do
+            // not, so both are shown, labelled.
+            const routing = p.credentials ?? '—';
+            const saved = config?.connectionError
               ? config.connectionError
               : config?.connectionStatus
                 ? `${config.connectionStatus}${config.checkedAt ? ` (${date(config.checkedAt)})` : ''}`
                 : 'not tested';
-            const advice = p.next_steps?.length ? p.next_steps.join(' ') : (config?.connectionError ? '' : (p.reasons ?? []).join(' '));
+            const advice = p.next_steps?.length ? p.next_steps.join(' ') : (p.reasons ?? []).join(' ');
             return h('tr', {},
               h('td', {}, p.provider),
               h('td', {}, badge(p.available ? 'online' : p.configured ? 'degraded' : 'offline')),
               h('td', { class: 'small mono' }, p.key_mode ?? config?.keyMode ?? '—'),
-              h('td', { class: 'small' }, testText),
+              h('td', { class: 'small' },
+                h('div', {}, `routing: ${routing}`),
+                h('div', { class: 'muted', title: 'the key check — it does not prove the account can take money' }, `key check: ${saved}`),
+              ),
               h('td', { class: 'small muted' }, advice || '—'),
             );
           })),
