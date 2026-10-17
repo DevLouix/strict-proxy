@@ -106,7 +106,13 @@ export class ApiClient {
     const session = loadSession();
     if (session?.accessToken) {
       try {
-        await send('POST', '/api/v1/auth/logout', { token: session.accessToken, retry: false });
+        // Send the refresh token too: revoking only the access token would
+        // leave a credential that can mint a new one straight away.
+        await send('POST', '/api/v1/auth/logout', {
+          token: session.accessToken,
+          body: { refreshToken: session.refreshToken },
+          retry: false,
+        });
       } catch {
         /* logging out locally is what matters */
       }

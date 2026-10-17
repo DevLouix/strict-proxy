@@ -21,6 +21,7 @@ import {
   issueRefreshToken,
   rotateRefreshToken,
   revokeAccessToken,
+  revokeRefreshToken,
 } from './services/auth.js';
 import { tierDefinition, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
@@ -217,6 +218,14 @@ export function buildRouter(ctx: Ctx): Router {
     asyncHandler(async (req, res) => {
       const claims = req.auth!;
       await revokeAccessToken(ctx.db, claims.jti, new Date(Date.now() + ctx.cfg.accessTokenTtlSeconds * 1000));
+
+      // Revoke the refresh token as well when the client sends it. Without this
+      // a "logged out" client still holds a credential that can mint a fresh
+      // access token, so the revocation above would buy nothing. Scoped to the
+      // caller so this can only ever end their own session.
+      const refreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : '';
+      if (refreshToken) await revokeRefreshToken(ctx.db, refreshToken, claims.sub);
+
       res.json({ ok: true });
     }),
   );

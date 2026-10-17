@@ -98,6 +98,15 @@ class AuthController extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     final store = _ref.read(tokenStoreProvider);
+    // Tell the server before dropping the tokens: clearing them locally alone
+    // leaves both the access token (until it expires) and the refresh token
+    // (for its whole lifetime) usable by anyone who has a copy.
+    try {
+      await _ref.read(apiProvider).logout(refreshToken: store.refreshToken);
+    } on ApiException {
+      // Best effort. The user must end up logged out locally even when the
+      // controller is unreachable or the token has already expired.
+    }
     await store.clear();
     state = state.copyWith(status: AuthStatus.unauthenticated, email: null, tier: null);
   }

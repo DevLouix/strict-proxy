@@ -111,6 +111,22 @@ class ControllerApi {
   Future<Map<String, dynamic>> me() =>
       _send(() => _client.get(_uri('/api/v1/me'), headers: _headers()));
 
+  /// Ends the session server-side.
+  ///
+  /// Passing the refresh token matters: revoking only the access token would
+  /// leave a credential that can mint a new one immediately afterwards. Retries
+  /// are off so a logout never races its own automatic refresh.
+  Future<void> logout({String? refreshToken}) async {
+    await _send(
+      () => _client.post(
+        _uri('/api/v1/auth/logout'),
+        headers: _headers(),
+        body: jsonEncode({if (refreshToken != null) 'refreshToken': refreshToken}),
+      ),
+      retryOn401: false,
+    );
+  }
+
   /// Signed dynamic sing-box config bundle (per-node VLESS+REALITY).
   Future<Map<String, dynamic>> networkConfig() =>
       _send(() => _client.get(_uri('/api/v1/network/config'), headers: _headers()));

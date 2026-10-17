@@ -106,6 +106,12 @@ services:
       BILLING_CURRENCY: ${BILLING_CURRENCY:-NGN}
       STANDARD_TIER_AMOUNT_MINOR: ${STANDARD_TIER_AMOUNT_MINOR:-250000}
       PRO_TIER_AMOUNT_MINOR: ${PRO_TIER_AMOUNT_MINOR:-750000}
+      # Both are documented in .env.docker.example and both were previously
+      # never forwarded into the container: settings secrets silently fell back
+      # to a key derived from JWT_SECRET, and outbound mail linked to
+      # http://localhost:3000 instead of the real deployment.
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:3000}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       DB_INIT_MAX_ATTEMPTS: ${DB_INIT_MAX_ATTEMPTS:-30}
     ports:
       - "${CONTROLLER_BIND_ADDRESS:-127.0.0.1}:${CONTROLLER_PORT:-8080}:${CONTROLLER_INTERNAL_PORT:-8080}"

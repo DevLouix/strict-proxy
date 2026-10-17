@@ -21,7 +21,8 @@ import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
 import type { SubscriptionTier } from '@strict-proxy/types';
 import { getSetting, setSetting, deleteSetting } from './settings.js';
-import { purchasableTiers, priceForTier } from './catalog.js';
+import { purchasableTierNames, priceForTier } from './catalog.js';
+import { loadPriceOverrides, setPriceOverride, effectivePrice } from './pricing.js';
 import { httpStatusOf } from './openpay.js';
 
 /** Where the provider plan id for a tier is cached. */
@@ -198,7 +199,8 @@ export async function ensureTierPlan(
   client: OpenPayApi,
   tier: SubscriptionTier,
 ): Promise<TierPlan> {
-  const price = priceForTier(cfg, tier);
+  const overrides = await loadPriceOverrides(db, cfg);
+  const price = priceForTier(cfg, tier, overrides);
   const cachedId = await getSetting(db, cfg, settingKey(tier)).catch(() => null);
 
   const existing = await findTierPlan(client, tier, cachedId);
@@ -281,7 +283,7 @@ export async function syncTierPlans(
   const plans: TierPlan[] = [];
   const errors: { tier: SubscriptionTier; error: string }[] = [];
 
-  for (const { tier } of purchasableTiers(cfg)) {
+  for (const tier of purchasableTierNames(cfg)) {
     try {
       plans.push(await ensureTierPlan(db, cfg, client, tier));
     } catch (err) {
@@ -299,6 +301,78 @@ export async function setMerchantId(db: Db, cfg: ControllerConfig, merchantId: s
 /** Drops a cached plan id so the next lookup rebuilds it. */
 export async function forgetTierPlan(db: Db, cfg: ControllerConfig, tier: SubscriptionTier): Promise<void> {
   await deleteSetting(db, settingKey(tier));
+}
+
+/** What a price change did, and what is still outstanding. */
+export interface TierPlanPriceChange {
+  tier: SubscriptionTier;
+  /** Price new checkouts charged before this change, in minor units. */
+  previousAmountMinor: number;
+  amountMinor: number;
+  /** The plan at the provider that was repriced, if any. */
+  planId: string | null;
+  /** True when the provider plan's amount was actually changed. */
+  providerUpdated: boolean;
+  /**
+   * True when the tier has no sellable plan, so the new price only takes effect
+   * once a sync creates one.
+   */
+  needsSync: boolean;
+}
+
+/**
+ * Changes what a tier costs, at the provider and in the catalog.
+ *
+ * Two things have to agree or customers get charged something other than the
+ * advertised price: the catalogue amount (what a one-time checkout is opened
+ * for) and the provider plan (what a subscription is billed against). Both are
+ * changed here so they cannot drift as a result of this action.
+ *
+ * The provider is updated *first*. If that fails, the override is not written,
+ * so a failed change leaves the deployment charging what it charged before
+ * rather than advertising a price it cannot bill.
+ *
+ * NOTE: whether a provider subscription already in flight is repriced or keeps
+ * its original amount is the provider's behaviour, not this code's, and it is
+ * not verifiable from here while subscriptions cannot be created (the merchant's
+ * settlement-provider key is rejected). Treat this as safe for *new* customers
+ * and confirm the behaviour for existing ones with OpenPay before relying on it.
+ */
+export async function setTierPlanPrice(
+  db: Db,
+  cfg: ControllerConfig,
+  client: OpenPayApi,
+  tier: SubscriptionTier,
+  amountMinor: number,
+  updatedBy?: string,
+): Promise<TierPlanPriceChange> {
+  const overrides = await loadPriceOverrides(db, cfg);
+  const previousAmountMinor = effectivePrice(cfg, overrides, tier);
+
+  const cachedId = await getSetting(db, cfg, settingKey(tier)).catch(() => null);
+  const existing = await findTierPlan(client, tier, cachedId);
+
+  let planId: string | null = null;
+  let providerUpdated = false;
+  let needsSync = false;
+
+  if (existing) {
+    planId = existing.id;
+    if (isUsablePlan(existing.plan)) {
+      await client.subscriptions.updatePlan(existing.id, { amount: amountMinor } as never);
+      providerUpdated = true;
+    } else {
+      // Archived or switched off: it cannot be billed against, so the new price
+      // only lands once a sync has produced a plan it can be sold from.
+      needsSync = true;
+    }
+  } else {
+    needsSync = true;
+  }
+
+  await setPriceOverride(db, cfg, tier, amountMinor, updatedBy);
+
+  return { tier, previousAmountMinor, amountMinor, planId, providerUpdated, needsSync };
 }
 
 /** What happened to a plan that was removed. */
@@ -349,7 +423,7 @@ export async function removeTierPlan(
   // Clear the cache for any tier that was pointing at this plan, so the next
   // sync provisions rather than trusting an id that no longer can be sold.
   const forgottenTiers: SubscriptionTier[] = [];
-  for (const { tier } of purchasableTiers(cfg)) {
+  for (const tier of purchasableTierNames(cfg)) {
     const cached = await getSetting(db, cfg, settingKey(tier)).catch(() => null);
     if (cached === planId) {
       await forgetTierPlan(db, cfg, tier);

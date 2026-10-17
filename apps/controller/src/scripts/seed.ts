@@ -44,6 +44,20 @@ async function main(): Promise<void> {
   }
 
   // --- sample node -----------------------------------------------------------
+  // Development convenience. A production deployment enrolls real VPS nodes by
+  // token instead, and a placeholder node at a documentation IP address would
+  // only be noise, so it can be skipped.
+  if (process.env.SEED_SKIP_SAMPLE_NODE === 'true') {
+    console.log('[seed] SEED_SKIP_SAMPLE_NODE=true — no sample node registered.');
+  } else {
+    await registerSampleNode(db, cfg);
+  }
+
+  await closeRedisSafe();
+  process.exit(0);
+}
+
+async function registerSampleNode(db: ReturnType<typeof getDb>, cfg: ReturnType<typeof loadConfig>): Promise<void> {
   const reality = generateRealityKeypair();
   const shortIds = [randomBytes(4).toString('hex'), randomBytes(4).toString('hex')];
   const { nodeId, hmacSecret } = await registerNode(db, {
@@ -59,8 +73,6 @@ async function main(): Promise<void> {
   });
   console.log(`[seed] sample node registered: ${nodeId}`);
   console.log(`[seed] node HMAC secret (NODE_HMAC_SECRET for the agent env): ${hmacSecret}`);
-  await closeRedisSafe();
-  process.exit(0);
 }
 
 async function closeRedisSafe(): Promise<void> {

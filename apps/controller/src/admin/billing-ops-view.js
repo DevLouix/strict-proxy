@@ -73,12 +73,21 @@ export async function plansView(api) {
               h('th', {}, 'Provider price'),
               h('th', {}, 'Interval'),
               h('th', {}, 'Status'),
+              h('th', {}, 'Price'),
             )),
             h('tbody', {}, ...(state?.tiers ?? []).map((t) => {
               const plan = byTier.get(t.tier);
               const mismatch = plan && plan.amount !== t.expectedAmountMinor;
               return h('tr', {},
-                h('td', {}, t.label),
+                h('td', {},
+                  t.label,
+                  // Showing the configured default makes an overridden price
+                  // legible as a deliberate choice rather than the only price
+                  // this deployment has ever had.
+                  t.overridden
+                    ? h('div', { class: 'muted small' }, `configured default ${money(t.configuredAmountMinor, t.currency)}`)
+                    : null,
+                ),
                 h('td', {}, money(t.expectedAmountMinor, t.currency)),
                 h('td', {}, plan ? money(plan.amount, plan.currency) : h('span', { class: 'muted' }, 'not created')),
                 h('td', {}, plan?.interval ?? '—'),
@@ -91,9 +100,10 @@ export async function plansView(api) {
                       // syncing now creates a replacement for it.
                       ? h('span', { class: 'badge failed', title: 'Kept by the provider for billing history, but it cannot be subscribed to. Syncing creates a replacement from the catalog price.' }, plan.status)
                       : mismatch
-                        ? h('span', { class: 'badge degraded', title: 'The provider price does not match the catalog. Repricing a live plan would change what subscribers are billed, so this is not fixed automatically.' }, 'price drift')
+                        ? h('span', { class: 'badge degraded', title: 'The provider price does not match the catalog. Repricing a live plan would change what subscribers are billed, so this is not fixed automatically — use the Price control to change it deliberately.' }, 'price drift')
                         : h('span', { class: 'badge active' }, 'in sync'),
                 ),
+                h('td', {}, priceControl(t)),
               );
             })),
           ),
@@ -136,6 +146,79 @@ export async function plansView(api) {
               ),
             ),
       ),
+    );
+  }
+
+  /**
+   * An inline price editor.
+   *
+   * Deliberately not a bare number box: a price is what a customer is charged, so
+   * the control says what the change will do before it is made, and states
+   * plainly the one thing this platform cannot determine for itself — whether a
+   * subscription already in flight is repriced by OpenPay.
+   */
+  function priceControl(t) {
+    const cell = h('div', { class: 'price-control' });
+    const change = h('button', { class: 'btn sm' }, 'Change');
+    change.addEventListener('click', () => openEditor(t, cell));
+    cell.append(change);
+
+    if (t.overridden) {
+      const reset = h('button', { class: 'btn sm', title: `Back to the configured ${money(t.configuredAmountMinor, t.currency)}` }, 'Reset');
+      reset.addEventListener('click', async () => {
+        reset.disabled = true;
+        try {
+          await api.del(`/api/v1/admin/billing/plans/price/${t.tier}`);
+          toast('Reset to the price configured for this deployment');
+          await load();
+        } catch (err) {
+          toast(err.message || 'Reset failed', 'error');
+          reset.disabled = false;
+        }
+      });
+      cell.append(reset);
+    }
+    return cell;
+  }
+
+  function openEditor(t, cell) {
+    const input = h('input', {
+      type: 'number',
+      min: '0',
+      step: '0.01',
+      class: 'price-input',
+      value: (t.expectedAmountMinor / 100).toFixed(2),
+    });
+    const save = h('button', { class: 'btn sm primary' }, 'Save');
+    const cancel = h('button', { class: 'btn sm' }, 'Cancel');
+
+    save.addEventListener('click', async () => {
+      const major = Number(input.value);
+      if (!Number.isFinite(major) || major <= 0) {
+        toast('Enter an amount greater than zero', 'error');
+        return;
+      }
+      save.disabled = true;
+      try {
+        const result = await api.put('/api/v1/admin/billing/plans/price', {
+          tier: t.tier,
+          amountMinor: Math.round(major * 100),
+        });
+        toast(result.note || 'Price updated');
+        await load();
+      } catch (err) {
+        toast(err.message || 'Price change failed', 'error');
+        save.disabled = false;
+      }
+    });
+    cancel.addEventListener('click', () => render());
+
+    mount(
+      cell,
+      input,
+      save,
+      cancel,
+      h('p', { class: 'muted small' }, `${t.currency}. New customers are charged this amount. Whether a subscription already in flight is repriced is OpenPay's behaviour and cannot be checked from here — confirm it with OpenPay before relying on it.`),
     );
   }
 

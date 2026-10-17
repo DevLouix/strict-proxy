@@ -223,6 +223,10 @@ label.field > .inline input[type="checkbox"] { width: auto; }
 .btn.danger:hover:not(:disabled) { background: #2a1616; }
 .btn.sm { padding: 4px 8px; font-size: 12px; }
 
+/* Inline price editor: the amount, its action and the consequence on one line. */
+.price-control { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.price-input { max-width: 130px; }
+
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .toolbar input[type="search"] { max-width: 280px; }

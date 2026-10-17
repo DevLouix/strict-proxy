@@ -28,11 +28,6 @@ export function mount(host, ...children) {
   return host;
 }
 
-export function clear(node) {
-  node.replaceChildren();
-  return node;
-}
-
 /** Formats a byte count for humans. */
 export function bytes(value) {
   const n = Number(value ?? 0);
@@ -119,9 +114,4 @@ export function confirmDialog({ title, body, confirmLabel = 'Confirm', danger = 
     dlg.addEventListener('close', () => { dlg.remove(); }, { once: true });
     dlg.showModal();
   });
-}
-
-/** Escape hatch for XSS-adjacent values rendered as text. */
-export function text(value) {
-  return value === null || value === undefined ? '' : String(value);
 }

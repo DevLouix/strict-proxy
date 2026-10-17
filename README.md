@@ -13,7 +13,8 @@ proxy/VPN + access-control platform with four decoupled modules:
 Shared primitives live in `packages/types` (domain types, HMAC + Ed25519 helpers,
 REALITY keygen, strict env parsing).
 
-> **New here?** Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first —
+> **New here?** Read [`SETUP.md`](SETUP.md) to get a working deployment step by
+> step, then [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —
 > it maps every module, the trust boundaries, the data model, which of the
 > OpenPay SDK's 32 resources we deliberately do *not* use, and an explicit list
 > of known gaps.
@@ -116,11 +117,12 @@ app.use(createGatekeeperMiddleware({
 | `GET /api/v1/network/nodes/public-ips` | public (signed) | Ed25519-signed fleet IP list for Gatekeeper |
 | `GET /api/v1/billing/catalog` / `subscription` / `usage` | JWT | Price catalog, plan state, bandwidth usage |
 | `POST /api/v1/billing/checkout` | JWT | Open a hosted OpenPay checkout |
+| `GET /api/v1/billing/receipt/:reference` | JWT (own checkouts only) | Rendered provider invoice for a settled checkout |
 | `POST /api/v1/admin/node-enrollments` | admin JWT | Create a one-time enrollment token scoped to a region |
 | `GET /api/v1/admin/node-enrollments` / `DELETE .../:id` | admin JWT | Audit/revoke enrollment tokens |
 | `POST /api/v1/nodes/enroll` | one-time token | Self-register a VPS and receive its HMAC identity |
 | `GET /api/v1/admin/nodes` / `PATCH .../:id` / `DELETE .../:id` | admin JWT | Global fleet management and lifecycle controls |
-| `POST /webhooks/payments` | webhook HMAC | `checkout.completed` grants tier; `subscription.deleted` / `invoice.payment_failed` revoke instantly |
+| `POST /webhooks/payments` | webhook HMAC | `charge.success` grants/extends the tier; `subscription.canceled` / `subscription.payment_failed` revoke instantly |
 | `GET /internal/v1/node/bootstrap` | node HMAC | REALITY keys + node settings |
 | `POST /internal/v1/node/heartbeat` | node HMAC | Load/health reporting |
 | `GET /internal/v1/node/sync` | node HMAC | Desired credential state (UUID + short-id) |
@@ -186,6 +188,7 @@ that JWT and the admin role.
 | `PATCH /api/v1/admin/users/:userId` | Disable/enable a user or change role |
 | `PATCH /api/v1/admin/users/:userId/subscription` | Set tier, status and expiration; revokes access when inactive |
 | `GET /api/v1/admin/nodes` | Inspect fleet health and heartbeat state |
+| `POST /api/v1/admin/nodes` | Register a node directly, bypassing enrollment |
 | `POST /api/v1/admin/node-enrollments` | Issue a one-time, region-scoped VPS enrollment token |
 | `GET /api/v1/admin/node-enrollments` / `DELETE .../:id` | Audit or revoke enrollment tokens |
 | `PATCH /api/v1/admin/nodes/:nodeId` / `DELETE .../:nodeId` | Edit, drain, disable, or remove a node |
@@ -193,6 +196,8 @@ that JWT and the admin role.
 | `GET /api/v1/admin/billing/summary` | Revenue and checkout pipeline rollup |
 | `POST /api/v1/admin/billing/refund` | Refund a settled checkout; a full refund revokes access |
 | `GET /api/v1/admin/billing/plans` + `POST …/plans/sync` | Provider plans per tier, provisioned from the catalog |
+| `PUT /api/v1/admin/billing/plans/price` | Change what a tier costs, at the provider and in the catalog |
+| `DELETE /api/v1/admin/billing/plans/price/:tier` | Reset a tier to the price configured for the deployment |
 | `POST /api/v1/admin/billing/plans/delete` | Remove a provider plan the tier should no longer use |
 | `GET /api/v1/admin/billing/subscriptions` + `POST …/cancel` | List and cancel provider subscriptions |
 | `GET/POST /api/v1/admin/disputes…` | List, inspect and contest a chargeback |
@@ -200,11 +205,20 @@ that JWT and the admin role.
 | `POST /api/v1/admin/settings/email/test` | Send a test message |
 | `POST /api/v1/admin/users/:userId/password-reset/email` | Issue a reset token and email it |
 | `POST /api/v1/admin/billing/lapse-notices` | Email users whose subscription has expired |
-| `POST /api/v1/admin/users/:userId/password-reset` | Issue a reset token while no mail transport exists |
+| `POST /api/v1/admin/users/:userId/password-reset` | Issue a reset token to hand over out of band |
 | `GET /api/v1/admin/billing/checkouts` | Individual checkouts with both references and the owning user |
 
-These APIs back the admin dashboard served at `/admin`, and remain usable
-directly by operational tooling.
+Most of these back the admin dashboard served at `/admin`; all remain usable
+directly by operational tooling. The exceptions with **no dashboard control** —
+call them with curl or your own tooling — are:
+
+| Route | Why it has no control |
+|---|---|
+| `GET /api/v1/admin/disputes…`, evidence submission | the dispute views are not written yet; the API is complete and tested, so evidence can still be filed before a deadline |
+| `POST /api/v1/admin/billing/refund` | refunds are deliberately manual |
+| `POST /api/v1/admin/billing/lapse-notices` | a bulk mailing action |
+| `POST /api/v1/admin/users/:userId/password-reset` and `…/email` | the Settings tab links to the flow; the per-user buttons are not wired |
+| `POST /api/v1/admin/nodes` | the dashboard uses the enrollment-token flow instead |
 
 ## Usage accounting
 
@@ -260,16 +274,25 @@ payment or let anyone grant themselves a paid tier, so it is covered directly by
 
 | OpenPay event | Applied as | Effect |
 |---|---|---|
-| `charge.success`, `checkout.completed` | `checkout.completed` | grants/extends the tier |
-| `subscription.deleted` / `canceled` / `cancelled` | `subscription.deleted` | immediate revocation |
-| `subscription.renewal_failed`, `invoice.payment_failed` | `invoice.payment_failed` | dunning → revocation |
+| `charge.success`, `subscription.activated` | `checkout.completed` | grants/extends the tier |
+| `subscription.renewed` | `subscription.renewed` | extends the period (recurring billing) |
+| `subscription.paused` / `subscription.resumed` | `subscription.paused` / `subscription.resumed` | stop access keeping the tier / restore with a fresh period |
+| `subscription.canceled` | `subscription.deleted` | immediate revocation |
+| `subscription.payment_failed` | `invoice.payment_failed` | dunning → revocation |
+| `dispute.created` | `charge.disputed` | immediate revocation, including credentials and refresh tokens |
+| `dispute.resolved` | `charge.dispute_resolved` | acts only on a stated verdict (`won` restores the tier, `lost` stays revoked); anything else is a no-op |
 | `charge.failed` **with** a subscription context | `invoice.payment_failed` | dunning → revocation |
 | `charge.failed` **without** a subscription context | *ignored* | acknowledged, no change |
+| `charge.refunded` | *ignored* | may be partial; refunds are an operator decision |
 | anything else | *ignored* | acknowledged so the provider stops retrying |
 
 A standalone failed charge is deliberately inert: failing a *new* purchase must
 not strip an already-paid subscription. The same event inside a recurring
 subscription does revoke.
+
+A dispute verdict is read from `Dispute.status`, not from a `resolution` string:
+`resolution` is free text, and `resolved` means "closed without a verdict", which
+is **not** a win. Verified against the provider's own `Dispute` shape.
 
 ### Resolving an event to a user
 
@@ -284,7 +307,7 @@ arbitrary user. The `user_id` branch is an optimisation, not a trust boundary.
 
 ### Billing catalog
 
-| Tier | Price (minor units) | Env override |
+| Tier | Default price (minor units) | Environment setting |
 |---|---|---|
 | `free` | not purchasable | — |
 | `standard` | 250000 | `STANDARD_TIER_AMOUNT_MINOR` |
@@ -295,11 +318,19 @@ Currency comes from `BILLING_CURRENCY` (default `NGN`); amounts are minor units
 non-numeric amount, and on a half-configured gateway — a key without its
 webhook secret would mean every payment is silently dropped.
 
+The environment holds the **default**. An operator can change what a tier costs
+from **Admin → Plans → Change** without a redeploy; that reprices the provider
+plan and the catalog together, so the advertised price and the billed price
+cannot be left disagreeing. An override carries the amount only — the currency
+and which tiers are purchasable stay deployment configuration. `PUT` and
+`DELETE` on `/api/v1/admin/billing/plans/price` are the API behind that control.
+
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/billing/catalog` | Purchasable tiers and prices |
 | `GET /api/v1/billing/subscription` | Current tier, limits, rolling-window usage |
 | `POST /api/v1/billing/checkout` | Open a hosted checkout (rate limited) |
+| `GET /api/v1/billing/receipt/:reference` | Rendered invoice for a settled checkout, scoped to the caller |
 | `GET /api/v1/billing/usage` | Per-node bandwidth consumption |
 | `GET /api/v1/admin/billing/summary` | Revenue + checkout pipeline (admin) |
 | `GET /api/v1/admin/billing/checkouts` | Per-checkout ledger for support (admin) |

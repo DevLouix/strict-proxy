@@ -16,7 +16,7 @@
  *    Otherwise "leave blank to keep" and "clear it" would be indistinguishable,
  *    which is how a stale password silently survives a rotation.
  */
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
@@ -151,12 +151,4 @@ export async function describeSettings(db: Db, prefix: string): Promise<Describe
       updatedAt: r.updatedAt,
     }))
     .sort((a, b) => a.key.localeCompare(b.key));
-}
-
-/** Constant-time string comparison, for shared secrets like the webhook one. */
-export function secretsMatch(a: string, b: string): boolean {
-  const x = Buffer.from(a, 'utf8');
-  const y = Buffer.from(b, 'utf8');
-  if (x.length !== y.length) return false;
-  return timingSafeEqual(x, y);
 }

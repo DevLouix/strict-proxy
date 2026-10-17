@@ -5,16 +5,15 @@
  * there is no other way to prove identity. Reset tokens follow the same rules as
  * refresh tokens — only a hash is stored, they are single-use, and they expire.
  *
- * Delivery: there is no mail transport yet, so a token is surfaced two ways that
- * are honest about that — an operator can issue one for a user and hand it over
- * out of band, and the self-service endpoint accepts a `deliver` callback that a
- * future mail worker plugs into. The endpoint never reveals whether an address
- * exists.
+ * Delivery: an operator can issue a token for a user and hand it over out of
+ * band, and the self-service endpoint accepts a `deliver` callback that the
+ * configured mail transport plugs into. The endpoint never reveals whether an
+ * address exists.
  */
 import { randomBytes, createHash } from 'node:crypto';
-import { and, eq, gt, isNull, lt, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { passwordResetTokens, subscriptions, users } from '../db/schema.js';
+import { passwordResetTokens, users } from '../db/schema.js';
 import { revokeAllRefreshTokens } from './auth.js';
 import { revokeAllUserCredentials } from './nodes.js';
 
@@ -129,24 +128,4 @@ export async function deleteAccount(db: Db, userId: string): Promise<boolean> {
     .returning({ id: users.id });
 
   return deleted !== undefined;
-}
-
-/** Counts a user's live reset tokens; used by tests and diagnostics. */
-export async function activeResetCount(db: Db, userId: string): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(passwordResetTokens)
-    .where(
-      and(
-        eq(passwordResetTokens.userId, userId),
-        isNull(passwordResetTokens.usedAt),
-        lt(passwordResetTokens.expiresAt, new Date(Date.now() + 365 * 24 * 3600 * 1000)),
-      ),
-    );
-  return Number(row?.n ?? 0);
-}
-
-/** Ensures a subscription row exists; used when re-seeding after deletion. */
-export async function ensureSubscription(db: Db, userId: string): Promise<void> {
-  await db.insert(subscriptions).values({ userId, tier: 'free', status: 'active' }).onConflictDoNothing({ target: subscriptions.userId });
 }

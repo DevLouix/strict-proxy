@@ -17,16 +17,19 @@ import { isOpenPayConfigured, createOpenPayClient, describeOpenPayError } from '
 import {
   syncTierPlans,
   setMerchantId,
+  setTierPlanPrice,
   isUsablePlan,
   isOurPlan,
   removeTierPlan,
   PLAN_TIER_METADATA_KEY,
   MERCHANT_SETTING_KEY,
 } from '../services/plans.js';
+import { loadPriceOverrides, validatePriceAmount, configuredAmount } from '../services/pricing.js';
 import { getSetting } from '../services/settings.js';
 import { revokeAllUserCredentials } from '../services/nodes.js';
 import { revokeAllRefreshTokens } from '../services/auth.js';
-import { purchasableTiers } from '../services/catalog.js';
+import { purchasableTiers, priceForTier } from '../services/catalog.js';
+import { isKnownTier } from '../services/tiers.js';
 import type { SubscriptionTier } from '@strict-proxy/types';
 
 interface Ctx {
@@ -59,12 +62,21 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
     '/api/v1/admin/billing/plans',
     ...adminOnly,
     asyncHandler(async (_req: Request, res: Response) => {
-      const tiers = purchasableTiers(ctx.cfg).map(({ tier, price }) => ({
-        tier,
-        label: price.label,
-        expectedAmountMinor: price.amountMinor,
-        currency: price.currency,
-      }));
+      const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
+      const tiers = purchasableTiers(ctx.cfg, overrides).map(({ tier, price }) => {
+        // The configured default is shown alongside the effective price so an
+        // operator can always see what they are overriding, and can tell an
+        // overridden price apart from the deployment's own.
+        const configured = priceForTier(ctx.cfg, tier, {});
+        return {
+          tier,
+          label: price.label,
+          expectedAmountMinor: price.amountMinor,
+          currency: price.currency,
+          configuredAmountMinor: configured.amountMinor,
+          overridden: price.amountMinor !== configured.amountMinor,
+        };
+      });
 
       if (!requireGateway(res)) return;
 
@@ -145,6 +157,83 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
         plans,
         errors,
       });
+    }),
+  );
+
+  /**
+   * Changes what a tier costs.
+   *
+   * Deliberately not automatic. A price change alters what customers are
+   * charged, so it is an explicit operator action with the amount in the body —
+   * never a side effect of drift being noticed.
+   */
+  router.put(
+    '/api/v1/admin/billing/plans/price',
+    ...adminOnly,
+    asyncHandler(async (req: Request, res: Response) => {
+      const body = req.body as { tier?: unknown; amountMinor?: unknown };
+      const tier = typeof body.tier === 'string' ? body.tier.trim() : '';
+      if (!isKnownTier(tier)) {
+        res.status(400).json({ error: 'tier must be "standard" or "pro"', code: 'VALIDATION' });
+        return;
+      }
+      let amountMinor: number;
+      try {
+        amountMinor = validatePriceAmount(body.amountMinor);
+      } catch (err) {
+        res.status(400).json({ error: err instanceof Error ? err.message : 'invalid amount', code: 'VALIDATION' });
+        return;
+      }
+
+      if (!requireGateway(res)) return;
+
+      const client = createOpenPayClient(ctx.cfg);
+      try {
+        const change = await setTierPlanPrice(ctx.db, ctx.cfg, client, tier, amountMinor, req.auth?.sub);
+        res.json({
+          ...change,
+          note: change.providerUpdated
+            ? 'the provider plan and the catalog now agree; new customers are charged this price'
+            : change.needsSync
+              ? 'no sellable plan exists for this tier yet; create missing plans to put this price into effect'
+              : 'the catalog price was updated',
+        });
+      } catch (err) {
+        const described = describeOpenPayError(err);
+        res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });
+      }
+    }),
+  );
+
+  /**
+   * Resets a tier to the price configured in the deployment.
+   *
+   * Deliberately routed through the same provider-and-catalogue update as a
+   * manual change: dropping the override alone would leave the catalogue
+   * advertising the configured price while the provider plan went on billing the
+   * overridden one.
+   */
+  router.delete(
+    '/api/v1/admin/billing/plans/price/:tier',
+    ...adminOnly,
+    asyncHandler(async (req: Request, res: Response) => {
+      const tier = String(req.params.tier ?? '').trim();
+      if (!isKnownTier(tier)) {
+        res.status(400).json({ error: 'tier must be "standard" or "pro"', code: 'VALIDATION' });
+        return;
+      }
+
+      if (!requireGateway(res)) return;
+
+      const client = createOpenPayClient(ctx.cfg);
+      try {
+        const amountMinor = configuredAmount(ctx.cfg, tier);
+        const change = await setTierPlanPrice(ctx.db, ctx.cfg, client, tier, amountMinor, req.auth?.sub);
+        res.json({ ...change, resetToConfigured: true, note: 'the tier now costs the amount configured for this deployment' });
+      } catch (err) {
+        const described = describeOpenPayError(err);
+        res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });
+      }
     }),
   );
 

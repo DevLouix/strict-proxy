@@ -39,6 +39,7 @@ apps/controller/         The brain.
     payments.ts            Webhook pipeline: verify -> map -> apply (idempotent).
     billing.ts             Opens hosted checkouts, writes the checkout ledger.
     plans.ts               Provider plan per tier, provisioned from the catalog.
+    pricing.ts             Operator price overrides (amount only; currency stays config).
     checkout-resolution.ts Webhook -> user resolution. No SDK import, by design.
     catalog.ts             Tier -> price mapping, validated at boot.
     settings.ts            Platform settings; secrets encrypted at rest (AES-256-GCM).
@@ -112,7 +113,7 @@ node ──POST /internal/v1/node/usage      (HMAC)──> bandwidth windows
 | Unauthenticated routes | per-IP Redis limiter, one bucket per endpoint | `429` |
 | Device seats | evict least-recently-seen device | reclaims the seat |
 
-## Data model (11 tables)
+## Data model (13 tables)
 
 | Table | Holds | Notes |
 |---|---|---|
@@ -127,6 +128,8 @@ node ──POST /internal/v1/node/usage      (HMAC)──> bandwidth windows
 | `node_credentials` | VLESS UUID + short-id per user/node | revoked = cut off |
 | `usage_rollups` | bandwidth windows | unique `(credential, windowStart, windowEnd)` |
 | `revoked_access_tokens` | JTI after logout | checked on every authenticated request |
+| `password_reset_tokens` | SHA-256 of a reset token | single-use, 30-minute expiry (`0001`) |
+| `platform_settings` | operator settings, encrypted when secret | also holds plan-id and price-override cache (`0002`) |
 
 ## Background maintenance
 
@@ -157,7 +160,12 @@ agent from "helpfully" wiring up something that does not belong here.
 | `disputes.list` / `get` / `listEvidenceSubmissions` | `routes/disputes.ts` | contest a chargeback instead of losing it |
 | `disputes.submitEvidence` / `markSubmitted` | `routes/disputes.ts` | file the evidence packet |
 | `charges.invoice` | `routes/billing.ts` | renders a receipt for a settled checkout |
-| `subscriptions.createPlan` | verified live | recurring billing prerequisite |
+| `apps.list` | `services/plans.ts` | derive the merchant id plans are created under |
+| `subscriptions.listPlans` / `getPlan` | `services/plans.ts` | find the tier's plan and check it is still sellable |
+| `subscriptions.createPlan` | `services/plans.ts` | create the tier's plan from the catalog |
+| `subscriptions.updatePlan` | `services/plans.ts` | an operator price change, at the provider |
+| `subscriptions.deletePlan` | `services/plans.ts` | remove a plan a tier should no longer use (archives when history references it) |
+| `subscriptions.cancel` | `routes/billing-ops.ts` | stop a subscription we are serving |
 | `status.get` / `currencies.list` | live suite | reachability and key acceptance |
 
 ### Mapped from webhooks
@@ -186,13 +194,12 @@ it is wrong for a VPN that meters its own bandwidth.
 
 | Not used | Reason |
 |---|---|
-| `subscriptions.*`, `createPlan` | we mint a tier and a period end ourselves; see *Known gap* below |
+| `subscriptions.create` | starting a subscription needs a tokenised payment method; the merchant's settlement-provider key is rejected, so this is blocked at the account, not the code (see *Still open*) |
 | `billing.*`, `metering.*` | our usage is bandwidth per node, which only we can measure |
 | `wallets.*`, `financialAccounts.*` | WaaS is for embedding a balance in a third-party product |
 | `payouts.*` | no node-operator payouts |
-| `disputes.*`, `riskReview.*` | no chargeback handling yet — a real gap, see below |
-| `apps.*` workspaces | single workspace; `app_id` scoping unused |
-| `coupons.*` | no marketing discounts |
+| `riskReview.*` | the provider's own risk review; disputes are handled from our side |
+| `apps.*` beyond `apps.list` | single workspace; the app id scopes provider objects but is not a product concept here |
 | `fx.*`, `currencyPortfolio.*`, `currencies.upsert` | single currency per checkout |
 | `reconciliation.*` | no ledger reconciliation |
 | `customers.*` CRM/GDPR | our own `users` table is authoritative |
@@ -243,6 +250,10 @@ fails a test rather than silently dropping every payment.
 | Recurring billing absent | `subscription.renewed` extends the period; pause/resume supported; replays idempotent |
 | Invented event names in the mapping | replaced with the provider's authoritative 20, exported as `OPENPAY_EVENTS` |
 | The development adapter used a different event vocabulary than production | it now accepts both, so a locally replayed webhook behaves as the real one does |
+| Changing what a tier costs required a redeploy | `PUT /api/v1/admin/billing/plans/price` reprices the provider plan and the catalog in one action; a reset pushes the configured amount through the same path rather than deleting the override and leaving the two disagreeing |
+| "Logout" left the refresh token valid | `POST /api/v1/auth/logout` also revokes the refresh token the client sends, so logout ends the session rather than just the access token |
+| The Enrollments tab's "Issue new" button did nothing | it selected `[data-open-enroll]`, which nothing ever rendered; the enrollment dialog is now a shared function both the Nodes and Enrollments views call |
+| The Docker controller never received `PUBLIC_APP_URL` or `SETTINGS_ENCRYPTION_KEY` | both were documented but not forwarded by compose, so secrets fell back to a JWT-derived key and reset emails linked to `localhost`; both are forwarded now |
 
 ### Bundle verification
 
@@ -347,17 +358,52 @@ band is rebuilt rather than reused.
 
 | Route | Purpose |
 |---|---|
-| `GET /api/v1/admin/billing/plans` | Catalog vs provider, side by side |
+| `GET /api/v1/admin/billing/plans` | Catalog vs provider, side by side, including the price the deployment is configured with |
 | `POST /api/v1/admin/billing/plans/sync` | Create any missing plan |
+| `PUT /api/v1/admin/billing/plans/price` | Set what a tier costs, at the provider and in the catalog |
+| `DELETE /api/v1/admin/billing/plans/price/:tier` | Reset a tier to the price configured for the deployment |
 | `POST /api/v1/admin/billing/plans/delete` | Remove a plan the tier should no longer use |
 | `GET /api/v1/admin/billing/subscriptions` | Provider subscriptions, joined to local users |
 | `POST /api/v1/admin/billing/subscriptions/cancel` | Cancel and stop serving |
 
 Deliberate behaviours:
 
-- **A drifted price is reported, never pushed.** Repricing a live plan changes
-  what existing subscribers are billed, so it is never automatic.
+- **A drifted price is reported, never pushed automatically.** Repricing a live
+  plan changes what existing subscribers are billed, so it is never a side
+  effect of a sync noticing a mismatch. It *is* possible, as an explicit
+  operator action: `PUT …/plans/price` reprices the provider plan **and** the
+  catalog together, using the same code path, so the advertised price and the
+  billed price cannot be left disagreeing. The provider is updated first — if
+  that fails, the catalog is not written, so a failed change leaves the
+  deployment charging what it charged before rather than advertising a price it
+  cannot bill.
+- **A reset is a price change, not a deletion of the override.** Dropping the
+  stored override would revert the catalog to the configured amount while the
+  provider plan kept billing the overridden one; `DELETE …/plans/price/:tier`
+  therefore pushes the configured amount through the same update.
+- **Overrides carry the amount only, never the currency.** Which tiers are
+  purchasable and in which currency stays deployment configuration, so a
+  deployment cannot end up half-priced in one currency and half in another.
 - **A plan we did not create is never adopted.** A hand-made plan is left alone.
+- **An archived plan is replaced, and the replacement is reported.** A plan can
+  only be recognised as ours by the tag in its metadata, so a plan that a delete
+  archived — the provider's substitute for deleting a plan that billing history
+  references — would keep matching that tag and be reused forever, leaving the
+  tier unsellable. Syncing creates a replacement and names the plan it replaced.
+- **A deactivated plan is left alone.** Unlike an archive, `inactive` is a
+  decision someone made. Creating a second plan over it would override that, so
+  it is reported and nothing is created.
+
+The merchant id is derived from the app record. `merchants.list` is *not* usable
+for this — verified live, it returns child merchants under the account rather
+than the caller.
+
+> **Unverified:** whether OpenPay reprices a subscription that is already in
+> flight when its plan's amount changes, or keeps the amount it was created
+> with. It cannot be checked from here while subscriptions cannot be created
+> (see *Still open*), so the admin control says so rather than implying either
+> behaviour is guaranteed. Treat a price change as certain for *new* customers
+> only.
 - **An archived plan is replaced, and the replacement is reported.** A plan can
   only be recognised as ours by the tag in its metadata, so a plan that a delete
   archived — the provider's substitute for deleting a plan that billing history
@@ -388,6 +434,10 @@ than the caller.
 | **iOS verified in CI only** | Linux release and Android debug APK are built and verified locally; iOS needs macOS + Xcode so it is built by `ios-verification` in CI with `--no-codesign` (compile verification, not signing) | an Apple team identity is required to sign a real build |
 | **Single workspace** | `app_id` scoping unused; one app (`Core`) exists and plans inherit it | OpenPay `apps` |
 | **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
+| **No disputes view in the dashboard** | a chargeback must be answered with curl before the provider's deadline | the API is complete and tested (`routes/disputes.ts`); only the dashboard views are missing |
+| **The client has no password-recovery or account-deletion screen** | a user who forgets their password needs the API or an operator-issued link | the controller routes exist and are tested (`account.ts`); only the Dart screens are missing |
+| **No admin audit log** | a price change or settings write records the acting admin in the row it wrote, but node edits, deletions and refunds record nothing | there is no `admin_audit_log` table |
+| **Node-agent internals are untested** | a regression in `agent.ts`, `usage.ts` or `controller-client.ts` is not caught by `npm test` | no test imports them; `npm run server:smoke` exercises them end to end against a running controller |
 
 ### Provider contract facts
 
@@ -420,7 +470,7 @@ user who forgot their password was locked out permanently. It now also covers:
 | `POST /api/v1/auth/password/reset` | consumes a token and sets a new password |
 | `POST /api/v1/auth/password/change` | signed-in user changes their own password |
 | `DELETE /api/v1/me` | self-service deletion, requiring the current password |
-| `POST /api/v1/admin/users/:userId/password-reset` | operator-issued reset token, the recovery path while there is no mail transport |
+| `POST /api/v1/admin/users/:userId/password-reset` | operator-issued reset token to hand over out of band |
 | `POST /api/v1/admin/billing/refund` | the refund the payment docs describe; a full refund also revokes access |
 
 Reset tokens are single-use, expire after 30 minutes, are superseded by a newer
@@ -438,7 +488,7 @@ via testcontainers, so it needs Docker.
 | `test/unit/openpay.test.ts` | signature parsing/verification, event mapping, gateway error translation |
 | `test/unit/policy.test.ts` | tier catalogue, load scoring, node ranking |
 | `test/unit/admin-ui.test.ts` | every dashboard view rendered and every button fired, via a DOM shim |
-| `test/integration/auth.test.ts` | register/login/refresh rotation/logout/seats |
+| `test/integration/auth.test.ts` | register/login/refresh rotation/logout/seats, including that logout revokes the refresh token |
 | `test/integration/admin.test.ts` | the admin authorization matrix over every admin route |
 | `test/integration/fleet.test.ts` | enrollment, HMAC internal API, nonce replay, usage isolation |
 | `test/integration/network.test.ts` | signed bundles, load-aware assignment, quota enforcement |
@@ -455,6 +505,7 @@ via testcontainers, so it needs Docker.
 | `test/integration/dispute-outcomes.test.ts` | dispute verdicts: restore on a win, never on an ambiguous signal |
 | `test/integration/billing-ops.test.ts` | plan provisioning, reuse, price drift, cancellation |
 | `test/integration/billing-ops-no-gateway.test.ts` | the operator routes still gate correctly with no gateway |
+| `test/integration/pricing.test.ts` | a price change reaches both the provider plan and the next checkout; a failed provider update changes neither |
 | `test/unit/admin-spa.test.ts` | build-free dashboard: imports resolve, exports exist, secrets stay write-only |
 | `test/unit/openpay-delivery.test.ts` | replays a real captured signed delivery |
 | `test/integration/openpay-webhooks.test.ts` | signature rejection, idempotency, user resolution |

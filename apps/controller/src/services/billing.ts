@@ -15,8 +15,10 @@ import type { Db } from '../db/client.js';
 import { billingCheckouts } from '../db/schema.js';
 import type { BillingCheckoutPublic, SubscriptionTier } from '@strict-proxy/types';
 import type { ControllerConfig } from '../env.js';
+import type { OpenPayApi } from '@fiatden/openpay';
 import { createOpenPayClient } from './openpay.js';
 import { priceForTier } from './catalog.js';
+import { loadPriceOverrides } from './pricing.js';
 
 /** How long an unpaid checkout stays claimable. */
 const CHECKOUT_TTL_MINUTES = 60;
@@ -39,16 +41,25 @@ export async function createTierCheckout(
     /** OpenPay coupon code; validated by the provider at checkout time. */
     couponCode?: string;
   },
+  /**
+   * Injectable for tests, the same as `ensureTierPlan` takes its client. The
+   * amount charged is the one thing here that must never be wrong, so it is
+   * worth being able to assert against a stub instead of trusting the SDK call.
+   */
+  client?: OpenPayApi,
 ): Promise<BillingCheckoutPublic> {
-  const price = priceForTier(cfg, params.tier);
+  // Read the operator's price for this tier rather than the configured one: an
+  // override set from the dashboard is what the customer must be charged.
+  const overrides = await loadPriceOverrides(db, cfg);
+  const price = priceForTier(cfg, params.tier, overrides);
 
   // Our own idempotent handle. The provider assigns its own `reference` on the
   // session, so both are persisted and either can match an inbound event.
   const reference = `spx-${randomUUID()}`;
   const expiresAt = new Date(Date.now() + CHECKOUT_TTL_MINUTES * 60_000);
 
-  const client = createOpenPayClient(cfg);
-  const session = await client.checkout.create({
+  const gateway = client ?? createOpenPayClient(cfg);
+  const session = await gateway.checkout.create({
     amount: price.amountMinor,
     email: params.email,
     currency: price.currency,

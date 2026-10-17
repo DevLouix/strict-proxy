@@ -144,6 +144,8 @@ test('every operator billing route has a control in the dashboard', async () => 
   const calls = [
     "api.get('/api/v1/admin/billing/plans')",
     "api.post('/api/v1/admin/billing/plans/sync'",
+    "api.put('/api/v1/admin/billing/plans/price'",
+    "api.del(`/api/v1/admin/billing/plans/price/${t.tier}`)",
     "api.post('/api/v1/admin/billing/plans/delete'",
     "api.get('/api/v1/admin/billing/subscriptions')",
     "api.post('/api/v1/admin/billing/subscriptions/cancel'",

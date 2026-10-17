@@ -10,8 +10,9 @@ import type { Redis } from 'ioredis';
 import type { SubscriptionTier } from '@strict-proxy/types';
 import { subscriptions, nodeCredentials, billingCheckouts, users } from '../db/schema.js';
 import { asyncHandler, requireJwt } from '../middleware.js';
-import { isKnownTier, tierDefinition, nextPeriodEnd } from '../services/tiers.js';
+import { isKnownTier, tierDefinition } from '../services/tiers.js';
 import { BillingError, purchasableTiers, validateBillingConfig, priceForTier } from '../services/catalog.js';
+import { loadPriceOverrides } from '../services/pricing.js';
 import { isOpenPayConfigured, describeOpenPayError, createOpenPayClient } from '../services/openpay.js';
 import { createTierCheckout, latestCheckoutForUser } from '../services/billing.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from '../services/usage.js';
@@ -31,10 +32,11 @@ export function buildBillingRouter(ctx: Ctx): Router {
     '/api/v1/billing/catalog',
     requireAuth,
     asyncHandler(async (_req: Request, res: Response) => {
+      const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
       res.json({
         gateway: isOpenPayConfigured(ctx.cfg) ? 'openpay' : 'unconfigured',
         currency: ctx.cfg.billingCurrency,
-        tiers: purchasableTiers(ctx.cfg),
+        tiers: purchasableTiers(ctx.cfg, overrides),
         quotaWindowDays: 30,
       });
     }),
@@ -102,7 +104,8 @@ export function buildBillingRouter(ctx: Ctx): Router {
         if (couponCode && isOpenPayConfigured(ctx.cfg)) {
           try {
             const client = createOpenPayClient(ctx.cfg);
-            const price = priceForTier(ctx.cfg, (body.tier ?? 'standard') as SubscriptionTier);
+            const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
+            const price = priceForTier(ctx.cfg, (body.tier ?? 'standard') as SubscriptionTier, overrides);
             // `amount` is required and lets the provider apply min_amount rules.
             const verdict = await client.coupons.validate({ code: couponCode, amount: price.amountMinor });
             if (verdict?.valid === false) {

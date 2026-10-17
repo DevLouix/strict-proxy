@@ -171,6 +171,57 @@ test('logout revokes the presented access token immediately', async () => {
   assert.equal(after.body.code, 'TOKEN_REVOKED');
 });
 
+test('logout revokes the refresh token too, so it cannot mint a new session', async () => {
+  const user = await h.seedUser('logout-refresh@example.test');
+  const { accessToken, refreshToken } = await h.login(user.email, user.password, 'device-1');
+
+  const logout = await h.request('POST', '/api/v1/auth/logout', {
+    token: accessToken,
+    body: { refreshToken },
+  });
+  assert.equal(logout.status, 200);
+
+  // The point of revoking the access token is lost if the refresh token that
+  // can replace it survives the logout.
+  const refreshed = await h.request('POST', '/api/v1/auth/refresh', {
+    body: { refreshToken, deviceId: 'device-1' },
+  });
+  assert.equal(refreshed.status, 401);
+  assert.equal(refreshed.body.code, 'INVALID_REFRESH');
+});
+
+test('logout still works for a client that does not send its refresh token', async () => {
+  // The refresh token is optional so older clients keep working; the access
+  // token is still revoked.
+  const user = await h.seedUser('logout-legacy@example.test');
+  const { accessToken } = await h.login(user.email, user.password, 'device-1');
+
+  const logout = await h.request('POST', '/api/v1/auth/logout', { token: accessToken });
+  assert.equal(logout.status, 200);
+  assert.equal((await h.request('GET', '/api/v1/me', { token: accessToken })).status, 401);
+});
+
+test('a logout cannot revoke a refresh token belonging to somebody else', async () => {
+  const victim = await h.seedUser('victim@example.test');
+  const attacker = await h.seedUser('attacker@example.test');
+  const victimTokens = await h.login(victim.email, victim.password, 'device-v');
+  const attackerTokens = await h.login(attacker.email, attacker.password, 'device-a');
+
+  // Authenticated as the attacker, presenting the victim's refresh token.
+  const logout = await h.request('POST', '/api/v1/auth/logout', {
+    token: attackerTokens.accessToken,
+    body: { refreshToken: victimTokens.refreshToken },
+  });
+  assert.equal(logout.status, 200);
+
+  // The victim's session must be untouched: signing out is never a way to
+  // sign somebody else out.
+  const refreshed = await h.request('POST', '/api/v1/auth/refresh', {
+    body: { refreshToken: victimTokens.refreshToken, deviceId: 'device-v' },
+  });
+  assert.equal(refreshed.status, 200, "another user's logout must not end your session");
+});
+
 test('device seats evict the least-recently-seen device rather than refusing', async () => {
   await h.request('POST', '/api/v1/auth/register', { body: { email: 'seats@example.test', password: PASSWORD } });
 

@@ -236,6 +236,64 @@ export async function usersView(api, rerender) {
 // Nodes
 // ---------------------------------------------------------------------------
 
+/**
+ * Issues a node enrollment token.
+ *
+ * Module level rather than a closure inside `nodesView` because the enrollment
+ * list needs the same dialog: it was previously reached through a
+ * `[data-open-enroll]` selector that nothing ever rendered, so "Issue new" on
+ * that screen silently did nothing but refresh.
+ */
+function issueEnrollmentDialog(api, onIssued) {
+  const region = h('input', { placeholder: 'eu-central' });
+  const label = h('input', { placeholder: 'Frankfurt 1' });
+  const ttl = h('input', { type: 'number', value: '30', min: '5', max: '1440' });
+
+  const output = h('div', { class: 'stack' });
+
+  const dlg = h('dialog', {},
+    h('div', { class: 'dlg-head' }, h('h3', {}, 'Issue node enrollment token')),
+    h('div', { class: 'dlg-body' },
+      h('label', { class: 'field' }, h('span', {}, 'Region'), region),
+      h('label', { class: 'field' }, h('span', {}, 'Label (optional)'), label),
+      h('label', { class: 'field' }, h('span', {}, 'TTL (minutes, 5–1440)'), ttl),
+      output,
+      h('p', { class: 'muted small' },
+        'The token is shown once. Run it on the VPS as NODE_ENROLLMENT_TOKEN; only its hash is stored.'),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
+      h('button', {
+        class: 'btn primary',
+        onClick: async () => {
+          try {
+            const res = await api.post('/api/v1/admin/node-enrollments', {
+              region: region.value.trim(),
+              label: label.value.trim() || undefined,
+              ttlMinutes: Number(ttl.value),
+            });
+            mount(output,
+              h('p', { class: 'muted small' }, 'One-time token — copy it now:'),
+              h('div', { class: 'copy' }, res.token),
+              h('button', { class: 'btn sm', onClick: () => copyText(res.token) }, 'Copy token'),
+              h('p', { class: 'muted small' },
+                'On the VPS: bash apps/node-agent/deploy/install-node.sh with CONTROLLER_URL, NODE_ENROLLMENT_TOKEN, NODE_PUBLIC_IP and NODE_HOSTNAME set.'),
+            );
+            // Let the caller re-read the list so the token it just issued shows
+            // up in the screen the operator was looking at.
+            if (onIssued) await onIssued();
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        },
+      }, 'Issue token'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+}
+
 export async function nodesView(api) {
   const host = h('div', {});
   let rows = [];
@@ -256,53 +314,6 @@ export async function nodesView(api) {
     }
   }
 
-  function enrollmentDialog() {
-    const region = h('input', { placeholder: 'eu-central' });
-    const label = h('input', { placeholder: 'Frankfurt 1' });
-    const ttl = h('input', { type: 'number', value: '30', min: '5', max: '1440' });
-
-    const output = h('div', { class: 'stack' });
-
-    const dlg = h('dialog', {},
-      h('div', { class: 'dlg-head' }, h('h3', {}, 'Issue node enrollment token')),
-      h('div', { class: 'dlg-body' },
-        h('label', { class: 'field' }, h('span', {}, 'Region'), region),
-        h('label', { class: 'field' }, h('span', {}, 'Label (optional)'), label),
-        h('label', { class: 'field' }, h('span', {}, 'TTL (minutes, 5–1440)'), ttl),
-        output,
-        h('p', { class: 'muted small' },
-          'The token is shown once. Run it on the VPS as NODE_ENROLLMENT_TOKEN; only its hash is stored.'),
-      ),
-      h('div', { class: 'dlg-foot' },
-        h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
-        h('button', {
-          class: 'btn primary',
-          onClick: async () => {
-            try {
-              const res = await api.post('/api/v1/admin/node-enrollments', {
-                region: region.value.trim(),
-                label: label.value.trim() || undefined,
-                ttlMinutes: Number(ttl.value),
-              });
-              mount(output,
-                h('p', { class: 'muted small' }, 'One-time token — copy it now:'),
-                h('div', { class: 'copy' }, res.token),
-                h('button', { class: 'btn sm', onClick: () => copyText(res.token) }, 'Copy token'),
-                h('p', { class: 'muted small' },
-                  'On the VPS: bash apps/node-agent/deploy/install-node.sh with CONTROLLER_URL, NODE_ENROLLMENT_TOKEN, NODE_PUBLIC_IP and NODE_HOSTNAME set.'),
-              );
-            } catch (err) {
-              toast(err.message, 'err');
-            }
-          },
-        }, 'Issue token'),
-      ),
-    );
-    document.body.append(dlg);
-    dlg.addEventListener('close', () => dlg.remove(), { once: true });
-    dlg.showModal();
-  }
-
   function draw() {
     mount(host,
       h('div', { class: 'page-head' },
@@ -312,7 +323,7 @@ export async function nodesView(api) {
         ),
         h('div', { class: 'row' },
           h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
-          h('button', { class: 'btn primary sm', onClick: enrollmentDialog }, 'Enroll a node'),
+          h('button', { class: 'btn primary sm', onClick: () => issueEnrollmentDialog(api, load) }, 'Enroll a node'),
         ),
       ),
       h('div', { class: 'panel' },
@@ -397,7 +408,7 @@ export async function enrollmentsView(api) {
         ),
         h('div', { class: 'row' },
           h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
-          h('button', { class: 'btn primary sm', onClick: async () => { await load(); document.querySelector('[data-open-enroll]')?.click(); } }, 'Issue new'),
+          h('button', { class: 'btn primary sm', onClick: () => issueEnrollmentDialog(api, load) }, 'Issue new'),
         ),
       ),
       h('div', { class: 'panel' },

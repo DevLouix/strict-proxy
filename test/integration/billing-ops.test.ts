@@ -490,6 +490,8 @@ test('the plans and cancellation routes are admin-only', async () => {
   for (const [method, path, body] of [
     ['GET', '/api/v1/admin/billing/plans', undefined],
     ['POST', '/api/v1/admin/billing/plans/sync', {}],
+    ['PUT', '/api/v1/admin/billing/plans/price', { tier: 'standard', amountMinor: 1000 }],
+    ['DELETE', '/api/v1/admin/billing/plans/price/standard', undefined],
     ['POST', '/api/v1/admin/billing/plans/delete', { planId: 'x' }],
     ['GET', '/api/v1/admin/billing/subscriptions', undefined],
     ['POST', '/api/v1/admin/billing/subscriptions/cancel', { userId: user.id }],

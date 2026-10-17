@@ -7,7 +7,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { and, eq, gt, isNull, lt } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
-import { devices, refreshTokens, revokedAccessTokens, users } from '../db/schema.js';
+import { devices, refreshTokens, revokedAccessTokens } from '../db/schema.js';
 import type { ControllerConfig } from '../env.js';
 
 export interface AccessClaims {
@@ -152,12 +152,27 @@ export async function revokeAllRefreshTokens(db: Db, userId: string): Promise<vo
   await db.update(refreshTokens).set({ revokedAt: new Date() }).where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
 }
 
-/** Resolves a user's public record by id; null when missing. */
-export async function findUserById(db: Db, userId: string) {
-  const [row] = await db
-    .select({ id: users.id, email: users.email, role: users.role, createdAt: users.createdAt })
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  return row ?? null;
+/**
+ * Revokes one refresh token by the value the client holds.
+ *
+ * Logout has to end the session, not just the access token. A refresh token left
+ * alive can mint a new access token immediately after the "logout", which makes
+ * revoking the access token pointless.
+ *
+ * When `userId` is given the update is constrained to that user, so the logout
+ * endpoint can only ever end the caller's own session even if a token belonging
+ * to someone else is presented.
+ */
+export async function revokeRefreshToken(db: Db, rawToken: string, userId?: string): Promise<void> {
+  const tokenHash = sha256(rawToken);
+  await db
+    .update(refreshTokens)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(refreshTokens.tokenHash, tokenHash),
+        isNull(refreshTokens.revokedAt),
+        ...(userId ? [eq(refreshTokens.userId, userId)] : []),
+      ),
+    );
 }
