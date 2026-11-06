@@ -59,6 +59,11 @@ jobs:
             .env.docker
           docker compose --env-file .env.docker -f docker-compose.production.yml config >/dev/null
 
+      - name: Validate Dokploy Compose files
+        run: |
+          docker compose --env-file .env.dokploy.example -f docker-compose.dokploy.yml config >/dev/null
+          docker compose --env-file .env.dokploy.example -f docker-compose.dokploy-node.yml config >/dev/null
+
   images:
     name: Build and publish server images
     needs: validate

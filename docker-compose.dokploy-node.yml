@@ -1,0 +1,90 @@
+# =============================================================================
+# docker-compose.dokploy-node.yml — ONE EXIT NODE, DEPLOYED PER VPS (DOKPLOY)
+#
+# Runs a single node agent with host networking so sing-box can accept
+# VLESS+REALITY on NODE_TUNNEL_PORT, and users' traffic egresses from that VPS's
+# public IP.
+#
+# USE THIS WHEN
+#   Adding an exit node to a Dokploy deployment. Create a SEPARATE Dokploy
+#   Compose service for it on the exit VPS. This file is not part of, and must
+#   not be merged into, docker-compose.dokploy.yml: the controller does not need
+#   TUN/NET_ADMIN, and nodes should not share the controller's IP or failure
+#   domain.
+#
+# ENV FILE
+#   Paste the NODE section of .env.dokploy.example into this service's
+#   Environment tab in Dokploy. The file is a worksheet; Dokploy reads the UI.
+#
+# REQUIRED ON FIRST BOOT
+#   NODE_CONTROLLER_URL    https://api.example.com  the controller's public URL
+#   NODE_ENROLLMENT_TOKEN  one-time token from Admin -> Enrollments
+#   NODE_HOSTNAME          this VPS's public DNS name or IP
+#   NODE_PUBLIC_IP         optional; leave empty to auto-detect and self-heal
+#
+# AFTER ENROLLMENT
+#   The one-time token is spent. Remove NODE_ENROLLMENT_TOKEN and redeploy. The
+#   permanent identity (node id, HMAC secret, REALITY keypair) lives in the
+#   `nodeidentity` volume, not in the environment.
+#
+# WHAT IT PUBLISHES
+#   Host networking: TCP and UDP on NODE_TUNNEL_PORT (default 443). Open both on
+#   the VPS firewall. The stats listener stays on 127.0.0.1:10085.
+#
+# DO NOT
+#   - add a Dokploy domain: this is not an HTTP app;
+#   - run two nodes on one host (one identity and one IP per node);
+#   - expose the stats listener.
+#
+# REQUIREMENTS
+#   A public IPv4, /dev/net/tun, NET_ADMIN, and inbound TCP+UDP 443.
+#
+# STEP BY STEP: docs/DOKPLOY.md section 5.  FILE MAP: docs/FILE-MAP.md
+# =============================================================================
+
+services:
+  node-agent:
+    build:
+      context: .
+      dockerfile: docker/node-agent.Dockerfile
+      args:
+        SING_BOX_VERSION: ${SING_BOX_VERSION:-1.13.21}
+    image: ${NODE_AGENT_IMAGE:-strict-proxy/node-agent:local}
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      CONTROLLER_URL: ${NODE_CONTROLLER_URL:?NODE_CONTROLLER_URL is required — the controller's public https URL}
+      NODE_ENROLLMENT_TOKEN: ${NODE_ENROLLMENT_TOKEN:-}
+      NODE_PUBLIC_IP: ${NODE_PUBLIC_IP:-}
+      NODE_PUBLIC_IP_ECHO_URL: ${NODE_PUBLIC_IP_ECHO_URL:-https://api.ipify.org}
+      NODE_TUNNEL_PORT: ${NODE_TUNNEL_PORT:-443}
+      NODE_HOSTNAME: ${NODE_HOSTNAME:?NODE_HOSTNAME is required — this VPS's public hostname}
+      NODE_LABEL: ${NODE_LABEL:-}
+      NODE_REALITY_SERVER_NAME: ${NODE_REALITY_SERVER_NAME:-www.microsoft.com}
+      NODE_IDENTITY_PATH: /var/lib/strict-proxy/node-identity.json
+      SING_BOX_BINARY: /usr/local/bin/sing-box
+      SING_BOX_RESTART_MODE: managed
+      SING_BOX_CONFIG_PATH: /etc/sing-box/config.json
+      SING_BOX_STATS_API_LISTEN: 127.0.0.1:10085
+      SING_BOX_STATS_PROTO: /app/apps/node-agent/src/v2rayapi/stats.proto
+      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-30}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-60}
+      USAGE_INTERVAL_SECONDS: ${USAGE_INTERVAL_SECONDS:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - nodeidentity:/var/lib/strict-proxy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  nodeidentity:
+    name: ${NODE_IDENTITY_VOLUME:-strict-proxy-nodeidentity}

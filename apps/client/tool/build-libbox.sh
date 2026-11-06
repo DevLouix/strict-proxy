@@ -10,6 +10,15 @@ REF="${SING_BOX_LIBBOX_REF:?Set SING_BOX_LIBBOX_REF to a reviewed sing-box-libbo
 ANDROID_OUT="${ROOT_DIR}/packages/libbox_bridge/android/libs"
 IOS_OUT="${ROOT_DIR}/packages/libbox_bridge/ios/Frameworks"
 
+# Linux hosts and Android-only release jobs cannot build the Apple framework
+# (it needs Xcode). `--android-only` is what CI uses for APK artifacts.
+TARGET=all
+case "${1:-}" in
+  ""|"--all") TARGET=all ;;
+  "--android-only") TARGET=android ;;
+  *) echo "usage: $0 [--all|--android-only]" >&2; exit 2 ;;
+esac
+
 command -v go >/dev/null || { echo 'Go is required' >&2; exit 1; }
 command -v gomobile >/dev/null || { echo 'gomobile is required: go install golang.org/x/mobile/cmd/gomobile@latest' >&2; exit 1; }
 
@@ -33,13 +42,15 @@ pushd "$WORK_DIR" >/dev/null
 go run ./cmd/internal/build_libbox -target android -platform android/arm64,android/arm,android/386,android/amd64
 mkdir -p "$ANDROID_OUT"
 cp -f libbox.aar "$ANDROID_OUT/libbox.aar"
+echo "Android: $ANDROID_OUT/libbox.aar"
 
-go run ./cmd/internal/build_libbox -target apple -platform ios
-mkdir -p "$IOS_OUT"
-rm -rf "$IOS_OUT/Libbox.xcframework"
-mv Libbox.xcframework "$IOS_OUT/Libbox.xcframework"
+if [[ "$TARGET" == "all" ]]; then
+  go run ./cmd/internal/build_libbox -target apple -platform ios
+  mkdir -p "$IOS_OUT"
+  rm -rf "$IOS_OUT/Libbox.xcframework"
+  mv Libbox.xcframework "$IOS_OUT/Libbox.xcframework"
+  echo "Apple:   $IOS_OUT/Libbox.xcframework"
+fi
 popd >/dev/null
 
 echo "Built libbox artifacts for commit $REF"
-echo "Android: $ANDROID_OUT/libbox.aar"
-echo "Apple:   $IOS_OUT/Libbox.xcframework"

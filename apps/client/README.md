@@ -54,6 +54,22 @@ byte. It is pinned against fixtures produced by the controller's own signer:
 npx tsx test/tools/emit-canonical-fixtures.ts > apps/client/test/canonical_fixtures.json
 ```
 
+## Release builds
+
+A build you hand to users must include the native engine and be signed with the
+release keystore:
+
+```sh
+./tool/build-release-android.sh
+```
+
+It requires `STRICT_CONTROLLER_URL`, `STRICT_SIGNING_PUBLIC_KEY`,
+`SING_BOX_LIBBOX_REF`, and the `ANDROID_KEYSTORE_*` variables, and it refuses to
+produce an APK if the controller URL is not HTTPS, the signing key is missing, or
+`libbox.aar` was not built. The CI equivalent is the manual `client-release`
+workflow. Full instructions, including keystore setup and how updates work, are
+in [`docs/RELEASE-CLIENT.md`](../../docs/RELEASE-CLIENT.md).
+
 ## Testing
 
 ```sh

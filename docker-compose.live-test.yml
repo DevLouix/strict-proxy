@@ -1,5 +1,34 @@
-# Linux-host networking override used only by the isolated smoke test.
-# It avoids restricted Docker bridge networking in CI/sandbox environments.
+# =============================================================================
+# docker-compose.live-test.yml — SANDBOX NETWORKING OVERRIDE. NEVER PRODUCTION.
+#
+# This is an OVERRIDE file, not a stack. Layer it on top of
+# docker-compose.production.yml to move every container to host networking on
+# alternate ports. It exists because some restricted Docker sandboxes block
+# container-to-container TCP, which prevents the normal stack from starting.
+#
+# USE THIS WHEN
+#   You are reproducing a deployment inside such a sandbox or CI runner. It is
+#   not part of any documented deployment path and no production service should
+#   ever be started with it.
+#
+# WHAT IT CHANGES
+#   postgres  -> host networking, 127.0.0.1:${POSTGRES_LIVE_PORT:-15432}
+#   redis     -> host networking, 127.0.0.1:${REDIS_LIVE_PORT:-16379}
+#   controller-> host networking, ${CONTROLLER_LIVE_PORT:-18080}
+#   edge      -> host networking, http://127.0.0.1:18081, TLS disabled
+#   all       -> published ports and the backend network are removed
+#
+# RUN (both -f flags, production file first)
+#   docker compose --env-file .env.docker \
+#     -f docker-compose.production.yml -f docker-compose.live-test.yml config
+#   docker compose --env-file .env.docker \
+#     -f docker-compose.production.yml -f docker-compose.live-test.yml up -d
+#
+# REQUIREMENTS
+#   Docker Compose >= 2.24 for `!reset`, and a Linux host that allows host
+#   networking. This removes network isolation by design, so do not expose the
+#   resulting ports to the internet.
+# ============================================================================
 services:
   postgres:
     network_mode: host

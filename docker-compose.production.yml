@@ -1,10 +1,50 @@
-# Production-like deployment for the controller, infrastructure, and optional edge/node.
-# API-only mode:
+# =============================================================================
+# docker-compose.production.yml — ONE LINUX VPS, WITH THE BUNDLED CADDY EDGE
+#
+# Starts the controller plus Postgres and Redis, and optionally a Caddy HTTPS
+# edge and a local node agent. This is the self-hosted path: you own the server,
+# DNS, and TLS certificate.
+#
+# USE THIS WHEN
+#   You have a plain Debian/Ubuntu VPS and are NOT using Dokploy.
+#   For Dokploy use docker-compose.dokploy.yml instead — this file publishes
+#   host ports and runs its own TLS edge, which conflicts with Dokploy's Traefik.
+#
+# ENV FILE (required, and it is never auto-loaded)
+#   cp .env.docker.example .env.docker   then replace every placeholder.
+#   Pass `--env-file .env.docker` on EVERY command; without it Compose reads
+#   the local-development .env and fails on the required variables.
+#
+# RUN
+#   # validate the file without starting anything
+#   docker compose --env-file .env.docker -f docker-compose.production.yml config
+#
+#   # core only: controller on 127.0.0.1:8080
 #   docker compose --env-file .env.docker -f docker-compose.production.yml up -d --build
-# Public HTTPS mode:
+#
+#   # core + public HTTPS edge (Caddy, ports 80/443, needs DNS)
 #   docker compose --profile edge --env-file .env.docker -f docker-compose.production.yml up -d --build
-# Optional local Docker node:
+#
+#   # core + a node agent on this same host (needs /dev/net/tun and NET_ADMIN)
 #   docker compose --profile node --env-file .env.docker -f docker-compose.production.yml up -d --build
+#
+#   # logs / stop
+#   docker compose --env-file .env.docker -f docker-compose.production.yml logs -f controller
+#   docker compose --env-file .env.docker -f docker-compose.production.yml down
+#
+# WHAT IT PUBLISHES
+#   controller 127.0.0.1:8080 (plain HTTP), Postgres/Redis on 127.0.0.1, and
+#   80/443 only when the `edge` profile is enabled. Keep the database ports on
+#   loopback.
+#
+# PROFILES
+#   (default)  controller + postgres + redis
+#   edge       + Caddy reverse proxy and certificate management
+#   node       + node-agent on this host; for a multi-VPS fleet run one node per
+#                VPS instead, with its own enrollment token
+#
+# STEP BY STEP: SETUP.md section 4.  FILE MAP: docs/FILE-MAP.md
+# =============================================================================
 
 services:
   postgres:

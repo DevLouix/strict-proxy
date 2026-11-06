@@ -1,5 +1,26 @@
-version: "3.9"
-
+# =============================================================================
+# docker-compose.yml — LOCAL DEVELOPMENT DATABASE ONLY. NOT A DEPLOYMENT.
+#
+# Starts Postgres 16 and Redis 7 so the controller can run on your machine with
+# `npm run dev:controller`. It does not start the controller, and it reads no
+# environment file: the credentials are the throwaway values strict/strict and
+# Redis has no password.
+#
+# RUN
+#   docker compose up -d postgres redis
+#   docker compose down          # stop
+#   docker compose down -v       # stop and DELETE the database volume
+#
+# USE THE VALUES FROM
+#   .env  (created by apps/controller/src/scripts/generate-env.ts, which already
+#          points DATABASE_URL at localhost:5432 and REDIS_URL at localhost:6379)
+#
+# DO NOT USE THIS FILE ON A PUBLIC SERVER. Ports 5432 and 6379 are published on
+# all interfaces and the passwords are not secrets. For a real deployment use
+# docker-compose.production.yml (.env.docker) or docker-compose.dokploy.yml.
+#
+# STEP BY STEP: SETUP.md section 3.  FILE MAP: docs/FILE-MAP.md
+# =============================================================================
 services:
   postgres:
     image: postgres:16-alpine

@@ -5,6 +5,7 @@ build/
 .env
 .env.local
 .env.docker
+.env.dokploy
 *.log
 .dart_tool/
 .flutter-plugins*

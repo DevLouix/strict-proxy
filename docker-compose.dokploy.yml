@@ -1,0 +1,142 @@
+# =============================================================================
+# docker-compose.dokploy.yml — CONTROLLER STACK FOR DOKPLOY
+#
+# Starts the controller plus Postgres and Redis inside Dokploy. Dokploy's own
+# Traefik terminates TLS and reaches the controller over the shared
+# `dokploy-network`. There is deliberately no `ports:` entry: publishing 8080
+# on the host would bypass Traefik, collide with other Dokploy apps, and expose
+# plain HTTP.
+#
+# USE THIS WHEN
+#   Dokploy is already installed on the server. For a plain VPS without Dokploy
+#   use docker-compose.production.yml instead (it includes its own Caddy edge).
+#
+# HOW TO DEPLOY
+#   1. Dokploy -> Project -> Create Service -> Compose.
+#   2. Repository: this repo. Compose path: docker-compose.dokploy.yml.
+#   3. Environment tab: paste the CONTROLLER section of .env.dokploy.example
+#      and replace every placeholder. Dokploy does not read the file from the
+#      repository; the file is only a worksheet.
+#   4. Deploy, then add a domain to the `controller` service:
+#      internal port 8080, HTTPS on. Do not add domains to postgres or redis.
+#
+# ENV FILE
+#   .env.dokploy.example (controller section), pasted into the Dokploy UI.
+#
+# WHAT IT PUBLISHES
+#   Nothing on the host. Only Traefik reaches port 8080 through dokploy-network.
+#
+# THE NODE AGENT IS NOT PART OF THIS STACK. It needs a public IP, NET_ADMIN and
+# /dev/net/tun, and belongs on each exit VPS: docker-compose.dokploy-node.yml.
+#
+# REQUIREMENTS
+#   A DNS A record for the API domain, TCP 80/443 reachable (ACME), and the
+#   `dokploy-network` Docker network that Dokploy creates.
+#
+# STEP BY STEP: docs/DOKPLOY.md.  FILE MAP: docs/FILE-MAP.md
+# =============================================================================
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-strict}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — see .env.dokploy.example}
+      POSTGRES_DB: ${POSTGRES_DB:-strict_proxy}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required — see .env.dokploy.example}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required — see .env.dokploy.example}
+    networks: [backend]
+
+  controller:
+    build:
+      context: .
+      dockerfile: docker/controller.Dockerfile
+    image: ${CONTROLLER_IMAGE:-strict-proxy/controller:local}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 8080
+      DATABASE_URL: ${CONTROLLER_DATABASE_URL:?CONTROLLER_DATABASE_URL is required — point it at postgres:5432}
+      REDIS_URL: ${CONTROLLER_REDIS_URL:?CONTROLLER_REDIS_URL is required — point it at redis:6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_ISSUER: ${JWT_ISSUER:-strict-proxy-controller}
+      ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-900}
+      REFRESH_TOKEN_TTL_SECONDS: ${REFRESH_TOKEN_TTL_SECONDS:-2592000}
+      SIGNING_PRIVATE_KEY_PEM: ${SIGNING_PRIVATE_KEY_PEM:?SIGNING_PRIVATE_KEY_PEM is required}
+      SIGNING_KEY_ID: ${SIGNING_KEY_ID:-primary}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:?PAYMENT_WEBHOOK_SECRET is required}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:?PUBLIC_APP_URL is required — the HTTPS URL users reach}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
+      HEARTBEAT_TTL_SECONDS: ${HEARTBEAT_TTL_SECONDS:-90}
+      HMAC_TIMESTAMP_TOLERANCE_SECONDS: ${HMAC_TIMESTAMP_TOLERANCE_SECONDS:-300}
+      DEFAULT_REALITY_SERVER_NAME: ${DEFAULT_REALITY_SERVER_NAME:-www.microsoft.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      NODE_IP_AUTODETECT: ${NODE_IP_AUTODETECT:-true}
+      ENABLE_HSTS: ${ENABLE_HSTS:-true}
+      HSTS_MAX_AGE_SECONDS: ${HSTS_MAX_AGE_SECONDS:-31536000}
+      RATE_LIMIT_MAX_ATTEMPTS: ${RATE_LIMIT_MAX_ATTEMPTS:-10}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      OPENPAY_API_KEY: ${OPENPAY_API_KEY:-}
+      OPENPAY_BASE_URL: ${OPENPAY_BASE_URL:-https://api.openpay.fiatden.com}
+      OPENPAY_WEBHOOK_SECRET: ${OPENPAY_WEBHOOK_SECRET:-}
+      OPENPAY_SIGNATURE_HEADER: ${OPENPAY_SIGNATURE_HEADER:-x-webhook-signature-v1}
+      OPENPAY_TIMESTAMP_TOLERANCE_SECONDS: ${OPENPAY_TIMESTAMP_TOLERANCE_SECONDS:-300}
+      OPENPAY_PLATFORM_NAME: ${OPENPAY_PLATFORM_NAME:-StrictProxy}
+      BILLING_CURRENCY: ${BILLING_CURRENCY:-NGN}
+      STANDARD_TIER_AMOUNT_MINOR: ${STANDARD_TIER_AMOUNT_MINOR:-250000}
+      PRO_TIER_AMOUNT_MINOR: ${PRO_TIER_AMOUNT_MINOR:-750000}
+      DB_INIT_MAX_ATTEMPTS: ${DB_INIT_MAX_ATTEMPTS:-30}
+    # Dokploy's domain is bound to this service and this port; do not add ports.
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [backend, dokploy-network]
+
+volumes:
+  pgdata:
+    name: ${POSTGRES_DATA_VOLUME:-strict-proxy-pgdata}
+  redisdata:
+    name: ${REDIS_DATA_VOLUME:-strict-proxy-redisdata}
+
+networks:
+  backend:
+    driver: bridge
+  # Created by Dokploy. Traefik routes the assigned domain here.
+  dokploy-network:
+    external: true

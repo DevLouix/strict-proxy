@@ -473,7 +473,11 @@ export SING_BOX_LIBBOX_REF=<40-character-reviewed-commit-sha>
 
 `.github/workflows/client.yml` runs tests and analysis for client changes. On
 pushes to `main` and `release/*`, it also uploads versioned Linux and Android
-build artifacts. It always builds the iOS client on a macOS runner with
+build artifacts. Those Android artifacts are **debug** builds and cannot talk to
+a production controller: users get builds from the manual `client-release`
+workflow, which bundles the native engine, bakes in the controller URL and
+signing key, and signs with the release keystore — see
+[`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md). It always builds the iOS client on a macOS runner with
 `--no-codesign`, which proves the iOS build compiles even though signing needs a
 release identity. The workflow intentionally does not publish client binaries for
 pull requests or development branches.
@@ -491,6 +495,15 @@ libbox artifact or VPN permission is unavailable.
 
 
 ## Docker server deployment
+
+Not sure which of the five Compose files and four environment files you need?
+[`docs/FILE-MAP.md`](docs/FILE-MAP.md) answers that in one page, and names the
+files you never have to touch.
+
+> **Using Dokploy?** Use [`docs/DOKPLOY.md`](docs/DOKPLOY.md) instead of the
+> Compose/Caddy steps below. It covers a Traefik-native controller stack
+> (`docker-compose.dokploy.yml`), one node stack per exit VPS
+> (`docker-compose.dokploy-node.yml`), and the signed client release.
 
 The repository includes an environment-driven Compose stack for the controller,
 Postgres, Redis, an optional Caddy edge, and an optional TUN-capable node agent.

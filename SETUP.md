@@ -10,6 +10,10 @@ something is broken, jump to [Troubleshooting](#troubleshooting).
 
 ## 1. What you are setting up
 
+> **Confused by the number of Compose and env files?** You only need one of
+> each. [`docs/FILE-MAP.md`](docs/FILE-MAP.md) maps every file to the job it
+> does and says which ones to ignore.
+
 Four programs that talk to each other:
 
 | Piece | Folder | What it does |
@@ -97,6 +101,12 @@ To try it with a real node, see [section 7](#7-add-your-first-node).
 ## 4. Production path (Docker)
 
 Use this for anything that faces the internet.
+
+> **Hosting on Dokploy?** Follow [`docs/DOKPLOY.md`](docs/DOKPLOY.md) instead.
+> Dokploy terminates TLS with its own Traefik and needs the controller on
+> `dokploy-network` without host ports, which is exactly what
+> `docker-compose.dokploy.yml` provides. The sections below describe the
+> repository's bundled Caddy edge.
 
 ### Step 1 — Get the code
 
@@ -490,6 +500,11 @@ subscription has expired. It has no dashboard button yet; call it directly.
 ---
 
 ## 10. Build the client app
+
+> **For builds you hand to users**, follow [`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md).
+> A plain `flutter build apk --release` uses Flutter's debug signing key, and a
+> build without `libbox.aar` installs but cannot connect. The release workflow
+> refuses both mistakes.
 
 ```bash
 cd apps/client
