@@ -49,7 +49,7 @@ shows a secret again after it is saved, so keep the keystore locally.
 | `ANDROID_KEY_ALIAS` | secret | key alias inside the keystore | `upload` if you followed the keystore step |
 | `ANDROID_KEY_PASSWORD` | secret | key password (optional if equal to the keystore one) | the password you chose |
 | `CLIENT_CONTROLLER_URL` | variable | public HTTPS URL compiled into the app | your deployment, e.g. `https://api.example.com` |
-| `CLIENT_SIGNING_PUBLIC_KEY` | variable | base64 of the controller's 32-byte Ed25519 public key | derived from `signing-key.pem` |
+| `CLIENT_SIGNING_PUBLIC_KEY` | variable | base64 of the controller's 32-byte Ed25519 public key (not the APK keystore) | derived from `signing-key.pem` or `SIGNING_PRIVATE_KEY_PEM` |
 
 The keystore and the public key are produced in
 [Local prerequisites](#local-prerequisites-keystore-and-public-key) below.
@@ -148,10 +148,47 @@ client: the Android artifact job fails rather than uploading an unsigned APK.
 
 ### 3. Collect the two public build inputs
 
+Two values are left: `CLIENT_CONTROLLER_URL` (your `https://` deployment) and
+`CLIENT_SIGNING_PUBLIC_KEY`. The second one causes most of the confusion, so to
+be explicit:
+
+- `upload.jks` is the **Android keystore**. It signs the APK. Nothing to do with
+  this step.
+- `signing-key.pem` is the **controller's Ed25519 key**. The controller signs
+  config bundles with it; the client verifies them with its public half. It was
+  created when you deployed the controller (`SETUP.md` step 3, or
+  [DOKPLOY.md](DOKPLOY.md) step 2).
+
+Pick the case that matches your setup — all three print the same 44-character
+base64 string, which is what `CLIENT_SIGNING_PUBLIC_KEY` holds:
+
 ```bash
-# From the controller's signing key (NOT a secret — it only verifies):
+# A. The PEM file is on this machine (you generated it here):
 openssl pkey -in signing-key.pem -pubout -outform DER | tail -c 32 | base64
+
+# B. The key only exists as SIGNING_PRIVATE_KEY_PEM in the controller's
+#    environment (Dokploy/Compose), with \n escapes. Paste that value:
+SIGNING_PRIVATE_KEY_PEM='-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n' \
+node -e '
+  const { createPublicKey } = require("node:crypto");
+  const pem = process.env.SIGNING_PRIVATE_KEY_PEM.replace(/\\n/g, "\n");
+  const der = createPublicKey(pem).export({ type: "spki", format: "der" });
+  process.stdout.write(der.subarray(-32).toString("base64") + "\n");
+'
+
+# C. You have the PEM public key (e.g. what `npm run db:seed` prints):
+openssl pkey -pubin -in public.pem -outform DER | tail -c 32 | base64
 ```
+
+A correct value decodes to exactly 32 bytes and looks like
+`6w1/gYyMvdBS2dFbcSq3TUmt8KqYfvFBTZ0jLkaBAGM=`. The workflow rejects anything
+else at the configuration gate.
+
+> **Do not invent a key here.** If the controller is already running, it must be
+> the key in its `SIGNING_PRIVATE_KEY_PEM`. Building the client with a different
+> public key makes every bundle fail verification ("tampered configuration"),
+> and the fix is a rebuild for every user. Rotating the key is a separate,
+> deliberate operation (`README.md` → Signing keys).
 
 The `sing-box-libbox` commit the VPN engine is built from is pinned in
 `apps/client/libbox.ref` as a full 40-character SHA, so neither CI nor a local
