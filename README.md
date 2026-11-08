@@ -585,9 +585,9 @@ VPS with a unique enrollment token; do not expose its stats listener.
 ### CI, artifacts, and live smoke test
 
 `.github/workflows/server-ci.yml` validates the server on pull requests. Pushes to
-`main` and `release/*` build and publish the controller and node-agent images to
-GHCR, and upload a versioned node-agent deployment archive. The image build pins
-sing-box with `SING_BOX_VERSION`.
+`main` and `release/*` build and publish the controller image to GHCR and upload
+a versioned node-agent deployment archive. The node-agent image is published by
+`node-agent.yml` below, whose build pins sing-box with `SING_BOX_VERSION`.
 
 `.github/workflows/node-agent.yml` is the node image's release path: it publishes
 `ghcr.io/<owner>/strict-proxy-node-agent` for amd64 and arm64, then pulls the

@@ -22,7 +22,6 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: ${{ github.repository_owner }}
-  SING_BOX_VERSION: '1.13.21'
 
 jobs:
   validate:
@@ -64,8 +63,12 @@ jobs:
           docker compose --env-file .env.dokploy.example -f docker-compose.dokploy.yml config >/dev/null
           docker compose --env-file .env.dokploy.example -f docker-compose.dokploy-node.yml config >/dev/null
 
+  # The node-agent image is intentionally NOT built here. .github/workflows/
+  # node-agent.yml owns it: this job has no platforms matrix, so a second push
+  # of the same sha tag replaced the multi-arch index with an amd64-only one and
+  # raced on `latest`.
   images:
-    name: Build and publish server images
+    name: Build and publish the controller image
     needs: validate
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
@@ -85,14 +88,6 @@ jobs:
             type=sha
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/metadata-action@v5
-        id: agent_meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/strict-proxy-node-agent
-          tags: |
-            type=sha
-            type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -102,16 +97,6 @@ jobs:
           labels: ${{ steps.controller_meta.outputs.labels }}
           cache-from: type=gha,scope=controller
           cache-to: type=gha,mode=max,scope=controller
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/node-agent.Dockerfile
-          build-args: SING_BOX_VERSION=${{ env.SING_BOX_VERSION }}
-          push: true
-          tags: ${{ steps.agent_meta.outputs.tags }}
-          labels: ${{ steps.agent_meta.outputs.labels }}
-          cache-from: type=gha,scope=node-agent
-          cache-to: type=gha,mode=max,scope=node-agent
 
   artifacts:
     name: Package server artifacts

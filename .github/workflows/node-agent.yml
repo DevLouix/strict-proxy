@@ -11,6 +11,10 @@ name: node-agent
 # There is deliberately no enrollment-token secret: tokens are single-use and
 # expire, so a repository secret would be stale by the next run. The token
 # belongs in each node service's environment (docs/DOKPLOY.md §5).
+#
+# This workflow is the only publisher of the node image. server-ci deliberately
+# does not build it: a second, single-platform push of the same sha tag replaced
+# the multi-arch index with an amd64-only one and raced on `latest`.
 
 on:
   pull_request:
