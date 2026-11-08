@@ -172,7 +172,9 @@ jobs:
   linux-artifact:
     name: Build Linux client artifact
     needs: verify
-    if: github.event_name == 'push'
+    # PRs only verify; a push or a manual dispatch publishes artifacts, so a
+    # re-run after changing the release secrets actually produces an APK.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -208,7 +210,9 @@ jobs:
     needs:
       - verify
       - libbox
-    if: github.event_name == 'push'
+    # PRs only verify; a push or a manual dispatch publishes artifacts, so a
+    # re-run after changing the release secrets actually produces an APK.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     env:
       # Present only when the repository has release signing configured; the
