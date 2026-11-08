@@ -589,6 +589,14 @@ VPS with a unique enrollment token; do not expose its stats listener.
 GHCR, and upload a versioned node-agent deployment archive. The image build pins
 sing-box with `SING_BOX_VERSION`.
 
+`.github/workflows/node-agent.yml` is the node image's release path: it publishes
+`ghcr.io/<owner>/strict-proxy-node-agent` for amd64 and arm64, then pulls the
+digest it pushed and checks sing-box in both architectures, the entrypoint's
+enrollment guard, and — when the `NODE_CONTROLLER_URL` variable is set — that the
+container can reach the controller. The Dokploy node stack runs that image
+instead of building on the VPS; see
+[`docs/DOKPLOY.md` §5](docs/DOKPLOY.md#5-add-exit-nodes).
+
 After starting a deployment, run the repeatable API smoke test:
 
 ```bash

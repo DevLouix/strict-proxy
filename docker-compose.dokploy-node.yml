@@ -12,6 +12,15 @@
 #   TUN/NET_ADMIN, and nodes should not share the controller's IP or failure
 #   domain.
 #
+# IMAGE
+#   Pulled from the GitHub Container Registry; nothing is built on the VPS:
+#     ghcr.io/<owner>/strict-proxy-node-agent:latest
+#   .github/workflows/node-agent.yml publishes :sha-<commit>, :main and :latest
+#   for linux/amd64 and linux/arm64 on every push that touches the agent. Pin
+#   NODE_AGENT_TAG=sha-<commit> on a node so an upgrade is deliberate; leave it
+#   unset to track latest. Override NODE_AGENT_REGISTRY_OWNER for a fork. If the
+#   package is private, run `docker login ghcr.io` on the VPS first.
+#
 # ENV FILE
 #   Paste the NODE section of .env.dokploy.example into this service's
 #   Environment tab in Dokploy. The file is a worksheet; Dokploy reads the UI.
@@ -44,12 +53,7 @@
 
 services:
   node-agent:
-    build:
-      context: .
-      dockerfile: docker/node-agent.Dockerfile
-      args:
-        SING_BOX_VERSION: ${SING_BOX_VERSION:-1.13.21}
-    image: ${NODE_AGENT_IMAGE:-strict-proxy/node-agent:local}
+    image: ghcr.io/${NODE_AGENT_REGISTRY_OWNER:-devlouix}/strict-proxy-node-agent:${NODE_AGENT_TAG:-latest}
     restart: unless-stopped
     init: true
     network_mode: host

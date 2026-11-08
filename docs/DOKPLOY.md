@@ -192,7 +192,12 @@ traffic share one IP and one failure domain.
 1. In **Admin → Enrollments → Issue new**, choose a region (e.g. `eu-central`)
    and copy the one-time token. It is shown once and expires.
 2. On the exit VPS, create a new Dokploy Compose service from this repository
-   with compose path `docker-compose.dokploy-node.yml`.
+   with compose path `docker-compose.dokploy-node.yml`. It runs the published
+   image `ghcr.io/devlouix/strict-proxy-node-agent`; nothing is built on the
+   VPS. Leave `NODE_AGENT_TAG` unset to track `latest`, or pin it to a
+   `sha-<commit>` tag for a node that only changes when you say so. Deploying
+   from a fork? Set `NODE_AGENT_REGISTRY_OWNER`. If you made the GHCR package
+   private, run `docker login ghcr.io` on the VPS first.
 3. Paste the node section of `.env.dokploy.example` into its environment and set
    `NODE_CONTROLLER_URL=https://api.example.com`, `NODE_ENROLLMENT_TOKEN`,
    `NODE_HOSTNAME` (the VPS's public hostname or IP), and `NODE_LABEL`.
@@ -206,6 +211,26 @@ traffic share one IP and one failure domain.
 The node detects its own public IP and reports it on every heartbeat. If the VPS
 cannot reach an IP-echo service, set `NODE_PUBLIC_IP` explicitly. Private
 addresses are refused, because allowlisting one would mean nothing.
+
+### Node image releases
+
+`.github/workflows/node-agent.yml` builds the agent image for `linux/amd64` and
+`linux/arm64`, publishes `:sha-<commit>`, `:main` and `:latest`, then pulls the
+digest it just pushed and checks that sing-box runs in both architectures, that
+a first start without an enrollment token is refused, and that the agent's
+sources and proto are present. To publish on demand (for example after bumping
+sing-box):
+
+```bash
+gh workflow run node-agent -f tag=0.1.0
+```
+
+Set `gh variable set NODE_CONTROLLER_URL --body 'https://api.example.com'` to
+make the smoke job also prove the image can reach your controller (DNS, egress
+and CA trust). Without it the image is still published and checked internally,
+with a warning annotation on the run. There is no enrollment-token secret on
+purpose: tokens are single-use and expire in 30 minutes, so the token only ever
+lives in the node service's environment and is removed after enrollment.
 
 Requirement: the VPS kernel must provide `/dev/net/tun`, and the container gets
 `NET_ADMIN`. On a VPS where `/dev/net/tun` is missing, ask the provider to

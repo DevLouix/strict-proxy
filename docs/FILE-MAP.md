@@ -75,9 +75,11 @@ is filling in the wrong `.env` file.
 
 ### `docker-compose.dokploy-node.yml` — one exit VPS per node (Dokploy)
 
-- **Starts:** a single `node-agent` with host networking, `NET_ADMIN`, and
-  `/dev/net/tun`, so sing-box can accept VLESS+REALITY traffic and users' bytes
-  leave from that VPS's IP.
+- **Starts:** a single `node-agent` from the published GHCR image
+  (`ghcr.io/<owner>/strict-proxy-node-agent`), with host networking, `NET_ADMIN`,
+  and `/dev/net/tun`, so sing-box can accept VLESS+REALITY traffic and users'
+  bytes leave from that VPS's IP. Nothing is built on the exit VPS; pin
+  `NODE_AGENT_TAG=sha-<commit>` to control upgrades.
 - **Use when:** adding a node to a Dokploy deployment. Deploy it as its **own**
   Dokploy Compose service on the exit VPS.
 - **Env file:** paste the node section of `.env.dokploy.example` into that
@@ -164,6 +166,7 @@ Consequences worth memorising:
 | `scripts/smoke-server.sh` | Post-deploy API smoke test (`BASE_URL=… scripts/smoke-server.sh`) | No |
 | `scripts/smoke-gatekeeper.ts`, `scripts/smoke-enrollment.ts` | End-to-end checks with a controller and Gatekeeper | No |
 | `.github/workflows/server-ci.yml` | Typecheck, unit + integration tests, compose validation, image publishing | No |
+| `.github/workflows/node-agent.yml` | Builds the node-agent image for amd64+arm64, publishes it to GHCR, and smoke-tests the pushed digest (sing-box, enrollment guard, controller reachability) | No — triggered on push or from the Actions tab |
 | `.github/workflows/client.yml` | Flutter tests/analysis, the native libbox build, and the signed push APK artifact — fails without the release secrets/variables; iOS check is opt-in (`ENABLE_IOS_VERIFICATION`) | No |
 | `.github/workflows/client-release.yml` | Signed production APK, built on demand | No — triggered from the Actions tab |
 | `apps/client/libbox.ref` | The reviewed sing-box-libbox commit the native engine is built from | Only to upgrade the engine, then rebuild |
