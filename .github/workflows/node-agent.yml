@@ -189,6 +189,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     env:
+      REPO: ${{ needs.image.outputs.repository }}
+      DIGEST: ${{ needs.image.outputs.digest }}
       IMAGE_REF: ${{ needs.image.outputs.repository }}@${{ needs.image.outputs.digest }}
     steps:
       - uses: docker/setup-qemu-action@v3
@@ -205,10 +207,22 @@ jobs:
       - name: Pull the published digest
         run: docker pull "$IMAGE_REF"
 
+      - name: The published tag is the digest this run built
+        run: |
+          tag_ref="${REPO}:sha-${GITHUB_SHA:0:7}"
+          published="$(docker buildx imagetools inspect "$tag_ref" --format '{{json .Manifest}}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          echo "tag digest: $published"
+          echo "run digest: $DIGEST"
+          test "$published" = "$DIGEST"
+
       - name: sing-box runs on both architectures
         run: |
+          # Run the tag, not the index digest: Docker refuses to pull a second
+          # platform under the same digest reference ("cannot overwrite digest").
+          tag_ref="${REPO}:sha-${GITHUB_SHA:0:7}"
           for platform in linux/amd64 linux/arm64; do
-            version="$(docker run --rm --platform "$platform" --entrypoint /usr/local/bin/sing-box "$IMAGE_REF" version | head -1)"
+            version="$(docker run --rm --platform "$platform" --entrypoint /usr/local/bin/sing-box "$tag_ref" version | head -1)"
             echo "$platform: $version"
             grep -Fq "version ${SING_BOX_VERSION}" <<<"$version" \
               || { echo "error: expected sing-box ${SING_BOX_VERSION}, got: $version" >&2; exit 1; }
