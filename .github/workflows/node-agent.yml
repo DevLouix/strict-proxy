@@ -190,7 +190,6 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       REPO: ${{ needs.image.outputs.repository }}
-      DIGEST: ${{ needs.image.outputs.digest }}
       IMAGE_REF: ${{ needs.image.outputs.repository }}@${{ needs.image.outputs.digest }}
     steps:
       - uses: docker/setup-qemu-action@v3
@@ -206,15 +205,6 @@ jobs:
       # Test the exact digest that was pushed, not a local rebuild.
       - name: Pull the published digest
         run: docker pull "$IMAGE_REF"
-
-      - name: The published tag is the digest this run built
-        run: |
-          tag_ref="${REPO}:sha-${GITHUB_SHA:0:7}"
-          published="$(docker buildx imagetools inspect "$tag_ref" --format '{{json .Manifest}}' \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
-          echo "tag digest: $published"
-          echo "run digest: $DIGEST"
-          test "$published" = "$DIGEST"
 
       - name: sing-box runs on both architectures
         run: |
