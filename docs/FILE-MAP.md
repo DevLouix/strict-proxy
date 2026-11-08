@@ -165,6 +165,7 @@ Consequences worth memorising:
 | `scripts/generate-secrets.sh` | Generates the controller secrets and the Ed25519 keypair into `secrets.txt` + `signing-key.pem` (both gitignored) | Only to generate or rotate secrets |
 | `scripts/smoke-server.sh` | Post-deploy API smoke test (`BASE_URL=… scripts/smoke-server.sh`) | No |
 | `scripts/smoke-gatekeeper.ts`, `scripts/smoke-enrollment.ts` | End-to-end checks with a controller and Gatekeeper | No |
+| `scripts/verify-node-enrollment.sh` | Confirms a deployed exit node appears in the controller's public fleet list (`BASE_URL=… EXPECT_IP=… scripts/verify-node-enrollment.sh`) | No |
 | `.github/workflows/server-ci.yml` | Typecheck, unit + integration tests, compose validation, controller image publishing | No |
 | `.github/workflows/node-agent.yml` | Builds the node-agent image for amd64+arm64, publishes it to GHCR, and smoke-tests the pushed digest (sing-box, enrollment guard, controller reachability) | No — triggered on push or from the Actions tab |
 | `.github/workflows/client.yml` | Flutter tests/analysis, the native libbox build, and the signed push APK artifact — fails without the release secrets/variables; iOS check is opt-in (`ENABLE_IOS_VERIFICATION`) | No |

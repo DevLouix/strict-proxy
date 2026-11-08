@@ -189,6 +189,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev
+      - name: Verify the controller URL answers
+        if: vars.CLIENT_CONTROLLER_URL != ''
+        env:
+          CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+        run: |
+          url="${CLIENT_CONTROLLER_URL%/}/healthz"
+          code="$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" || true)"
+          if [ "$code" != "200" ]; then
+            printf 'error: %s answered %s, not 200\n' "$url" "${code:-no response}" >&2
+            exit 1
+          fi
+
       - name: Generate host project and build
         working-directory: apps/client
         run: |
@@ -233,6 +245,25 @@ jobs:
           CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
           CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
         run: ./apps/client/tool/check-release-config.sh
+
+      # CLIENT_CONTROLLER_URL is compiled into the APK, so a host that does not
+      # answer produces an app nobody can sign in to. Check it before the
+      # 15-25 minute native build rather than shipping an APK pointed at a dead
+      # or half-routed domain.
+      - name: Verify the controller URL answers
+        env:
+          CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+        run: |
+          url="${CLIENT_CONTROLLER_URL%/}/healthz"
+          code="$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" || true)"
+          if [ "$code" != "200" ]; then
+            printf 'error: %s answered %s, not 200.\n' "$url" "${code:-no response}" >&2
+            echo 'The APK bakes this URL in, so it would not be able to log in.' >&2
+            echo 'Fix the deployment (Dokploy -> controller -> Domains, internal port 8080, HTTPS on),' >&2
+            echo 'or set CLIENT_CONTROLLER_URL to a host that serves the controller, then re-run.' >&2
+            exit 1
+          fi
+          echo "controller reachable: $url -> 200"
 
       - uses: subosito/flutter-action@v2
         with:

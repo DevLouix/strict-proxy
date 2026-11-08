@@ -196,8 +196,17 @@ traffic share one IP and one failure domain.
    image `ghcr.io/devlouix/strict-proxy-node-agent`; nothing is built on the
    VPS. Leave `NODE_AGENT_TAG` unset to track `latest`, or pin it to a
    `sha-<commit>` tag for a node that only changes when you say so. Deploying
-   from a fork? Set `NODE_AGENT_REGISTRY_OWNER`. If you made the GHCR package
-   private, run `docker login ghcr.io` on the VPS first.
+   from a fork? Set `NODE_AGENT_REGISTRY_OWNER`.
+
+   The package starts **private**, because it is pushed with `GITHUB_TOKEN`.
+   A fresh VPS then cannot pull it, so do one of these before the first deploy:
+
+   - **Make it public** (nothing to do per VPS): GitHub → your packages →
+     `strict-proxy-node-agent` → **Package settings** → Change visibility →
+     Public. The `node-agent` run summary reports the current state.
+   - **Or keep it private** and log in on the VPS:
+     `echo "$PAT" | docker login ghcr.io -u <owner> --password-stdin`, with a
+     token that has `read:packages`. Repeat for every new VPS.
 3. Paste the node section of `.env.dokploy.example` into its environment and set
    `NODE_CONTROLLER_URL=https://api.example.com`, `NODE_ENROLLMENT_TOKEN`,
    `NODE_HOSTNAME` (the VPS's public hostname or IP), and `NODE_LABEL`.
@@ -205,7 +214,19 @@ traffic share one IP and one failure domain.
    (node id, HMAC secret, REALITY keypair), stored in the `nodeidentity` volume.
 5. The node appears under **Admin → Nodes** as `offline`, then `online` within
    about 30 seconds of its first heartbeat.
-6. Remove `NODE_ENROLLMENT_TOKEN` from the environment and redeploy. The token
+6. Confirm it without opening the panel — the script polls the signed fleet
+   list the clients also use, so it fails the same way a client would:
+
+   ```bash
+   BASE_URL=https://api.example.com EXPECT_IP=<the VPS public IP> \
+     ./scripts/verify-node-enrollment.sh
+   ```
+
+   It prints the fleet on every poll and exits non-zero after `TIMEOUT`
+   (default 180 s) if the node never shows up. An empty fleet
+   (`{"ips":[],...}`) means the agent never enrolled: check its logs for an
+   expired token or an unreachable `NODE_CONTROLLER_URL`.
+7. Remove `NODE_ENROLLMENT_TOKEN` from the environment and redeploy. The token
    is single-use; leaving it behind only risks it leaking.
 
 The node detects its own public IP and reports it on every heartbeat. If the VPS
@@ -218,8 +239,9 @@ addresses are refused, because allowlisting one would mean nothing.
 `linux/arm64`, publishes `:sha-<commit>`, `:main` and `:latest`, then pulls the
 digest it just pushed and checks that sing-box runs in both architectures, that
 a first start without an enrollment token is refused, and that the agent's
-sources and proto are present. To publish on demand (for example after bumping
-sing-box):
+sources and proto are present. It also reports whether the package is pullable
+without credentials, and uploads the image reference plus digest as an
+artifact. To publish on demand (for example after bumping sing-box):
 
 ```bash
 gh workflow run node-agent -f tag=0.1.0

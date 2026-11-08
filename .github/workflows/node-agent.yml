@@ -176,6 +176,27 @@ jobs:
           cache-from: type=gha,scope=node-agent
           cache-to: type=gha,mode=max,scope=node-agent
 
+      # The VPS only needs the image reference and digest; publishing them as an
+      # artifact is what an operator copies into the node service.
+      - name: Record the image reference as an artifact
+        run: |
+          mkdir -p dist
+          file="dist/node-agent-image-${GITHUB_SHA}.txt"
+          {
+            echo "repository=${{ steps.resolve.outputs.repository }}"
+            echo "digest=${{ steps.build.outputs.digest }}"
+            echo "sing_box_version=${SING_BOX_VERSION}"
+            echo "commit=${GITHUB_SHA}"
+            echo "pull=${{ steps.resolve.outputs.repository }}@${{ steps.build.outputs.digest }}"
+          } > "$file"
+          cat "$file"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-agent-image-${{ github.sha }}
+          path: dist/node-agent-image-${{ github.sha }}.txt
+          if-no-files-found: error
+
       - name: Record the published digest
         run: |
           {
@@ -240,6 +261,28 @@ jobs:
               if (!fs.existsSync(p)) { console.error('missing in image:', p); process.exit(1); }
             }
           "
+
+      # A package pushed by GITHUB_TOKEN starts private, and a fresh exit VPS has
+      # no credentials. Visibility is a repository setting this workflow cannot
+      # change, so report it in the summary instead of failing the publish.
+      - name: The package is pullable without credentials
+        if: env.REGISTRY == 'ghcr.io'
+        run: |
+          docker logout "$REGISTRY" >/dev/null 2>&1 || true
+          if docker manifest inspect "${REPO}:latest" >/dev/null 2>&1; then
+            echo "::notice::${REPO} is public; a fresh VPS can pull it without docker login"
+            echo 'Package visibility: public' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::${REPO} is private, so a fresh exit VPS cannot pull it"
+            {
+              echo '### Package visibility: private'
+              echo
+              echo 'A fresh exit VPS needs one of:'
+              echo
+              echo '- make the package public: GitHub -> your packages -> `strict-proxy-node-agent` -> Package settings -> Change visibility -> Public (nothing to do per VPS);'
+              echo '- or log in on each VPS with a token that has `read:packages`: `echo $PAT | docker login ghcr.io -u <owner> --password-stdin`.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Proves the container can actually reach the controller: DNS, egress and
       # the CA bundle are the three things that fail after an image is built.
