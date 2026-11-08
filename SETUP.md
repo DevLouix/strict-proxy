@@ -138,9 +138,9 @@ Or generate every value at once, signing key included:
 ```
 
 The names in `secrets.txt` match `.env.docker`, and its
-`STRICT_SIGNING_PUBLIC_KEY` line is the client's public key. It refuses to
-overwrite an existing key because that invalidates every installed client;
-`FORCE=1 ./scripts/generate-secrets.sh` rotates deliberately. The individual
+`STRICT_SIGNING_PUBLIC_KEY` line is the client's public key. Re-running it changes nothing once both files exist;
+`FORCE=1 ./scripts/generate-secrets.sh` rotates deliberately, which
+invalidates every installed client. The individual
 commands below are the same thing, for when you want one value at a time.
 
 ```bash

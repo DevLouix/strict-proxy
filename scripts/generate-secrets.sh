@@ -25,6 +25,8 @@
 #   FORCE=1            overwrite existing files; this rotates the signing key
 #                      and invalidates every client already deployed
 #
+# Re-running when both files exist changes nothing and exits 0.
+#
 # The public value is CLIENT_SIGNING_PUBLIC_KEY as a GitHub repository variable
 # and STRICT_SIGNING_PUBLIC_KEY for a local client build. Only the public half
 # ever leaves this machine.
@@ -40,11 +42,27 @@ fail() {
 
 command -v openssl >/dev/null || fail 'openssl is required'
 
-if [[ -e "$KEY_FILE" || -e "$OUTPUT" ]] && [[ "${FORCE:-0}" != "1" ]]; then
-  fail "$KEY_FILE or $OUTPUT already exists. Replacing the signing key
-invalidates every deployed client (they verify with the old public key), and new
-database and JWT secrets orphan the running deployment. Back both files up, then
-re-run with FORCE=1 to rotate deliberately."
+if [[ "${FORCE:-0}" == "1" ]]; then
+  : # deliberate rotation: replace both files below
+elif [[ -e "$KEY_FILE" && -e "$OUTPUT" ]]; then
+  # Re-running after a successful generation is a no-op, not an error: both
+  # files already hold a keypair and its public half.
+  PUBLIC="$(grep -E '^STRICT_SIGNING_PUBLIC_KEY=' "$OUTPUT" | tail -1 | cut -d= -f2- || true)"
+  if [[ -z "$PUBLIC" ]]; then
+    PUBLIC="$(openssl pkey -in "$KEY_FILE" -pubout -outform DER | tail -c 32 | base64 | tr -d '\n')"
+  fi
+  printf 'Already generated; nothing was changed.\n\n'
+  printf '  %s\n  %s\n\n' "$OUTPUT" "$KEY_FILE"
+  if [[ -n "$PUBLIC" ]]; then
+    printf 'Ed25519 public key (CLIENT_SIGNING_PUBLIC_KEY / STRICT_SIGNING_PUBLIC_KEY):\n%s\n\n' "$PUBLIC"
+  fi
+  printf 'To rotate the signing key, back both files up and re-run with FORCE=1.\n'
+  exit 0
+elif [[ -e "$KEY_FILE" || -e "$OUTPUT" ]]; then
+  fail "only one of $KEY_FILE and $OUTPUT exists. Regenerating now would either
+rotate the signing key (breaking every installed client) or mint passwords that
+no longer match the running database. Restore the missing file from your backup,
+or re-run with FORCE=1 to replace both deliberately."
 fi
 
 umask 077
