@@ -125,8 +125,18 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      repository: ${{ steps.resolve.outputs.repository }}
     steps:
       - uses: actions/checkout@v4
+
+      # Docker references are lowercase; github.repository_owner is "DevLouix".
+      # metadata-action lowercases what it pushes, so everything downstream has
+      # to agree on the lowercased name.
+      - name: Resolve the image repository
+        id: resolve
+        run: |
+          owner="$(printf '%s' "$IMAGE_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "repository=${REGISTRY}/${owner}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
 
       # Exit VPSes are a mix of amd64 and arm64; publishing both means a node
       # never runs under emulation.
@@ -142,7 +152,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.resolve.outputs.repository }}
           tags: |
             type=sha
             type=ref,event=branch
@@ -167,7 +177,7 @@ jobs:
           {
             echo "### node-agent image"
             echo
-            echo "- image: \`${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}\`"
+            echo "- image: \`${{ steps.resolve.outputs.repository }}\`"
             echo "- digest: \`${{ steps.build.outputs.digest }}\`"
             echo "- sing-box: \`${{ env.SING_BOX_VERSION }}\`"
             echo "- pin it with \`NODE_AGENT_TAG=sha-<commit>\` on the node VPS"
@@ -178,18 +188,16 @@ jobs:
     needs: image
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    env:
+      IMAGE_REF: ${{ needs.image.outputs.repository }}@${{ needs.image.outputs.digest }}
     steps:
       - uses: docker/setup-qemu-action@v3
 
       # Test the exact digest that was pushed, not a local rebuild.
       - name: Pull the published digest
-        env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ needs.image.outputs.digest }}
         run: docker pull "$IMAGE_REF"
 
       - name: sing-box runs on both architectures
-        env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ needs.image.outputs.digest }}
         run: |
           for platform in linux/amd64 linux/arm64; do
             version="$(docker run --rm --platform "$platform" --entrypoint /usr/local/bin/sing-box "$IMAGE_REF" version | head -1)"
@@ -199,8 +207,6 @@ jobs:
           done
 
       - name: A first start without an enrollment token is refused
-        env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ needs.image.outputs.digest }}
         run: |
           set +e
           output="$(docker run --rm -e NODE_HOSTNAME=ci-node -e CONTROLLER_URL=https://controller.example.invalid "$IMAGE_REF" 2>&1)"
@@ -211,8 +217,6 @@ jobs:
           grep -q 'NODE_ENROLLMENT_TOKEN is required on first node startup' <<<"$output"
 
       - name: The agent sources and proto are inside the image
-        env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ needs.image.outputs.digest }}
         run: |
           docker run --rm --entrypoint node "$IMAGE_REF" -e "
             const fs = require('node:fs');
@@ -226,7 +230,6 @@ jobs:
       - name: The image reaches the controller
         if: vars.NODE_CONTROLLER_URL != ''
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}@${{ needs.image.outputs.digest }}
           NODE_CONTROLLER_URL: ${{ vars.NODE_CONTROLLER_URL }}
         run: |
           docker run --rm --entrypoint node -e NODE_CONTROLLER_URL "$IMAGE_REF" -e '
