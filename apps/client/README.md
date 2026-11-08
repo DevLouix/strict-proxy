@@ -75,6 +75,22 @@ produce an APK if the controller URL is not HTTPS, the signing key is missing, o
 workflow. Full instructions, including keystore setup and how updates work, are
 in [`docs/RELEASE-CLIENT.md`](../../docs/RELEASE-CLIENT.md).
 
+## CI artifacts
+
+A push that touches `apps/client/**` or the client workflow runs `client.yml`
+and publishes, for that commit:
+
+| Artifact | What it is |
+|---|---|
+| `strict-proxy-client-android-<sha>.apk` | signed release APK, verified by `apksigner` in the job |
+| `strict-proxy-client-linux-<sha>.tar.gz` | Linux release bundle |
+| `libbox-aar-<sha>` | native engine the APK was built against |
+
+To rebuild without a commit — for example right after changing
+`CLIENT_CONTROLLER_URL` or the keystore secrets — use **Actions → client → Run
+workflow**, or `gh workflow run client`. Pull requests only run the tests and
+analysis jobs; they never publish a signed artifact.
+
 ## Testing
 
 ```sh
