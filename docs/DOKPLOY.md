@@ -143,10 +143,21 @@ docker inspect <container> --format '{{json .Config.Labels}}' | grep -o 'traefik
 #   -> labels present means a domain is attached; empty means none is
 ```
 
-## 4. Create the admin account
+## 4. Create the root admin account
 
-Open the controller container's terminal in Dokploy (or run the equivalent on
-the server) and seed once:
+Open `https://api.example.com/setup` and create the platform root
+administrator. The page exists only while no administrator does: as soon as one
+is created it returns 404, deliberately, so there is no "setup disabled" screen
+that confirms the deployment's state to a stranger.
+
+```bash
+curl -o /dev/null -s -w '%{http_code}\n' https://api.example.com/setup   # 404 after setup
+```
+
+Then sign in at `https://api.example.com/admin` with that account.
+
+No domain attached yet? Run the seed instead, from the controller container's
+terminal in Dokploy or the equivalent on the server:
 
 ```bash
 npm run db:seed -w apps/controller
@@ -253,6 +264,29 @@ Dokploy environment (`.env.dokploy`), and `signing-key.pem`. Dokploy can
 schedule database backups; verify a restore once rather than trusting the
 schedule.
 
+For a backup that survives losing the volume — or that moves the platform to a
+new host — use the operator export as well: it writes the durable platform
+state (users, subscriptions, fleet, credentials, billing ledger, settings) to a
+single JSON file, and the matching import restores it transactionally. What is
+and is not included, and the restore drill, is in [BACKUP.md](BACKUP.md).
+
+```bash
+# export (admin access token from /admin)
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  https://api.example.com/api/v1/admin/backup/export \
+  -o "strict-proxy-backup-$(date +%F).json"
+
+# import: replaces state, requires confirm, rolls back on any error
+jq -c '. + {confirm:"replace"}' backup.json > backup.import.json
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @backup.import.json \
+  https://api.example.com/api/v1/admin/backup/import
+```
+
+Neither file includes `SIGNING_PRIVATE_KEY_PEM` or `SETTINGS_ENCRYPTION_KEY`:
+keep those with the environment backup, or a restore will look complete and
+still fail signature verification and SMTP decryption.
+
 Manual dump:
 
 ```bash
@@ -276,6 +310,7 @@ single process, and there is no distributed lock.
 ## 9. Go-live checklist
 
 - [ ] `https://api.example.com/readyz` returns 200 and `/admin` loads over HTTPS.
+- [ ] `/setup` returns 404 (a root admin exists), and the root admin can sign in.
 - [ ] `PUBLIC_APP_URL` is the real domain (a `localhost` value is refused at boot).
 - [ ] `CORS_ORIGINS` is empty (mobile-only) or lists real origins — never `*`.
 - [ ] All secrets are freshly generated; no `replace-*` value survives.
@@ -291,6 +326,7 @@ single process, and there is no distributed lock.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Traefik returns 404 | no router matched: the domain is not attached to this service, or host/path differ | Domains → `controller` → host `api.example.com`, path `/`, internal port `CONTROLLER_INTERNAL_PORT` (default `8080`) |
+| `/setup` returns 404 but you never finished setup | an administrator already exists — the seed creates one too | `SELECT email FROM users WHERE role = 'admin'` in Postgres; sign in at `/admin`, or promote an account from there |
 | Traefik returns 502 | domain points at the wrong service/port, or nothing is listening | domain on `controller`, internal port equals `CONTROLLER_INTERNAL_PORT`, container healthy |
 | Deploy fails: `network dokploy-network ... not found` | Dokploy's shared network is missing | reinstall/repair Dokploy, or create `dokploy-network` manually |
 | `refusing to boot with an unsafe production configuration` | `PUBLIC_APP_URL` is localhost, or `CORS_ORIGINS=*` | set the real domain / remove the wildcard |

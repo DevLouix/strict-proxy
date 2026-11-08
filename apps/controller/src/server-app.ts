@@ -14,6 +14,8 @@ import { buildMailRouter } from './routes/mail.js';
 import { buildBillingOpsRouter } from './routes/billing-ops.js';
 import { createPaymentWebhookRouter, PlaceholderPaymentAdapter, type PaymentGatewayAdapter } from './services/payments.js';
 import { createOpenPayAdapter } from './services/openpay.js';
+import { buildSetupRouter } from './routes/setup.js';
+import { buildBackupRouter } from './routes/backup.js';
 import { errorHandler } from './middleware.js';
 import { mountAdminDashboard } from './admin-ui.js';
 
@@ -46,6 +48,11 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
     next();
   });
 
+  // Operator backup is mounted BEFORE the global JSON parser: an export has no
+  // body, and an import is a whole dataset that the 1 MB default would reject,
+  // so that route installs its own 64 MB parser.
+  app.use(buildBackupRouter({ db, cfg }));
+
   // Capture the raw body for HMAC/webhook signature verification.
   app.use(
     express.json({
@@ -71,6 +78,11 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
     }
     next();
   });
+
+  // First-run bootstrap, mounted ahead of everything else. It is its own gate:
+  // every request re-checks that no administrator exists, and once one does it
+  // calls next() so the ordinary 404 answers — no "setup disabled" surface.
+  app.use(buildSetupRouter({ db }));
 
   // Payment webhooks FIRST (need raw body, no auth middleware).
   // OpenPay is preferred when configured; the placeholder adapter is a

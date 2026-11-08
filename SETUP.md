@@ -94,6 +94,10 @@ npm run dev:controller
 Open **http://localhost:8080/admin**, log in with the email and password the seed
 printed. You are now looking at the dashboard.
 
+Prefer a browser? With the controller running, open
+**http://localhost:8080/setup** to create the root admin instead. That page only
+exists while no administrator does and returns 404 afterwards.
+
 To try it with a real node, see [section 7](#7-add-your-first-node).
 
 ---
@@ -248,6 +252,12 @@ curl -fsS http://127.0.0.1:8080/readyz     # readiness (DB + Redis)
 ```
 
 ### Step 7 — Create your admin login
+
+Once TLS is in front (step 8), you can also create the root admin in a browser at
+`https://api.example.com/setup`: the page exists only while no administrator
+does, and returns 404 afterwards.
+
+From the container, without exposing anything:
 
 ```bash
 docker compose --env-file .env.docker -f docker-compose.production.yml \
