@@ -474,11 +474,12 @@ export SING_BOX_LIBBOX_REF=<40-character-reviewed-commit-sha>
 `.github/workflows/client.yml` runs tests and analysis for client changes. On
 pushes to `main` and `release/*`, it also builds the native `libbox.aar` from the
 commit pinned in `apps/client/libbox.ref` and uploads versioned Linux and Android
-artifacts. The Android artifact is a signed release build once the release
-secrets and the `CLIENT_CONTROLLER_URL` / `CLIENT_SIGNING_PUBLIC_KEY` repository
-variables exist, and a debug APK for testing until then. The manual
-`client-release` workflow runs the same chain for a specific version or a GitHub
-release — see [`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md). It always builds the iOS client on a macOS runner with
+artifacts. The Android artifact is always a signed release build, and the job
+fails with an explicit list when the four release secrets or the
+`CLIENT_CONTROLLER_URL` / `CLIENT_SIGNING_PUBLIC_KEY` variables are missing —
+see [`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md) for the one-time setup and
+`gh workflow run client` to build on demand. The manual `client-release` workflow
+runs the same chain for a specific version or a GitHub release. It always builds the iOS client on a macOS runner with
 `--no-codesign`, which proves the iOS build compiles even though signing needs a
 release identity. The workflow intentionally does not publish client binaries for
 pull requests or development branches.

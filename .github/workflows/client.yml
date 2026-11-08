@@ -12,6 +12,9 @@ on:
     paths:
       - 'apps/client/**'
       - '.github/workflows/client.yml'
+  # Build on demand without an empty commit, e.g. right after setting the
+  # release secrets: `gh workflow run client`.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,7 +47,8 @@ jobs:
             tool/sign-android-apk.sh \
             tool/unpack-libbox-aar.sh \
             tool/verify-android-apk.sh \
-            tool/setup-release-secrets.sh
+            tool/setup-release-secrets.sh \
+            tool/check-release-config.sh
 
       - uses: subosito/flutter-action@v2
         with:
@@ -216,6 +220,16 @@ jobs:
       CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+
+      # The artifact is a signed release build or nothing: an unsigned APK
+      # installs but could never be updated with the real key. Fail with the
+      # exact missing values instead of publishing one.
+      - name: Require release configuration
+        env:
+          CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+          CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+        run: ./apps/client/tool/check-release-config.sh
+
       - uses: subosito/flutter-action@v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
@@ -248,46 +262,22 @@ jobs:
           flutter pub get
 
       - name: Decode the release keystore
-        if: env.ANDROID_KEYSTORE_BASE64 != ''
         run: |
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
 
-      # The full release path: production defines, the pinned native engine, and
-      # a real signature. It runs only when both the keystore and the controller
-      # signing key are configured, because an unsigned release APK installs
-      # nowhere and a mismatched key produces a client that cannot connect.
       - name: Build signed release APK
-        if: env.ANDROID_KEYSTORE_BASE64 != '' && env.CLIENT_SIGNING_PUBLIC_KEY != ''
         env:
+          STRICT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
           STRICT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
           APP_VERSION: '0.1.0'
           APP_BUILD_NUMBER: ${{ github.run_number }}
           SKIP_LIBBOX: '1'
         run: ./apps/client/tool/build-release-android.sh
 
-      # Without release secrets the artifact is still useful for testing, but it
-      # is called debug so nobody mistakes it for something to distribute.
-      - name: Build debug APK
-        if: env.ANDROID_KEYSTORE_BASE64 == '' || env.CLIENT_SIGNING_PUBLIC_KEY == ''
-        working-directory: apps/client
+      - name: Collect and verify the APK
         run: |
-          echo "::notice::No ANDROID_KEYSTORE_BASE64 secret and CLIENT_SIGNING_PUBLIC_KEY variable; building a debug APK instead of a signed release."
-          flutter build apk --debug \
-            --build-number "${{ github.run_number }}" \
-            --dart-define=STRICT_ENV=${CLIENT_ENV} \
-            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
-
-      - name: Collect the APK
-        run: |
-          if compgen -G 'apps/client/build/dist/*.apk' >/dev/null; then
-            cp apps/client/build/dist/*.apk "strict-proxy-client-android-${GITHUB_SHA}.apk"
-            echo "kind=release" >> "$GITHUB_ENV"
-          else
-            cp apps/client/build/app/outputs/flutter-apk/app-debug.apk \
-              "strict-proxy-client-android-${GITHUB_SHA}.apk"
-            echo "kind=debug" >> "$GITHUB_ENV"
-          fi
+          cp apps/client/build/dist/*.apk "strict-proxy-client-android-${GITHUB_SHA}.apk"
           ls -l "strict-proxy-client-android-${GITHUB_SHA}.apk"
           ./apps/client/tool/verify-android-apk.sh "strict-proxy-client-android-${GITHUB_SHA}.apk"
           export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"

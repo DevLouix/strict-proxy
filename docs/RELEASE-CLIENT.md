@@ -2,11 +2,16 @@
 
 This is how an installable, connectable APK is produced. The `client` workflow
 runs on every push: it builds the native `libbox.aar` from the pinned commit,
-applies the real Android identity, and uploads an APK. Once the release secrets
-and variables below exist, that push artifact is a **signed release** build;
-without them it is a debug APK for testing only, never for users. The
-`client-release` workflow runs the same chain with no fallback, plus an optional
-GitHub release — use it when you want a specific version number or tag.
+applies the real Android identity, and uploads a **signed release** APK. It
+refuses to upload anything else — if the release configuration below is missing
+or malformed, the Android job fails and names every missing value instead of
+publishing an APK nobody can update. The `client-release` workflow runs the same
+chain for a specific version or tag, plus an optional GitHub release.
+
+> **Setting this up for the first time? Read
+> [GitHub configuration](#github-configuration-required-for-artifacts) first.**
+> Until the four secrets and two variables exist, every build that touches the
+> client fails the Android job — deliberately.
 
 ## What the release build guarantees
 
@@ -30,7 +35,93 @@ so the installed package id, code namespace and launcher label are applied by
 `STRICT_ANDROID_APP_ID` and `STRICT_ANDROID_APP_LABEL`. Keep the id stable after
 the first release — a new id installs as a different app instead of updating.
 
-## One-time setup
+## GitHub configuration (required for artifacts)
+
+Every build that touches `apps/client/**` produces an APK, and that APK is
+signed. It needs six repository values, set under **Settings → Secrets and
+variables → Actions** (one tab each), or with `gh` as shown below. GitHub never
+shows a secret again after it is saved, so keep the keystore locally.
+
+| Name | Kind | What it is | Where it comes from |
+|---|---|---|---|
+| `ANDROID_KEYSTORE_BASE64` | secret | the release keystore, base64-encoded | `base64 -w0 upload.jks` |
+| `ANDROID_KEYSTORE_PASSWORD` | secret | keystore password | the password you chose |
+| `ANDROID_KEY_ALIAS` | secret | key alias inside the keystore | `upload` if you followed the keystore step |
+| `ANDROID_KEY_PASSWORD` | secret | key password (optional if equal to the keystore one) | the password you chose |
+| `CLIENT_CONTROLLER_URL` | variable | public HTTPS URL compiled into the app | your deployment, e.g. `https://api.example.com` |
+| `CLIENT_SIGNING_PUBLIC_KEY` | variable | base64 of the controller's 32-byte Ed25519 public key | derived from `signing-key.pem` |
+
+The keystore and the public key are produced in
+[Local prerequisites](#local-prerequisites-keystore-and-public-key) below.
+
+### Set them with the GitHub CLI
+
+```bash
+# 1. Keystore, from the checkout that holds upload.jks
+base64 -w0 upload.jks > keystore.b64        # macOS: base64 -i upload.jks -o keystore.b64
+gh secret set ANDROID_KEYSTORE_BASE64 < keystore.b64
+rm keystore.b64
+
+# 2. The other secrets
+gh secret set ANDROID_KEYSTORE_PASSWORD --body '<keystore password>'
+gh secret set ANDROID_KEY_ALIAS --body upload
+gh secret set ANDROID_KEY_PASSWORD --body '<key password>'
+
+# 3. The two public variables
+gh variable set CLIENT_CONTROLLER_URL --body 'https://api.example.com'
+gh variable set CLIENT_SIGNING_PUBLIC_KEY \
+  --body "$(openssl pkey -in signing-key.pem -pubout -outform DER | tail -c 32 | base64)"
+```
+
+`gh` must be authenticated as an account with admin access to the repository:
+GitHub returns `HTTP 403: Resource not accessible by integration` for tokens
+without it.
+
+### Or in one command
+
+`apps/client/tool/setup-release-secrets.sh` creates the keystore when it is
+missing and sets all six values:
+
+```bash
+STRICT_CONTROLLER_URL=https://api.example.com \
+  ./apps/client/tool/setup-release-secrets.sh
+```
+
+It needs the controller's `signing-key.pem`; only the public half is uploaded.
+`DRY_RUN=1` prints what it would change without calling `gh`.
+
+### Verify it works
+
+```bash
+gh workflow run client            # build now, without an empty commit
+gh run watch                     # follow that run
+gh run download <run-id> -n strict-proxy-client-android-<commit-sha>
+```
+
+The job now asserts what it publishes: the APK's application id, launcher label
+and packaged `libbox.so`, plus its signature via `apksigner`. If any value is
+wrong or missing the run fails before uploading, so a green run means the
+artifact is installable.
+
+Changing `CLIENT_CONTROLLER_URL` or `CLIENT_SIGNING_PUBLIC_KEY` requires a new
+build: both are compiled into the app.
+
+### When a value is missing
+
+The Android job stops at **Require release configuration** with the exact list:
+
+```text
+error: the Android artifact needs a signed release build, but its configuration is incomplete.
+missing:
+  - secret ANDROID_KEYSTORE_BASE64
+  - variable CLIENT_SIGNING_PUBLIC_KEY
+```
+
+Add the named values and re-run (`gh workflow run client`). There is no debug
+fallback on purpose: a debug-signed APK installs, but Android would then reject
+every future update signed with the real key.
+
+## Local prerequisites (keystore and public key)
 
 ### 1. Create the release keystore
 
@@ -47,35 +138,13 @@ Back up `upload.jks` **and** its passwords. If you lose them, every installed
 app can only be updated by uninstalling it first — Android will refuse an APK
 signed by a different key.
 
-### 2. Add the GitHub secrets
+### 2. Upload them to GitHub
 
-Repository **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|---|---|
-| `ANDROID_KEYSTORE_BASE64` | `base64 -w0 upload.jks` |
-| `ANDROID_KEYSTORE_PASSWORD` | keystore password |
-| `ANDROID_KEY_ALIAS` | `upload` |
-| `ANDROID_KEY_PASSWORD` | key password (often the same) |
-
-Both workflows use them: `client-release` always builds signed, while `client`
-uses them for the push artifact whenever they exist and falls back to a debug APK
-when they do not.
-
-#### Or set all six at once
-
-From a checkout that has the controller's `signing-key.pem` and `gh` logged in:
-
-```bash
-STRICT_CONTROLLER_URL=https://api.example.com \
-  ./apps/client/tool/setup-release-secrets.sh
-```
-
-It generates `upload.jks` when absent (password written to `upload.jks.password`),
-derives the public key from the private one, and sets the four secrets plus
-`CLIENT_CONTROLLER_URL` and `CLIENT_SIGNING_PUBLIC_KEY`. `DRY_RUN=1` prints what it
-would change without calling `gh`, and only the public key is uploaded — the
-private key never leaves the machine.
+All four secrets and both variables are described in
+[GitHub configuration](#github-configuration-required-for-artifacts), together
+with the exact commands, the on-demand build, and the failure the workflow
+reports when something is missing. Do that before the next push that changes the
+client: the Android artifact job fails rather than uploading an unsigned APK.
 
 ### 3. Collect the two public build inputs
 
