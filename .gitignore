@@ -21,6 +21,9 @@ apps/client/.cache/
 apps/client/packages/libbox_bridge/android/libs/*.aar
 apps/client/packages/libbox_bridge/android/libs/*.jar
 apps/client/packages/libbox_bridge/android/libs/*/*.so
+*.jks
+*.keystore
+*.jks.password
 apps/client/packages/libbox_bridge/ios/Frameworks/*.xcframework/
 
 # Flutter host projects are generated, never committed:

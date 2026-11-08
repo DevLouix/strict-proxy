@@ -116,6 +116,42 @@ with the real application id (`com.strictproxy.client` by default) and the
 `StrictProxy` launcher label. Skipping it produces an APK that cannot be
 published or updated.
 
+## Upgrading the engine
+
+The pin is a full commit SHA, never a tag or a branch, so an upgrade is a reviewed
+change rather than a moving target.
+
+1. Pick the upstream release and resolve its commit:
+
+   ```bash
+   git ls-remote https://github.com/getlantern/sing-box-libbox.git 'refs/tags/v*'
+   ```
+
+2. Review the diff against the current pin (`git log`, release notes). Treat it as
+   a dependency upgrade, not a rebuild: the engine runs inside the VPN service.
+3. Check the new `go.mod` for `github.com/sagernet/gomobile`. It must build with
+   the Go version CI pins (`1.22`); a newer gomobile usually means raising that
+   version too, and backing it out once `golang.org/x/tools` stops compiling.
+4. Replace the SHA in `apps/client/libbox.ref` — one line, 40 hex characters.
+5. Build and inspect the result:
+
+   ```bash
+   ./apps/client/tool/build-libbox.sh --android-only
+   unzip -l apps/client/packages/libbox_bridge/android/libs/libbox.aar | grep jni/
+   unzip -p apps/client/packages/libbox_bridge/android/libs/libbox-classes.jar > /tmp/c.jar
+   unzip -l /tmp/c.jar | grep 'io/nekohasekai/libbox/Libbox'
+   ```
+
+   All four ABIs must be present and the `Libbox` class must exist.
+6. Rebuild a release APK and connect once on a real device. A new engine can
+   change runtime behaviour even when it compiles.
+7. Commit only `apps/client/libbox.ref`. CI rebuilds the AAR automatically: the
+   cache key is the pinned SHA, so an unrelated change reuses the artifact and a
+   new pin invalidates it.
+
+`SING_BOX_LIBBOX_REF=<sha>` overrides the pin for a one-off experiment; never merge
+a build that depends on it.
+
 ## iOS
 
 The iOS plugin creates a `NETunnelProviderManager` and starts a separate Packet

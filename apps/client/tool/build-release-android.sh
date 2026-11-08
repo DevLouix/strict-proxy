@@ -17,6 +17,7 @@
 #   STRICT_SIGNING_KEY_ID       key id the controller signs with    (default primary)
 #   APP_VERSION                 version name                        (default 0.1.0)
 #   APP_BUILD_NUMBER            version code; must increase          (default 1)
+#   STRICT_ANDROID_APP_ID       expected application id             (default com.strictproxy.client)
 #   OUT_DIR                     artifact directory                  (default build/dist)
 #   SKIP_LIBBOX=1               reuse an existing libbox.aar
 #   ANDROID_KEYSTORE_PATH / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS
@@ -86,6 +87,9 @@ APK_OUT="${OUT_DIR}/strict-proxy-${APP_VERSION}-${APP_BUILD_NUMBER}.apk"
 "${CLIENT_DIR}/tool/sign-android-apk.sh" \
   "${CLIENT_DIR}/build/app/outputs/flutter-apk/app-release.apk" \
   "$APK_OUT"
+
+# Refuse to hand over an APK with the placeholder id, a raw label, or no engine.
+"${CLIENT_DIR}/tool/verify-android-apk.sh" "$APK_OUT"
 
 echo
 echo "Release APK ready: $APK_OUT"

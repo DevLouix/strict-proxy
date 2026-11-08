@@ -62,6 +62,21 @@ Both workflows use them: `client-release` always builds signed, while `client`
 uses them for the push artifact whenever they exist and falls back to a debug APK
 when they do not.
 
+#### Or set all six at once
+
+From a checkout that has the controller's `signing-key.pem` and `gh` logged in:
+
+```bash
+STRICT_CONTROLLER_URL=https://api.example.com \
+  ./apps/client/tool/setup-release-secrets.sh
+```
+
+It generates `upload.jks` when absent (password written to `upload.jks.password`),
+derives the public key from the private one, and sets the four secrets plus
+`CLIENT_CONTROLLER_URL` and `CLIENT_SIGNING_PUBLIC_KEY`. `DRY_RUN=1` prints what it
+would change without calling `gh`, and only the public key is uploaded — the
+private key never leaves the machine.
+
 ### 3. Collect the two public build inputs
 
 ```bash
@@ -117,7 +132,10 @@ export ANDROID_KEY_PASSWORD='...'   # omit if same as keystore password
 ./apps/client/tool/build-release-android.sh
 ```
 
-The artifact lands in `apps/client/build/dist/`.
+The artifact lands in `apps/client/build/dist/`. The script ends by asserting the
+APK's application id, launcher label, and packaged `libbox.so`, so a build with
+the placeholder id or without the engine fails instead of being handed over
+(`tool/verify-android-apk.sh`; CI runs the same check on the push artifact).
 
 ## Distributing to users
 

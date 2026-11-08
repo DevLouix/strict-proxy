@@ -42,7 +42,9 @@ jobs:
             tool/build-libbox.sh \
             tool/configure-android-host.sh \
             tool/sign-android-apk.sh \
-            tool/unpack-libbox-aar.sh
+            tool/unpack-libbox-aar.sh \
+            tool/verify-android-apk.sh \
+            tool/setup-release-secrets.sh
 
       - uses: subosito/flutter-action@v2
         with:
@@ -287,6 +289,7 @@ jobs:
             echo "kind=debug" >> "$GITHUB_ENV"
           fi
           ls -l "strict-proxy-client-android-${GITHUB_SHA}.apk"
+          ./apps/client/tool/verify-android-apk.sh "strict-proxy-client-android-${GITHUB_SHA}.apk"
           export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           APKSIGNER="$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)/apksigner"
           "$APKSIGNER" verify --print-certs "strict-proxy-client-android-${GITHUB_SHA}.apk" \
