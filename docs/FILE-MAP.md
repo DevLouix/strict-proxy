@@ -66,8 +66,8 @@ is filling in the wrong `.env` file.
 - **Starts:** controller + Postgres + Redis inside Dokploy, with **no host
   ports**, joined to Dokploy's external `dokploy-network`.
 - **Use when:** Dokploy is already installed and terminates TLS with its Traefik.
-  You assign the domain in the Dokploy UI to the `controller` service on port
-  `8080`.
+  You assign the domain in the Dokploy UI to the `controller` service on its
+  internal port (`CONTROLLER_INTERNAL_PORT`, default `8080`).
 - **Env file:** none on disk. Paste the controller section of
   `.env.dokploy.example` into the service's **Environment** tab in Dokploy.
 - **Does not include a node.** Nodes are separate services on separate VPSes.
@@ -188,7 +188,8 @@ Consequences worth memorising:
 | "I changed `.env.docker` but Dokploy is unchanged" | A file Dokploy never reads | Edit the Environment tab in Dokploy |
 | `required controller environment variable is missing` | `--env-file` omitted, or the variable is missing from the env file | Pass `--env-file .env.docker` on every command |
 | `docker compose up -d` started only Postgres and Redis | You are in the repository root without `-f`; the default is the local dev file | Add `-f docker-compose.production.yml` (or the Dokploy path) |
-| Dokploy returns 502 | The domain points at the wrong service or port | Domain → `controller`, internal port `8080` |
+| Dokploy returns 404 | No domain/router is attached to the service | Domains → `controller`, host + path `/`, internal port `CONTROLLER_INTERNAL_PORT` |
+| Dokploy returns 502 | The domain points at the wrong service or port | Domain → `controller`, internal port matching `CONTROLLER_INTERNAL_PORT` |
 | Ports 80/443 already in use on a Dokploy host | You started the `edge` profile too | Use `docker-compose.dokploy.yml`, not `production.yml` |
 | Node stays `offline` | Token expired/used, or `NODE_CONTROLLER_URL` is not the public HTTPS URL | Issue a new token, fix the URL, redeploy |
 | Every installed client says "tampered configuration" | A new signing key was generated after the APK was built | Rebuild clients with the current public key before rotating |

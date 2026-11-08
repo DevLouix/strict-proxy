@@ -81,6 +81,11 @@ them.
    the `\n` sequences exactly as step 2 prints them. Pasting the PEM itself
    unquoted leaves real newlines in the environment file, and Compose then reads
    the key body as a variable name and refuses to deploy.
+
+   Optional: `CONTROLLER_INTERNAL_PORT` (default `8080`) is the port the
+   controller listens on and the port Traefik proxies to. Nothing is published
+   on the host either way. If you change it, use the same number as the
+   domain's **Internal port** in step 5.
 4. **Deploy.** The build runs `npm run typecheck`; the container then validates
    its environment, applies the committed migrations, and starts.
 5. Open **Domains**, add a domain to the **controller** service:
@@ -89,7 +94,7 @@ them.
    |---|---|
    | Host | `api.example.com` |
    | Path | `/` |
-   | Internal port | `8080` |
+   | Internal port | `8080` (your `CONTROLLER_INTERNAL_PORT`) |
    | HTTPS | on (Let's Encrypt) |
 
    Do not add a domain to `postgres` or `redis`, and do not publish their ports.
@@ -110,8 +115,33 @@ curl -fsS https://api.example.com/api/v1/network/nodes/public-ips
 The last one returns a signed (possibly empty) fleet list. Then open
 `https://api.example.com/admin` — you should get the login page, not a 404.
 
-If Traefik answers `502`, it is reaching nothing: check the domain's internal
-port is `8080` and that the controller container is healthy in Dokploy's logs.
+`502` means Traefik matched the domain but nothing answered on the internal
+port: check the domain's **Internal port** equals `CONTROLLER_INTERNAL_PORT`
+(`8080` by default) and that the controller container is healthy.
+
+`404` means Traefik matched **no router at all**, so the request never reached
+the container. That is a Domains-tab problem, not a port problem: the domain is
+not attached to this service, or its host/path does not match the request.
+`https://api.example.com/healthz` returning 404 while `https://api.example.com/admin`
+works would be a path issue; both returning 404 means no domain is attached.
+
+To see where the controller actually listens:
+
+```bash
+# Dokploy names containers after the service; the exact name is in `docker ps`.
+docker ps --filter name=controller          # running and (healthy)?
+docker logs <container> 2>&1 | grep listening
+#   -> [controller] listening on :8080
+
+docker inspect <container> --format '{{json .Config.ExposedPorts}}'
+#   -> {"8080/tcp":{}}      the port the domain must point at
+
+docker port <container>
+#   -> (nothing)            correct for Dokploy: no host port is published
+
+docker inspect <container> --format '{{json .Config.Labels}}' | grep -o 'traefik.http.routers[^"]*'
+#   -> labels present means a domain is attached; empty means none is
+```
 
 ## 4. Create the admin account
 
@@ -260,7 +290,8 @@ single process, and there is no distributed lock.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Traefik returns 502 | domain points at the wrong service/port | domain on `controller`, internal port `8080`, container healthy |
+| Traefik returns 404 | no router matched: the domain is not attached to this service, or host/path differ | Domains → `controller` → host `api.example.com`, path `/`, internal port `CONTROLLER_INTERNAL_PORT` (default `8080`) |
+| Traefik returns 502 | domain points at the wrong service/port, or nothing is listening | domain on `controller`, internal port equals `CONTROLLER_INTERNAL_PORT`, container healthy |
 | Deploy fails: `network dokploy-network ... not found` | Dokploy's shared network is missing | reinstall/repair Dokploy, or create `dokploy-network` manually |
 | `refusing to boot with an unsafe production configuration` | `PUBLIC_APP_URL` is localhost, or `CORS_ORIGINS=*` | set the real domain / remove the wildcard |
 | `required controller environment variable is missing` | variable absent or not in the service Environment tab | add it and redeploy |
