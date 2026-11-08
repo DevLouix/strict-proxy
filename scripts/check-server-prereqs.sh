@@ -16,6 +16,15 @@ fi
 
 # Compose interpolation validates required settings and the complete merged
 # deployment graph without starting any containers.
+# A real multi-line PEM is not valid in an env file: Compose reads the key body
+# as a variable name and fails with a message that does not name the cause.
+KEY_LINE="$(grep -E '^SIGNING_PRIVATE_KEY_PEM=' "$ENV_FILE" | tail -1 || true)"
+if [[ -n "$KEY_LINE" && "$KEY_LINE" != *"END PRIVATE KEY"* ]]; then
+  echo 'SIGNING_PRIVATE_KEY_PEM must be a single line with \n escapes (SETUP.md step 3).' >&2
+  echo 'A real multi-line PEM makes Compose read the key body as a variable name.' >&2
+  exit 1
+fi
+
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config >/dev/null
 
 TLS_MODE="$(grep -E '^TLS_MODE=' "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"

@@ -76,6 +76,11 @@ them.
    `CONTROLLER_DATABASE_URL` and `CONTROLLER_REDIS_URL` must use the service
    names `postgres` and `redis` — inside a container, `localhost` is the
    container itself.
+
+   `SIGNING_PRIVATE_KEY_PEM` must stay on **one** line, quotes included, with
+   the `\n` sequences exactly as step 2 prints them. Pasting the PEM itself
+   leaves real newlines in the environment file, and Compose then reads the key
+   body as a variable name and refuses to deploy.
 4. **Deploy.** The build runs `npm run typecheck`; the container then validates
    its environment, applies the committed migrations, and starts.
 5. Open **Domains**, add a domain to the **controller** service:
@@ -259,6 +264,7 @@ single process, and there is no distributed lock.
 | Deploy fails: `network dokploy-network ... not found` | Dokploy's shared network is missing | reinstall/repair Dokploy, or create `dokploy-network` manually |
 | `refusing to boot with an unsafe production configuration` | `PUBLIC_APP_URL` is localhost, or `CORS_ORIGINS=*` | set the real domain / remove the wildcard |
 | `required controller environment variable is missing` | variable absent or not in the service Environment tab | add it and redeploy |
+| `unexpected character "/" in variable name "MC4CAQAw..."` | `SIGNING_PRIVATE_KEY_PEM` was pasted as a real multi-line PEM, so Compose parses the key body as a variable name | replace the whole block with the single-line value from step 2, quotes included, then redeploy |
 | `database is not ready; retrying migration` then failure | password mismatch, or URL points at `localhost` | make `CONTROLLER_DATABASE_URL` use `postgres` and the same password |
 | `/readyz` fails, `/healthz` passes | Redis unreachable | check `REDIS_PASSWORD` matches `CONTROLLER_REDIS_URL` |
 | Node stays `offline` | cannot reach the controller, or enrollment failed | container logs on the node VPS; confirm `NODE_CONTROLLER_URL` is public HTTPS |
