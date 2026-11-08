@@ -34,7 +34,10 @@ credentials, and a client is useless until both exist.
 
 ## 2. Generate the secrets
 
-Run these somewhere safe and keep the output:
+Run these somewhere safe and keep the output. From a checkout,
+`scripts/generate-secrets.sh` runs every command in this section and writes
+`secrets.txt` plus `signing-key.pem` (both mode 0600, both gitignored); the
+commands are spelled out here so you can also generate a single value.
 
 ```bash
 # Passwords: hex stays URL-safe inside DATABASE_URL and REDIS_URL.

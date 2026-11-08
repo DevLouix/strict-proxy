@@ -160,6 +160,7 @@ Consequences worth memorising:
 | `apps/node-agent/deploy/install-node.sh` | Installs the systemd node agent on a VPS | No |
 | `apps/node-agent/deploy/strict-proxy-agent.service`, `sing-box.service` | systemd units for the host-install path | No |
 | `scripts/check-server-prereqs.sh` | Pre-flight check for the single-server path | No |
+| `scripts/generate-secrets.sh` | Generates the controller secrets and the Ed25519 keypair into `secrets.txt` + `signing-key.pem` (both gitignored) | Only to generate or rotate secrets |
 | `scripts/smoke-server.sh` | Post-deploy API smoke test (`BASE_URL=… scripts/smoke-server.sh`) | No |
 | `scripts/smoke-gatekeeper.ts`, `scripts/smoke-enrollment.ts` | End-to-end checks with a controller and Gatekeeper | No |
 | `.github/workflows/server-ci.yml` | Typecheck, unit + integration tests, compose validation, image publishing | No |

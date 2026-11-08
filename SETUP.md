@@ -131,6 +131,18 @@ Run each command and paste the result into `.env.docker`.
 To know which value goes where, the names match: `JWT_SECRET` in the output goes
 into `JWT_SECRET` in the file.
 
+Or generate every value at once, signing key included:
+
+```bash
+./scripts/generate-secrets.sh     # writes secrets.txt + signing-key.pem, both 0600
+```
+
+The names in `secrets.txt` match `.env.docker`, and its
+`STRICT_SIGNING_PUBLIC_KEY` line is the client's public key. It refuses to
+overwrite an existing key because that invalidates every installed client;
+`FORCE=1 ./scripts/generate-secrets.sh` rotates deliberately. The individual
+commands below are the same thing, for when you want one value at a time.
+
 ```bash
 # Database password (put the same value in POSTGRES_PASSWORD,
 # CONTROLLER_DATABASE_URL and anywhere else it appears).

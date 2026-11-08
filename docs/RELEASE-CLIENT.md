@@ -180,6 +180,10 @@ node -e '
 openssl pkey -pubin -in public.pem -outform DER | tail -c 32 | base64
 ```
 
+If you generated the secrets with `scripts/generate-secrets.sh` (`SETUP.md`
+step 3), the `STRICT_SIGNING_PUBLIC_KEY=` line in its `secrets.txt` is already
+this value — copy it, no derivation needed.
+
 A correct value decodes to exactly 32 bytes and looks like
 `6w1/gYyMvdBS2dFbcSq3TUmt8KqYfvFBTZ0jLkaBAGM=`. The workflow rejects anything
 else at the configuration gate.

@@ -44,7 +44,7 @@ jobs:
         # Postgres + Redis containers with testcontainers.
         run: npm run test:integration
       - name: Validate server prerequisite script
-        run: bash -n scripts/check-server-prereqs.sh scripts/smoke-server.sh
+        run: bash -n scripts/check-server-prereqs.sh scripts/smoke-server.sh scripts/generate-secrets.sh
       - name: Validate production Compose file
         run: |
           cp .env.docker.example .env.docker
