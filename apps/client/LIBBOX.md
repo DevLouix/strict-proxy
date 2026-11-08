@@ -61,10 +61,10 @@ The plugin requests `VpnService.prepare()`, starts a foreground service, invokes
 the generated `Libbox.newService(config, platform)` API, and establishes the TUN
 file descriptor through the platform callback.
 
-The generated `libbox.aar` is optional for APK compilation because the bridge
-loads it at runtime. It is required for an actual Android VPN session. If it is
-absent, the app reports an explicit native artifact error and never claims a
-connection.
+The generated `libbox.aar` (and the jar plus `jni` directories unpacked from it)
+is optional for APK compilation because the bridge loads it at runtime. It is
+required for an actual Android VPN session. If it is absent, the app reports an
+explicit native artifact error and never claims a connection.
 
 ## Build Android libbox artifacts
 
@@ -93,7 +93,14 @@ engine.
 The script writes:
 
 - `apps/client/packages/libbox_bridge/android/libs/libbox.aar`
+- `apps/client/packages/libbox_bridge/android/libs/libbox-classes.jar` and
+  `libs/<abi>/libbox.so` (the AAR unpacked for Gradle)
 - `apps/client/packages/libbox_bridge/ios/Frameworks/Libbox.xcframework`
+
+Gradle needs the unpacked form, not the AAR: AGP refuses a direct local `.aar`
+dependency inside a library module (`bundleDebugAar` fails once Flutter bundles
+the plugin as an AAR). `tool/unpack-libbox-aar.sh` does that expansion and is
+called by `build-libbox.sh`, `build-release-android.sh`, and the Android CI job.
 
 The current repository does not commit Flutter's generated `android/` or `ios/`
 host folders. Generate the Linux/Android host projects with:

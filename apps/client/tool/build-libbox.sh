@@ -80,6 +80,7 @@ pushd "$WORK_DIR" >/dev/null
 go run ./cmd/internal/build_libbox -target android -platform android/arm64,android/arm,android/386,android/amd64
 mkdir -p "$ANDROID_OUT"
 cp -f libbox.aar "$ANDROID_OUT/libbox.aar"
+"${ROOT_DIR}/tool/unpack-libbox-aar.sh"
 echo "Android: $ANDROID_OUT/libbox.aar (commit $REF)"
 
 if [[ "$TARGET" == "all" ]]; then

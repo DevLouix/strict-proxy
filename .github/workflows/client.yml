@@ -41,7 +41,8 @@ jobs:
             tool/build-release-android.sh \
             tool/build-libbox.sh \
             tool/configure-android-host.sh \
-            tool/sign-android-apk.sh
+            tool/sign-android-apk.sh \
+            tool/unpack-libbox-aar.sh
 
       - uses: subosito/flutter-action@v2
         with:
@@ -231,6 +232,11 @@ jobs:
         with:
           name: libbox-aar-${{ github.sha }}
           path: apps/client/packages/libbox_bridge/android/libs
+
+      # AGP cannot package a local .aar inside the library module, so the AAR is
+      # expanded into classes.jar + jni/<abi>/libbox.so before Gradle runs.
+      - name: Unpack libbox for the Gradle plugin
+        run: ./apps/client/tool/unpack-libbox-aar.sh
 
       - name: Generate host project with the deployment identity
         working-directory: apps/client

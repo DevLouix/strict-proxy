@@ -64,6 +64,8 @@ if [[ ! -f "$AAR" ]]; then
   echo 'An APK without it installs but cannot connect: build it, or set SKIP_LIBBOX=1 only if you know it is present.' >&2
   exit 1
 fi
+# The Gradle plugin consumes the unpacked jar/jni form, not the AAR itself.
+"${CLIENT_DIR}/tool/unpack-libbox-aar.sh"
 
 cd "$CLIENT_DIR"
 flutter create --platforms=android .
