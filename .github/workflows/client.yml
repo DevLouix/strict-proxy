@@ -325,3 +325,57 @@ jobs:
           name: strict-proxy-client-android-${{ github.sha }}
           path: strict-proxy-client-android-${{ github.sha }}.apk
           if-no-files-found: error
+
+  release:
+    name: Publish the client build to Releases
+    needs:
+      - android-artifact
+      - linux-artifact
+    # A release is user-facing: only from main, never from a pull request, and
+    # not from a release branch (client-release owns versioned tags).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      # The workflow default is read-only; only this job creates a release.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: strict-proxy-client-*
+          merge-multiple: true
+          path: dist
+
+      - name: Show what will be published
+        run: ls -lh dist
+
+      # Run artifacts expire and are only reachable from the run page; a
+      # release is where a user can actually find and install the APK.
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+          TAG: client-${{ github.run_number }}
+        run: |
+          notes="$(mktemp)"
+          {
+            echo "Signed Android APK and Linux bundle built from \`${GITHUB_SHA}\`."
+            echo
+            echo "- controller: \`${URL}\`"
+            echo "- version: \`0.1.0\`, build ${GITHUB_RUN_NUMBER}"
+            echo "- installs over an earlier build only if it was signed with the same release keystore"
+            echo
+            echo "Install: \`adb install -r strict-proxy-client-android.apk\`"
+            echo
+            echo "Built by [\`client\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+          } > "$notes"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.apk dist/*.tar.gz --clobber
+            gh release edit "$TAG" --notes-file "$notes"
+          else
+            gh release create "$TAG" dist/*.apk dist/*.tar.gz \
+              --target "$GITHUB_SHA" \
+              --title "StrictProxy client 0.1.0 (build ${GITHUB_RUN_NUMBER})" \
+              --notes-file "$notes"
+          fi
+          gh release view "$TAG" --json tagName,assets \
+            --jq '.tagName + ": " + ([.assets[].name] | join(", "))'

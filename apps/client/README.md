@@ -86,6 +86,19 @@ and publishes, for that commit:
 | `strict-proxy-client-linux-<sha>.tar.gz` | Linux release bundle |
 | `libbox-aar-<sha>` | native engine the APK was built against |
 
+A push to `main` also publishes those artifacts on the **Releases** page under
+the tag `client-<run_number>` (Android APK plus Linux bundle), so users can
+install from a stable link instead of digging through a workflow run:
+
+```sh
+gh release list                       # newest client build on top
+gh release download client-<run_number> -p '*.apk'
+gh release view client-<run_number> --json assets --jq '.assets[].name'
+```
+
+Run artifacts disappear when their retention window expires; releases do not.
+Versioned releases built by `client-release` are separate and unchanged.
+
 To rebuild without a commit — for example right after changing
 `CLIENT_CONTROLLER_URL` or the keystore secrets — use **Actions → client → Run
 workflow**, or `gh workflow run client`. Pull requests only run the tests and

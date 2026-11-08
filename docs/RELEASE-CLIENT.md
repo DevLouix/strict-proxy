@@ -252,8 +252,16 @@ the placeholder id or without the engine fails instead of being handed over
 - **Direct install:** host the APK over HTTPS and give users the link. They must
   allow installs from the browser/file manager once. `adb install -r <apk>` works
   for testing.
-- **GitHub Releases:** the workflow's `release_tag` input publishes the APK on a
-  release page, which is the simplest shareable location.
+- **GitHub Releases:** every push to `main` that builds the client publishes a
+  release tagged `client-<run_number>` with the signed APK and the Linux bundle
+  (`gh release list`, newest first). `client-release`'s `release_tag` input
+  publishes a versioned release the same way, which is the right choice for a
+  named version; both are shareable links.
+
+  Run artifacts expire after their retention window, so the release is the copy
+  to keep. The APK filename includes the commit, and the build number
+  (the workflow run number) increases with every build, so Android accepts the
+  newest one as an update.
 - **Play Store:** requires a Play Console account and an `.aab`. The Play upload
   key is managed by Google Play App Signing; direct-APK updates and Play updates
   are separate tracks, so pick one and stay on it.
