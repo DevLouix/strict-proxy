@@ -178,8 +178,8 @@ openssl pkey -in signing-key.pem -pubout -outform DER | tail -c 32 | base64
 # Keep signing-key.pem somewhere safe and backed up.
 ```
 
-The value must be **one line**: `SIGNING_PRIVATE_KEY_PEM` with real newlines is
-not valid in an env file, and Compose reads the key body as a variable name
+Keep the value on **one line** with `\n` escapes. Pasting the PEM unquoted
+leaves real newlines, and Compose then reads the key body as a variable name
 (`unexpected character "/" in variable name`) instead of starting the
 controller.
 

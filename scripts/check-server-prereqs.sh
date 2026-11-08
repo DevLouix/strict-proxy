@@ -21,7 +21,7 @@ fi
 KEY_LINE="$(grep -E '^SIGNING_PRIVATE_KEY_PEM=' "$ENV_FILE" | tail -1 || true)"
 if [[ -n "$KEY_LINE" && "$KEY_LINE" != *"END PRIVATE KEY"* ]]; then
   echo 'SIGNING_PRIVATE_KEY_PEM must be a single line with \n escapes (SETUP.md step 3).' >&2
-  echo 'A real multi-line PEM makes Compose read the key body as a variable name.' >&2
+  echo 'An unquoted multi-line PEM makes Compose read the key body as a variable name.' >&2
   exit 1
 fi
 
