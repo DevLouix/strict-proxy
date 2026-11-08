@@ -7,6 +7,7 @@ command -v flutter >/dev/null || { echo 'Flutter is required' >&2; exit 1; }
 
 cd "$CLIENT_DIR"
 flutter create --platforms=linux,android .
+./tool/configure-android-host.sh
 flutter pub get
 flutter test
 flutter analyze

@@ -472,12 +472,13 @@ export SING_BOX_LIBBOX_REF=<40-character-reviewed-commit-sha>
 ```
 
 `.github/workflows/client.yml` runs tests and analysis for client changes. On
-pushes to `main` and `release/*`, it also uploads versioned Linux and Android
-build artifacts. Those Android artifacts are **debug** builds and cannot talk to
-a production controller: users get builds from the manual `client-release`
-workflow, which bundles the native engine, bakes in the controller URL and
-signing key, and signs with the release keystore — see
-[`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md). It always builds the iOS client on a macOS runner with
+pushes to `main` and `release/*`, it also builds the native `libbox.aar` from the
+commit pinned in `apps/client/libbox.ref` and uploads versioned Linux and Android
+artifacts. The Android artifact is a signed release build once the release
+secrets and the `CLIENT_CONTROLLER_URL` / `CLIENT_SIGNING_PUBLIC_KEY` repository
+variables exist, and a debug APK for testing until then. The manual
+`client-release` workflow runs the same chain for a specific version or a GitHub
+release — see [`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md). It always builds the iOS client on a macOS runner with
 `--no-codesign`, which proves the iOS build compiles even though signing needs a
 release identity. The workflow intentionally does not publish client binaries for
 pull requests or development branches.
@@ -487,6 +488,7 @@ The Android host project is generated because it is intentionally not committed:
 ```bash
 cd apps/client
 flutter create --platforms=android,linux .
+./tool/configure-android-host.sh   # real package id and launcher label
 ```
 
 The Android bridge requests VPN permission, starts the foreground service, and

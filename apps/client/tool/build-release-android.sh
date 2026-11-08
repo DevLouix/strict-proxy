@@ -13,7 +13,7 @@
 # Environment:
 #   STRICT_CONTROLLER_URL       https://api.example.com            (required)
 #   STRICT_SIGNING_PUBLIC_KEY   base64 raw Ed25519 public key       (required)
-#   SING_BOX_LIBBOX_REF         full 40-char reviewed commit SHA    (required)
+#   SING_BOX_LIBBOX_REF         full 40-char reviewed commit SHA    (default: apps/client/libbox.ref)
 #   STRICT_SIGNING_KEY_ID       key id the controller signs with    (default primary)
 #   APP_VERSION                 version name                        (default 0.1.0)
 #   APP_BUILD_NUMBER            version code; must increase          (default 1)
@@ -39,7 +39,14 @@ require() {
 
 require STRICT_CONTROLLER_URL 'the public HTTPS URL of the controller'
 require STRICT_SIGNING_PUBLIC_KEY 'base64 of the controller Ed25519 public key'
-require SING_BOX_LIBBOX_REF 'a reviewed 40-character sing-box-libbox commit SHA'
+
+# The native engine commit is pinned in the repository; the variable only
+# overrides it for an out-of-band rebuild.
+if [[ -z "${SING_BOX_LIBBOX_REF:-}" && -f "${CLIENT_DIR}/libbox.ref" ]]; then
+  SING_BOX_LIBBOX_REF="$(tr -d '[:space:]' < "${CLIENT_DIR}/libbox.ref")"
+fi
+export SING_BOX_LIBBOX_REF
+require SING_BOX_LIBBOX_REF 'pin one in apps/client/libbox.ref, or set SING_BOX_LIBBOX_REF'
 
 if [[ "$STRICT_CONTROLLER_URL" != https://* ]]; then
   printf 'error: STRICT_CONTROLLER_URL must use https:// in a production build; got: %s\n' "$STRICT_CONTROLLER_URL" >&2
@@ -60,6 +67,7 @@ fi
 
 cd "$CLIENT_DIR"
 flutter create --platforms=android .
+"${CLIENT_DIR}/tool/configure-android-host.sh"
 flutter pub get
 
 flutter build apk --release \

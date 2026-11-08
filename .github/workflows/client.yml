@@ -23,7 +23,9 @@ concurrency:
 env:
   FLUTTER_CHANNEL: stable
   CLIENT_ENV: production
-  CLIENT_CONTROLLER_URL: https://controller.example.invalid
+  # Set the repository variable CLIENT_CONTROLLER_URL once the controller has a
+  # real HTTPS address; the placeholder keeps compile-only builds working.
+  CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL || 'https://controller.example.invalid' }}
 
 jobs:
   verify:
@@ -34,7 +36,12 @@ jobs:
 
       - name: Check release scripts parse
         working-directory: apps/client
-        run: bash -n tool/build-release-android.sh tool/sign-android-apk.sh tool/build-libbox.sh
+        run: |
+          bash -n \
+            tool/build-release-android.sh \
+            tool/build-libbox.sh \
+            tool/configure-android-host.sh \
+            tool/sign-android-apk.sh
 
       - uses: subosito/flutter-action@v2
         with:
@@ -48,7 +55,9 @@ jobs:
 
       - name: Generate Flutter host projects
         working-directory: apps/client
-        run: flutter create --platforms=linux,android .
+        run: |
+          flutter create --platforms=linux,android .
+          ./tool/configure-android-host.sh
 
       - name: Get dependencies
         working-directory: apps/client
@@ -66,9 +75,57 @@ jobs:
         working-directory: apps/client
         run: flutter analyze
 
+  libbox:
+    name: Build libbox native engine
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # sing-box-libbox v1.11.5 drives gomobile v0.1.4, which depends on
+          # golang.org/x/tools v0.16.0 and does not compile on Go 1.24+.
+          go-version: '1.22'
+          cache: false
+
+      # The sing-box tree, the Go module cache and the finished AAR are all keyed
+      # to the pinned commit, so an unrelated client change rebuilds neither the
+      # clone nor the native library.
+      - name: Restore libbox build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            apps/client/.cache/sing-box-libbox
+            apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          key: libbox-${{ hashFiles('apps/client/libbox.ref') }}
+
+      - name: Build libbox.aar for all Android ABIs
+        if: hashFiles('apps/client/packages/libbox_bridge/android/libs/libbox.aar') == ''
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          ./apps/client/tool/build-libbox.sh --android-only
+
+      - name: Verify libbox.aar
+        run: |
+          AAR=apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          test -f "$AAR" || { echo "libbox.aar was not produced" >&2; exit 1; }
+          ls -l "$AAR"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libbox-aar-${{ github.sha }}
+          path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          if-no-files-found: error
+
   ios-verification:
     name: Verify the iOS client builds
     needs: verify
+    # GitHub only provisions macOS runners on plans that include them. Without
+    # one, the job fails before any step runs ("configuration ... is not
+    # supported") and the whole run is reported as cancelled, hiding real
+    # failures. Opt in with the repository variable ENABLE_IOS_VERIFICATION=true.
+    if: vars.ENABLE_IOS_VERIFICATION == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -141,29 +198,94 @@ jobs:
 
   android-artifact:
     name: Build Android client artifact
-    needs: verify
+    needs:
+      - verify
+      - libbox
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    env:
+      # Present only when the repository has release signing configured; the
+      # build steps below pick the strongest artifact those values allow.
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-      - name: Generate host project and build
+
+      - name: Install APK signing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: libbox-aar-${{ github.sha }}
+          path: apps/client/packages/libbox_bridge/android/libs
+
+      - name: Generate host project with the deployment identity
         working-directory: apps/client
         run: |
           flutter create --platforms=android .
+          ./tool/configure-android-host.sh
           flutter pub get
+
+      - name: Decode the release keystore
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+
+      # The full release path: production defines, the pinned native engine, and
+      # a real signature. It runs only when both the keystore and the controller
+      # signing key are configured, because an unsigned release APK installs
+      # nowhere and a mismatched key produces a client that cannot connect.
+      - name: Build signed release APK
+        if: env.ANDROID_KEYSTORE_BASE64 != '' && env.CLIENT_SIGNING_PUBLIC_KEY != ''
+        env:
+          STRICT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+          APP_VERSION: '0.1.0'
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+          SKIP_LIBBOX: '1'
+        run: ./apps/client/tool/build-release-android.sh
+
+      # Without release secrets the artifact is still useful for testing, but it
+      # is called debug so nobody mistakes it for something to distribute.
+      - name: Build debug APK
+        if: env.ANDROID_KEYSTORE_BASE64 == '' || env.CLIENT_SIGNING_PUBLIC_KEY == ''
+        working-directory: apps/client
+        run: |
+          echo "::notice::No ANDROID_KEYSTORE_BASE64 secret and CLIENT_SIGNING_PUBLIC_KEY variable; building a debug APK instead of a signed release."
           flutter build apk --debug \
+            --build-number "${{ github.run_number }}" \
             --dart-define=STRICT_ENV=${CLIENT_ENV} \
             --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
-      - name: Archive Android APK
-        run: cp apps/client/build/app/outputs/flutter-apk/app-debug.apk strict-proxy-client-android-${GITHUB_SHA}.apk
+
+      - name: Collect the APK
+        run: |
+          if compgen -G 'apps/client/build/dist/*.apk' >/dev/null; then
+            cp apps/client/build/dist/*.apk "strict-proxy-client-android-${GITHUB_SHA}.apk"
+            echo "kind=release" >> "$GITHUB_ENV"
+          else
+            cp apps/client/build/app/outputs/flutter-apk/app-debug.apk \
+              "strict-proxy-client-android-${GITHUB_SHA}.apk"
+            echo "kind=debug" >> "$GITHUB_ENV"
+          fi
+          ls -l "strict-proxy-client-android-${GITHUB_SHA}.apk"
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APKSIGNER="$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)/apksigner"
+          "$APKSIGNER" verify --print-certs "strict-proxy-client-android-${GITHUB_SHA}.apk" \
+            | grep -E 'certificate DN|SHA-256 digest' | head -2
+
       - uses: actions/upload-artifact@v4
         with:
           name: strict-proxy-client-android-${{ github.sha }}

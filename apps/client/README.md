@@ -10,8 +10,13 @@ gitignored — then build:
 
 ```sh
 flutter create --platforms=linux,android,ios .
+./tool/configure-android-host.sh   # replaces com.example.<name> with the real id
 flutter pub get
 ```
+
+The native VPN engine is built separately with `./tool/build-libbox.sh`, which
+reads the reviewed commit pinned in `libbox.ref`. Skip it only when you do not
+need to connect.
 
 The Flutter tool picks up the workspace `analysis_options.yaml`.
 

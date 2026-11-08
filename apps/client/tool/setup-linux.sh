@@ -72,6 +72,7 @@ CLIENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 (
   cd "$CLIENT_DIR"
   flutter create --platforms=linux,android .
+  ./tool/configure-android-host.sh
   flutter pub get
   flutter test
   flutter analyze

@@ -68,13 +68,27 @@ connection.
 
 ## Build Android libbox artifacts
 
-Generated binaries are intentionally not committed. Build them from a reviewed,
-immutable upstream commit:
+Generated binaries are intentionally not committed. The reviewed upstream commit
+is pinned in `apps/client/libbox.ref`, so the build needs no arguments:
 
 ```bash
-export SING_BOX_LIBBOX_REF=<40-character-reviewed-commit-sha>
-./apps/client/tool/build-libbox.sh
+./apps/client/tool/build-libbox.sh                  # Android + iOS (needs Xcode)
+./apps/client/tool/build-libbox.sh --android-only   # what CI and release APKs use
 ```
+
+To upgrade the engine, review the upstream diff, replace the SHA in that file, and
+rebuild; `SING_BOX_LIBBOX_REF=<40-character-sha>` overrides the pin for a one-off
+build. The script resolves `ANDROID_NDK_HOME` from the Android SDK when it is
+unset, installs the exact `github.com/sagernet/gomobile` version the pinned
+commit requires, and installs the matching `gobind` next to it (never
+`gobind@latest`). That fork needs Go 1.22 or 1.23; newer Go fails while
+compiling its `golang.org/x/tools` dependency, and CI pins Go 1.22 for this
+reason.
+
+CI builds this AAR on every push (`.github/workflows/client.yml`, job `libbox`),
+caches it by pinned commit, and uploads it as `libbox-aar-<sha>`. The Android
+artifact job consumes that artifact, so push builds are never missing the native
+engine.
 
 The script writes:
 
@@ -87,7 +101,13 @@ host folders. Generate the Linux/Android host projects with:
 ```bash
 cd apps/client
 flutter create --platforms=linux,android .
+./tool/configure-android-host.sh
 ```
+
+`configure-android-host.sh` replaces Flutter's `com.example.<name>` placeholder
+with the real application id (`com.strictproxy.client` by default) and the
+`StrictProxy` launcher label. Skipping it produces an APK that cannot be
+published or updated.
 
 ## iOS
 

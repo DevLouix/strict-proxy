@@ -163,9 +163,10 @@ Consequences worth memorising:
 | `scripts/smoke-server.sh` | Post-deploy API smoke test (`BASE_URL=… scripts/smoke-server.sh`) | No |
 | `scripts/smoke-gatekeeper.ts`, `scripts/smoke-enrollment.ts` | End-to-end checks with a controller and Gatekeeper | No |
 | `.github/workflows/server-ci.yml` | Typecheck, unit + integration tests, compose validation, image publishing | No |
-| `.github/workflows/client.yml` | Flutter tests/analysis and debug build artifacts | No |
+| `.github/workflows/client.yml` | Flutter tests/analysis, the native libbox build, and the push APK artifact (iOS check is opt-in: `ENABLE_IOS_VERIFICATION`) | No |
 | `.github/workflows/client-release.yml` | Signed production APK, built on demand | No — triggered from the Actions tab |
-| `apps/client/tool/*.sh` | Client build, libbox build, APK signing, Linux prerequisites | Only through documented flags |
+| `apps/client/libbox.ref` | The reviewed sing-box-libbox commit the native engine is built from | Only to upgrade the engine, then rebuild |
+| `apps/client/tool/*.sh` | Client build, libbox build, Android identity, APK signing, Linux prerequisites | Only through documented flags |
 | `signing-key.pem` (you create it) | Private half of the client-verification key | Back it up; never commit |
 
 ## 5. Documentation map
