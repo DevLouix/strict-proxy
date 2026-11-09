@@ -100,12 +100,18 @@ jobs:
       # relocations that the runner's preinstalled NDK 27 lld rejects with
       # "unknown relocation (315)". 28.0.13004108 is the NDK the upstream
       # Android client builds this engine with.
-      - name: Install the Android NDK the engine links with
+      - name: Install the Android NDK and free runner disk
         run: |
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          # Four-ABI gomobile builds fill the runner's free space (the engine now
+          # also compiles tailscale and cronet), so drop what this job never uses
+          # before installing the NDK it needs.
+          sudo rm -rf "$SDK/ndk/27.3.13750724" "$SDK/system-images" "$SDK/emulator" \
+            /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           MANAGER="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
           yes | "$MANAGER" "ndk;28.0.13004108" >/dev/null 2>&1 || true
           test -d "$SDK/ndk/28.0.13004108"
+          df -h /
           echo "ANDROID_NDK_HOME=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
 
