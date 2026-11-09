@@ -95,6 +95,19 @@ jobs:
           go-version: '1.25.5'
           cache: false
 
+      # sing-box 1.14 links libcronet.a, whose objects use TLS-descriptor
+      # relocations that the runner's preinstalled NDK 27 lld rejects with
+      # "unknown relocation (315)". 28.0.13004108 is the NDK the upstream
+      # Android client builds this engine with.
+      - name: Install the Android NDK the engine links with
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          MANAGER="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$MANAGER" "ndk;28.0.13004108" >/dev/null 2>&1 || true
+          test -d "$SDK/ndk/28.0.13004108"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
+
       # The sing-box tree, the Go module cache and the finished AAR are all keyed
       # to the pinned commit, so an unrelated client change rebuilds neither the
       # clone nor the native library.
