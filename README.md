@@ -19,6 +19,22 @@ REALITY keygen, strict env parsing).
 > OpenPay SDK's 32 resources we deliberately do *not* use, and an explicit list
 > of known gaps.
 
+## Download the app
+
+Every green build of `main` publishes the signed Android APK and the Linux bundle
+to [the latest release](https://github.com/DevLouix/strict-proxy/releases/latest):
+
+- Android: `strict-proxy-client-android-<commit>.apk` — signed release build, no
+  debug key, install with `adb install -r <file>.apk`.
+- Linux: `strict-proxy-client-linux-<commit>.tar.gz` — unpack and run the
+  `strict_proxy_client` executable.
+
+The APK has the controller URL compiled in, so a build from `main` talks to the
+controller the `CLIENT_CONTROLLER_URL` repository variable names. The repository
+is private, so the release page and its assets need a signed-in GitHub account;
+see [`docs/RELEASE-CLIENT.md`](docs/RELEASE-CLIENT.md) for the versioned
+`client-release` flow instead.
+
 ## Architecture
 
 ```
