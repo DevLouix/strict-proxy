@@ -238,7 +238,7 @@ services:
       context: ${BUILD_CONTEXT:-.}
       dockerfile: ${NODE_AGENT_DOCKERFILE:-docker/node-agent.Dockerfile}
       args:
-        SING_BOX_VERSION: ${SING_BOX_VERSION:-1.13.21}
+        SING_BOX_VERSION: ${SING_BOX_VERSION:-1.14.4}
         NODE_VERSION: ${NODE_VERSION:-22}
     restart: ${NODE_AGENT_RESTART_POLICY:-unless-stopped}
     init: true

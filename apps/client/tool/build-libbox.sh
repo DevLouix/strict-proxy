@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # Build the exact gomobile artifacts consumed by the local Flutter plugin.
-# No binary is downloaded or committed: a reviewed sing-box-libbox commit (pinned
-# in apps/client/libbox.ref, or supplied through SING_BOX_LIBBOX_REF) plus the
-# local Go/Android/Xcode toolchains do the build.
+# No binary is downloaded or committed: a reviewed sing-box commit (pinned in
+# apps/client/libbox.ref, or supplied through SING_BOX_LIBBOX_REF) plus the local
+# Go/Android/Xcode toolchains do the build. libbox lives in the sing-box tree
+# itself since 1.12, so one pin covers the client and the node image.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${SING_BOX_LIBBOX_WORK_DIR:-${ROOT_DIR}/.cache/sing-box-libbox}"
 PINNED_REF_FILE="${ROOT_DIR}/libbox.ref"
@@ -31,7 +32,7 @@ if [[ -z "${SING_BOX_LIBBOX_REF:-}" && -f "$PINNED_REF_FILE" ]]; then
   SING_BOX_LIBBOX_REF="$(tr -d '[:space:]' < "$PINNED_REF_FILE")"
 fi
 REF="${SING_BOX_LIBBOX_REF:-}"
-[[ -n "$REF" ]] || fail "no sing-box-libbox ref: set SING_BOX_LIBBOX_REF, or pin one in apps/client/libbox.ref"
+[[ -n "$REF" ]] || fail "no libbox ref: set SING_BOX_LIBBOX_REF, or pin one in apps/client/libbox.ref"
 # Refuse a moving branch: the APK must be reproducible from the recorded commit.
 [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]] || fail "SING_BOX_LIBBOX_REF must be a full 40-character commit SHA; got: $REF"
 
@@ -57,8 +58,15 @@ export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 echo "Using NDK: $ANDROID_NDK_HOME"
 
 mkdir -p "$(dirname "$WORK_DIR")"
+# libbox moved into the sing-box repository itself; this is the only tree that
+# carries a current engine, so a cache restored from an older pin (which pointed
+# at the archived sing-box-libbox fork) is discarded instead of reused.
+LIBBOX_REPO_URL="https://github.com/SagerNet/sing-box.git"
+if [[ -d "$WORK_DIR/.git" ]] && [[ "$(git -C "$WORK_DIR" remote get-url origin 2>/dev/null)" != "$LIBBOX_REPO_URL" ]]; then
+  rm -rf "$WORK_DIR"
+fi
 if [[ ! -d "$WORK_DIR/.git" ]]; then
-  git clone https://github.com/getlantern/sing-box-libbox.git "$WORK_DIR"
+  git clone "$LIBBOX_REPO_URL" "$WORK_DIR"
 fi
 
 git -C "$WORK_DIR" fetch --tags --force origin
@@ -73,7 +81,7 @@ MOBILE_VERSION="$(awk '/github.com\/sagernet\/gomobile[[:space:]]/{print $2; exi
 echo "Installing github.com/sagernet/gomobile ${MOBILE_VERSION} into ${GOPATH_BIN}"
 for tool in gomobile gobind; do
   GOBIN="$GOPATH_BIN" go install "github.com/sagernet/gomobile/cmd/${tool}@${MOBILE_VERSION}" \
-    || fail "could not build gomobile ${MOBILE_VERSION}; sing-box-libbox ${REF} pins golang.org/x/tools v0.16.0, which needs Go 1.22 or 1.23 (this is $(go version))"
+    || fail "could not build gomobile ${MOBILE_VERSION}; sing-box ${REF} requires Go $(awk '/^go /{print $2; exit}' "${WORK_DIR}/go.mod") but this is $(go version)"
 done
 
 pushd "$WORK_DIR" >/dev/null

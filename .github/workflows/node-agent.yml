@@ -40,7 +40,7 @@ on:
         default: ''
         type: string
       sing_box_version:
-        description: 'sing-box version to bake in; empty uses the SING_BOX_VERSION variable, else 1.13.21'
+        description: 'sing-box version to bake in; empty uses the SING_BOX_VERSION variable, else 1.14.4'
         required: false
         default: ''
         type: string
@@ -60,7 +60,7 @@ env:
   REGISTRY: ${{ vars.NODE_AGENT_REGISTRY || 'ghcr.io' }}
   IMAGE_OWNER: ${{ vars.NODE_AGENT_REGISTRY_OWNER || github.repository_owner }}
   IMAGE_NAME: strict-proxy-node-agent
-  SING_BOX_VERSION: ${{ github.event.inputs.sing_box_version || vars.SING_BOX_VERSION || '1.13.21' }}
+  SING_BOX_VERSION: ${{ github.event.inputs.sing_box_version || vars.SING_BOX_VERSION || '1.14.4' }}
 
 jobs:
   verify:

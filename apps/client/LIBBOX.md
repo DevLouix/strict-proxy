@@ -124,14 +124,16 @@ change rather than a moving target.
 1. Pick the upstream release and resolve its commit:
 
    ```bash
-   git ls-remote https://github.com/getlantern/sing-box-libbox.git 'refs/tags/v*'
+   git ls-remote https://github.com/SagerNet/sing-box.git 'refs/tags/v*'
    ```
 
 2. Review the diff against the current pin (`git log`, release notes). Treat it as
    a dependency upgrade, not a rebuild: the engine runs inside the VPN service.
-3. Check the new `go.mod` for `github.com/sagernet/gomobile`. It must build with
-   the Go version CI pins (`1.22`); a newer gomobile usually means raising that
-   version too, and backing it out once `golang.org/x/tools` stops compiling.
+3. Check the new `go.mod` for `github.com/sagernet/gomobile` and its `go`
+   directive. CI pins Go to what that directive requires (`1.25.5` for v1.14.4);
+   a newer gomobile usually means raising that version too.
+   The node image compiles the same tag through `SING_BOX_VERSION`, so bump both
+   together — `docker/node-agent.Dockerfile` and `apps/client/libbox.ref`.
 4. Replace the SHA in `apps/client/libbox.ref` — one line, 40 hex characters.
 5. Build and inspect the result:
 

@@ -13,8 +13,10 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 
 /**
@@ -22,6 +24,13 @@ import java.lang.reflect.Proxy
  * the generated AAR is supplied by the pinned build script and its Java API
  * changes between sing-box releases. The bridge therefore remains source-
  * compatible while still invoking the real generated Libbox classes at runtime.
+ *
+ * sing-box 1.13 replaced the old entry point
+ * (`Libbox.newService(config, platform)`) with `Libbox.setup(SetupOptions)` +
+ * `Libbox.newCommandServer(platform, handler)` +
+ * `CommandServer.startOrReloadService(config, options)`. Both shapes are
+ * resolved at runtime, so an engine bump that only moves the pin keeps working
+ * and an older pin still falls back to the legacy call.
  */
 class LibboxVpnService : VpnService() {
     companion object {
@@ -63,6 +72,9 @@ class LibboxVpnService : VpnService() {
         }
     }
 
+    /** `Libbox.setup` only has to run once per process. */
+    private var enginePrepared = false
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -96,32 +108,121 @@ class LibboxVpnService : VpnService() {
         emitState("connecting")
         try {
             val libbox = Class.forName("io.nekohasekai.libbox.Libbox")
-            val newService = libbox.methods.firstOrNull {
-                it.name.equals("newService", ignoreCase = true) && it.parameterTypes.size == 2
-            } ?: error("libbox.aar does not expose Libbox.newService(config, platform)")
-            val platformType = newService.parameterTypes[1]
-            val platform = Proxy.newProxyInstance(
-                platformType.classLoader,
-                arrayOf(platformType),
-                PlatformHandler(this),
-            )
-            val service = newService.invoke(null, config, platform) ?: error("Libbox.newService returned null")
-            service.javaClass.methods.firstOrNull { it.name == "start" && it.parameterTypes.isEmpty() }
-                ?.invoke(service) ?: error("libbox service has no start() method")
-            runningService = service
+            runningService = startCommandServer(libbox, config) ?: startLegacyService(libbox, config)
             emitState("connected")
         } catch (error: Throwable) {
             stopBox()
-            fail(error.cause?.message ?: error.message ?: "libbox failed to start")
+            val cause = generateSequence(error) { it.cause }.last()
+            fail(cause.message ?: "libbox failed to start")
         }
+    }
+
+    /**
+     * The 1.13+ entry point. Returns null when this AAR predates it, so the
+     * caller can fall back to [startLegacyService].
+     */
+    private fun startCommandServer(libbox: Class<*>, config: String): Any? {
+        val factory = libbox.methods.firstOrNull {
+            Modifier.isStatic(it.modifiers) &&
+                it.name.equals("newCommandServer", ignoreCase = true) &&
+                it.parameterTypes.size == 2
+        } ?: return null
+
+        prepareEngine(libbox)
+
+        // gomobile keeps the Go parameter order (handler, platform); resolve the
+        // platform side by the one interface that exposes openTun.
+        val types = factory.parameterTypes
+        val platformIndex = types.indexOfFirst { type -> type.methods.any { it.name.equals("openTun", ignoreCase = true) } }
+        if (platformIndex < 0) return null
+        val handlerIndex = 1 - platformIndex
+        val arguments = arrayOfNulls<Any>(2)
+        arguments[platformIndex] = platformProxy(types[platformIndex])
+        arguments[handlerIndex] = Proxy.newProxyInstance(
+            types[handlerIndex].classLoader,
+            arrayOf(types[handlerIndex]),
+            CommandHandler(),
+        )
+
+        val server = factory.invoke(null, *arguments) ?: error("libbox newCommandServer returned null")
+        server.javaClass.methods.firstOrNull { it.name == "start" && it.parameterTypes.isEmpty() }?.invoke(server)
+        val reload = server.javaClass.methods.firstOrNull {
+            it.name.equals("startOrReloadService", ignoreCase = true) && it.parameterTypes.size in 1..2
+        } ?: error("libbox command server has no startOrReloadService")
+        if (reload.parameterTypes.size == 2) {
+            val override = runCatching {
+                Class.forName("io.nekohasekai.libbox.OverrideOptions").getDeclaredConstructor().newInstance()
+            }.getOrNull()
+            reload.invoke(server, config, override)
+        } else {
+            reload.invoke(server, config)
+        }
+        return server
+    }
+
+    /** The pre-1.13 entry point, kept so an older AAR still connects. */
+    private fun startLegacyService(libbox: Class<*>, config: String): Any {
+        val newService = libbox.methods.firstOrNull {
+            it.name.equals("newService", ignoreCase = true) && it.parameterTypes.size == 2
+        } ?: error("libbox.aar exposes neither newCommandServer nor newService(config, platform)")
+        val platformType = newService.parameterTypes[1]
+        val service = newService.invoke(null, config, platformProxy(platformType))
+            ?: error("Libbox.newService returned null")
+        service.javaClass.methods.firstOrNull { it.name == "start" && it.parameterTypes.isEmpty() }?.invoke(service)
+        return service
+    }
+
+    private fun platformProxy(type: Class<*>): Any =
+        Proxy.newProxyInstance(type.classLoader, arrayOf(type), PlatformHandler(this))
+
+    /**
+     * `SetupOptions` carries the writable directories libbox needs before any
+     * service exists. Field names differ between releases, so setters are
+     * matched case-insensitively and a missing one is ignored.
+     */
+    private fun prepareEngine(libbox: Class<*>) {
+        if (enginePrepared) return
+        val setup = libbox.methods.firstOrNull {
+            Modifier.isStatic(it.modifiers) &&
+                it.name.equals("setup", ignoreCase = true) &&
+                it.parameterTypes.size == 1
+        } ?: return
+        val options = setup.parameterTypes[0].getDeclaredConstructor().newInstance()
+        val files = filesDir.absolutePath
+        setOption(options, "BasePath", files)
+        setOption(options, "WorkingPath", File(files, "libbox").apply { mkdirs() }.absolutePath)
+        setOption(options, "TempPath", File(cacheDir, "libbox").apply { mkdirs() }.absolutePath)
+        setOption(options, "LogMaxLines", 300)
+        setOption(options, "FixAndroidStack", true)
+        setOption(options, "AppVersion", appVersion())
+        setOption(options, "AppMarketingVersion", appVersion())
+        setup.invoke(null, options)
+        enginePrepared = true
+    }
+
+    private fun appVersion(): String = runCatching {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "0.1.0"
+    }.getOrDefault("0.1.0")
+
+    private fun setOption(target: Any, field: String, value: Any) {
+        val methods = target.javaClass.methods.filter { it.parameterTypes.size == 1 && it.name.startsWith("set") }
+        val method = methods.firstOrNull { it.name.equals("set$field", ignoreCase = true) }
+            ?: methods.firstOrNull { it.name.contains(field, ignoreCase = true) }
+            ?: return
+        runCatching { method.invoke(target, value) }
     }
 
     private fun stopBox() {
         emitState("disconnecting")
         try {
-            runningService?.javaClass?.methods?.firstOrNull {
-                (it.name == "close" || it.name == "stop") && it.parameterTypes.isEmpty()
-            }?.invoke(runningService)
+            runningService?.let { service ->
+                service.javaClass.methods.firstOrNull {
+                    it.name.equals("closeService", ignoreCase = true) && it.parameterTypes.isEmpty()
+                }?.invoke(service)
+                service.javaClass.methods.firstOrNull {
+                    (it.name == "close" || it.name == "stop") && it.parameterTypes.isEmpty()
+                }?.invoke(service)
+            }
         } catch (error: Throwable) {
             Log.w(TAG, "libbox close failed", error)
         } finally {
@@ -138,6 +239,33 @@ class LibboxVpnService : VpnService() {
         emitState("error", message)
         stopSelf()
     }
+
+    /** Handler callbacks libbox requires; none of them need app state. */
+    private inner class CommandHandler : InvocationHandler {
+        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? {
+            when {
+                method.name.equals("serviceStop", ignoreCase = true) -> LibboxVpnService.emitState("disconnected")
+                method.name.equals("serviceReload", ignoreCase = true) -> Unit
+                method.name.equals("writeDebugMessage", ignoreCase = true) ->
+                    Log.d(TAG, args?.firstOrNull()?.toString() ?: "")
+                method.name.equals("getSystemProxyStatus", ignoreCase = true) -> return systemProxyStatus()
+            }
+            return when (method.returnType) {
+                Void.TYPE -> null
+                java.lang.Boolean.TYPE -> false
+                Integer.TYPE, java.lang.Long.TYPE, java.lang.Short.TYPE -> 0
+                java.lang.Float.TYPE, java.lang.Double.TYPE -> 0.0
+                else -> null
+            }
+        }
+    }
+
+    private fun systemProxyStatus(): Any? = runCatching {
+        val status = Class.forName("io.nekohasekai.libbox.SystemProxyStatus").getDeclaredConstructor().newInstance()
+        setOption(status, "Available", false)
+        setOption(status, "Enabled", false)
+        status
+    }.getOrNull()
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

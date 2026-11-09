@@ -154,7 +154,7 @@ Consequences worth memorising:
 | File | What it is | You edit it? |
 |---|---|---|
 | `docker/controller.Dockerfile` | Controller image: Node 22, builds TS, runs the entrypoint | Only if you change the runtime |
-| `docker/node-agent.Dockerfile` | Node image: Node 22 + pinned sing-box + agent | Only to bump `SING_BOX_VERSION` |
+| `docker/node-agent.Dockerfile` | Node image: Node 22 + agent, sing-box compiled with `v2ray_api`/`utls` | Only to bump `SING_BOX_VERSION` |
 | `docker/controller-entrypoint.sh` | Validates env, waits for DB, applies migrations, starts | No |
 | `docker/node-agent-entrypoint.sh` | Waits for/provisions the node identity, launches sing-box | No |
 | `docker/validate-controller-env.sh` | The boot-time environment gate | No |
@@ -170,7 +170,7 @@ Consequences worth memorising:
 | `.github/workflows/node-agent.yml` | Builds the node-agent image for amd64+arm64, publishes it to GHCR, and smoke-tests the pushed digest (sing-box, enrollment guard, controller reachability) | No — triggered on push or from the Actions tab |
 | `.github/workflows/client.yml` | Flutter tests/analysis, the native libbox build, and the signed push APK artifact — fails without the release secrets/variables; iOS check is opt-in (`ENABLE_IOS_VERIFICATION`) | No |
 | `.github/workflows/client-release.yml` | Signed production APK, built on demand | No — triggered from the Actions tab |
-| `apps/client/libbox.ref` | The reviewed sing-box-libbox commit the native engine is built from | Only to upgrade the engine, then rebuild |
+| `apps/client/libbox.ref` | The reviewed sing-box commit the native engine is built from (same release as the node image) | Only to upgrade the engine, then rebuild |
 | `apps/client/tool/*.sh` | Client build, libbox build and unpack, Android identity, APK signing and verification, release-configuration check, release-secret setup, Linux prerequisites | Only through documented flags |
 | `signing-key.pem` (you create it) | Private half of the client-verification key | Back it up; never commit |
 

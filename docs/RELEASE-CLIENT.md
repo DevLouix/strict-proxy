@@ -194,15 +194,15 @@ else at the configuration gate.
 > and the fix is a rebuild for every user. Rotating the key is a separate,
 > deliberate operation (`README.md` → Signing keys).
 
-The `sing-box-libbox` commit the VPN engine is built from is pinned in
+The sing-box commit the VPN engine is built from is pinned in
 `apps/client/libbox.ref` as a full 40-character SHA, so neither CI nor a local
 build needs you to supply one. Upgrading the engine means reviewing the upstream
 diff, replacing that SHA, and rebuilding — never pointing it at a branch.
 
 ## Run a release
 
-The workflow builds `libbox.aar` for all four Android ABIs (Go 1.22 on the
-runner: the pinned gomobile does not compile on Go 1.24+), compiles the APK,
+The workflow builds `libbox.aar` for all four Android ABIs (Go 1.25.5 on the
+runner, matching the pinned engine's `go.mod`), compiles the APK,
 re-signs it with your keystore, verifies the signature, and uploads the artifact.
 Expect roughly 15–25 minutes on a cold cache because of the native build.
 
