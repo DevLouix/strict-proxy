@@ -273,6 +273,37 @@ Build with the same keystore, or the install will be rejected as a signature
 mismatch. Because the signing key is compiled into the app, changing
 `STRICT_SIGNING_PUBLIC_KEY` also requires a new build for every user.
 
+### In-app updates
+
+Installed apps find and install new builds themselves: at launch the app asks
+the controller whether a newer build exists, and offers an update that downloads
+the APK and opens Android's package installer. The app is replaced in place and
+keeps its data and session. Android still shows one confirmation and refuses an
+APK signed with a different key, so keep using the same release keystore.
+
+Publish a build to the update feed by putting the signed APK on the controller
+host and setting these values (leave them unset to offer no update):
+
+| Variable | Example | Meaning |
+|---|---|---|
+| `CLIENT_ANDROID_VERSION` | `0.2.0` | version name shown in the prompt |
+| `CLIENT_ANDROID_BUILD_NUMBER` | `12` | version code; must be above the installed build |
+| `CLIENT_ANDROID_APK_PATH` | `/data/client/strict-proxy-0.2.0-12.apk` | APK path inside the controller container |
+| `CLIENT_ANDROID_NOTES` | `Faster connect` | optional line shown with the prompt |
+
+`GET /api/v1/app/android` returns the metadata and
+`GET /api/v1/app/android/download` serves the APK. Both are unauthenticated — the
+APK is public, and its signature is what makes Android accept it — and both
+answer 404 when no complete release is configured. Mount the directory holding
+the APK into the controller container (for Compose, add a volume to the
+`controller` service) so it survives redeploys, then restart the controller.
+
+The app compares `CLIENT_ANDROID_BUILD_NUMBER` with the build number it was built
+with (`APP_BUILD_NUMBER`, which the release script passes as both
+`--build-number` and a dart-define). `client.yml` uses `github.run_number`, so
+every push already produces an increasing build: copy that run's APK to the path
+above and set the matching values.
+
 ## iOS
 
 The workflow does not produce iOS builds. iOS needs an Apple Developer account,

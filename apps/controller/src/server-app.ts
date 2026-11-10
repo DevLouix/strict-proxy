@@ -16,6 +16,7 @@ import { createPaymentWebhookRouter, PlaceholderPaymentAdapter, type PaymentGate
 import { createOpenPayAdapter } from './services/openpay.js';
 import { buildSetupRouter } from './routes/setup.js';
 import { buildBackupRouter } from './routes/backup.js';
+import { buildAppReleaseRouter } from './routes/app-release.js';
 import { errorHandler } from './middleware.js';
 import { mountAdminDashboard } from './admin-ui.js';
 
@@ -104,6 +105,10 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
   // Admin dashboard (static bundle). Must be mounted BEFORE the main router:
   // that router ends with a catch-all JSON 404 which would otherwise swallow
   // every /admin request.
+  // Android client updates. Mounted before the main router so its routes are
+  // not swallowed by that router's JSON 404 catch-all.
+  app.use(buildAppReleaseRouter({ cfg }));
+
   mountAdminDashboard(app);
 
   app.use(buildRouter({ db, cfg, redis }));

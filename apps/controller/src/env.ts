@@ -57,6 +57,16 @@ export interface ControllerConfig {
   /** Base URL of the client/web app, used to build links in outbound email. */
   publicAppUrl: string;
 
+  // -- Android client updates ------------------------------------------------
+  /** Version name of the published APK. Empty means no update is offered. */
+  clientAndroidVersion: string;
+  /** Version code; a client offers the update when this is above its own. */
+  clientAndroidBuildNumber: number;
+  /** Absolute path to the signed APK served to clients. */
+  clientAndroidApkPath: string;
+  /** Release notes shown with the update prompt. */
+  clientAndroidNotes: string;
+
   // -- Settings -------------------------------------------------------------
   /**
    * Encrypts operator-configured secrets (the SMTP password) at rest. Optional:
@@ -119,6 +129,10 @@ export function loadConfig(): ControllerConfig {
     billingProAmountMinor: optionalInt('PRO_TIER_AMOUNT_MINOR', 750_000),
 
     publicAppUrl: optionalString('PUBLIC_APP_URL', 'http://localhost:3000'),
+    clientAndroidVersion: optionalString('CLIENT_ANDROID_VERSION', ''),
+    clientAndroidBuildNumber: optionalInt('CLIENT_ANDROID_BUILD_NUMBER', 0),
+    clientAndroidApkPath: optionalString('CLIENT_ANDROID_APK_PATH', ''),
+    clientAndroidNotes: optionalString('CLIENT_ANDROID_NOTES', ''),
     settingsEncryptionKey: optionalString('SETTINGS_ENCRYPTION_KEY', ''),
   };
 

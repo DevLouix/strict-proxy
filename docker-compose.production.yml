@@ -147,6 +147,13 @@ services:
       BILLING_CURRENCY: ${BILLING_CURRENCY:-NGN}
       STANDARD_TIER_AMOUNT_MINOR: ${STANDARD_TIER_AMOUNT_MINOR:-250000}
       PRO_TIER_AMOUNT_MINOR: ${PRO_TIER_AMOUNT_MINOR:-750000}
+      # In-app updates: version/build/notes of the APK at CLIENT_ANDROID_APK_PATH.
+      # Unset values mean the app is offered no update. Mount the APK into the
+      # container and point this at the in-container path.
+      CLIENT_ANDROID_VERSION: ${CLIENT_ANDROID_VERSION:-}
+      CLIENT_ANDROID_BUILD_NUMBER: ${CLIENT_ANDROID_BUILD_NUMBER:-0}
+      CLIENT_ANDROID_APK_PATH: ${CLIENT_ANDROID_APK_PATH:-}
+      CLIENT_ANDROID_NOTES: ${CLIENT_ANDROID_NOTES:-}
       # Both are documented in .env.docker.example and both were previously
       # never forwarded into the container: settings secrets silently fell back
       # to a key derived from JWT_SECRET, and outbound mail linked to

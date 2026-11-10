@@ -122,8 +122,10 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     try {
       await engine.initialize();
     } catch (error) {
+      // Never rethrow: this future is awaited only when the user connects, so a
+      // rethrow here surfaces as an unhandled async error on the home screen,
+      // which can take the whole app down instead of showing the failure.
       state = EngineStateError(error.toString());
-      rethrow;
     }
   }
 

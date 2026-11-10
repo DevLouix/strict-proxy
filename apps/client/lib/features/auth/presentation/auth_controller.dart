@@ -63,6 +63,11 @@ class AuthController extends StateNotifier<AuthState> {
       }
       await store.clear();
       state = state.copyWith(status: AuthStatus.unauthenticated);
+    } catch (_) {
+      // A malformed or unexpected /me response must sign the user out rather
+      // than leave a broken authenticated state that crashes the home screen.
+      await store.clear();
+      state = state.copyWith(status: AuthStatus.unauthenticated);
     }
   }
 
