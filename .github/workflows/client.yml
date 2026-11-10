@@ -298,6 +298,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zip
 
+      # Flutter, Gradle, the libbox JNI libraries and the signing copy together
+      # exceed the runner's free space. Neither the emulator images nor the
+      # .NET/CodeQL toolchains are used by this job.
+      - name: Free runner disk
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          sudo rm -rf "$SDK/system-images" "$SDK/emulator" \
+            /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
       - uses: actions/download-artifact@v4
         with:
           name: libbox-aar-${{ github.sha }}
