@@ -384,6 +384,6 @@ single process, and there is no distributed lock.
 | `database is not ready; retrying migration` then failure | password mismatch, or URL points at `localhost` | make `CONTROLLER_DATABASE_URL` use `postgres` and the same password |
 | `/readyz` fails, `/healthz` passes | Redis unreachable | check `REDIS_PASSWORD` matches `CONTROLLER_REDIS_URL` |
 | Node stays `offline` | cannot reach the controller, or enrollment failed | container logs on the node VPS; confirm `NODE_CONTROLLER_URL` is public HTTPS |
-| Node enrollment token rejected | expired or already used | issue a new one (single-use, default 30 min) |
+| Node enrollment token rejected | expired or already used | rotate it in **Enrollments** if unused; otherwise issue a new one (single-use, default 30 min) |
 | Client says "tampered configuration" | client built with a different public key | rebuild with the current key and `SIGNING_KEY_ID` |
 | Client connects to nothing / native SDK error | APK built without `libbox.aar` | use the release workflow, which refuses to build without it |

@@ -124,12 +124,23 @@ node ──POST /internal/v1/node/usage      (HMAC)──> bandwidth windows
 | `payment_events` | every verified webhook | PK = provider event id => idempotency |
 | `billing_checkouts` | checkouts we opened | links provider reference -> user |
 | `nodes` | fleet registry, load, status, HMAC secret, IP provenance | `offline` until first heartbeat; `public_ip_source` records whether the address was supplied, auto-detected or set by an admin |
-| `node_enrollments` | hashed one-time tokens | consumed atomically, never replayed |
+| `node_enrollments` | hashed one-time tokens | consumed atomically, never replayed; active tokens can be rotated atomically, which revokes the old row and creates a replacement with the same region, label and lifetime |
 | `node_credentials` | VLESS UUID + short-id per user/node | revoked = cut off |
 | `usage_rollups` | bandwidth windows | unique `(credential, windowStart, windowEnd)` |
 | `revoked_access_tokens` | JTI after logout | checked on every authenticated request |
 | `password_reset_tokens` | SHA-256 of a reset token | single-use, 30-minute expiry (`0001`) |
 | `platform_settings` | operator settings, encrypted when secret | also holds plan-id and price-override cache (`0002`) |
+
+## Credential lifecycle
+
+| Credential | Lifetime | Rotation |
+|---|---|---|
+| Client access JWT | 15 minutes | reissued by `/api/v1/auth/refresh` |
+| Client/admin refresh token | 30 days | single-use; every refresh rotates the pair |
+| Password-reset token | 30 minutes | single-use; a new request supersedes the old link |
+| Node enrollment token | 5 minutes – 24 hours | **Admin → Enrollments → Rotate** revokes the old token and issues a replacement with the same region and label; consumed tokens cannot be rotated |
+| Node HMAC secret | until the node is deleted or re-enrolled | issued once at enrollment and persisted in the node identity volume; there is no in-place rotation endpoint, so treat a suspected leak as a node re-enrollment |
+| Signing key | until deliberately rotated | environment-level; rotation invalidates every installed client |
 
 ## Background maintenance
 

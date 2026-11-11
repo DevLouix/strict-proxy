@@ -353,6 +353,54 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ enrollments: rows });
   }));
 
+  router.post('/api/v1/admin/node-enrollments/:enrollmentId/rotate', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const enrollmentId = req.params.enrollmentId;
+    if (typeof enrollmentId !== 'string' || enrollmentId.length === 0) {
+      res.status(400).json({ error: 'enrollmentId is required', code: 'VALIDATION' });
+      return;
+    }
+
+    const result = await ctx.db.transaction(async (tx): Promise<{ enrollmentId: string; token: string; region: string; label: string | null; expiresAt: Date; rotatedFrom: string } | 'used' | null> => {
+      const [existing] = await tx.select({ id: nodeEnrollments.id, region: nodeEnrollments.region, label: nodeEnrollments.label, createdAt: nodeEnrollments.createdAt, expiresAt: nodeEnrollments.expiresAt, usedAt: nodeEnrollments.usedAt }).from(nodeEnrollments).where(eq(nodeEnrollments.id, enrollmentId)).limit(1);
+      if (!existing) return null;
+      if (existing.usedAt) return 'used';
+
+      const now = new Date();
+      // Keep the operator's original lifetime, not the time left on the old
+      // token: rotating near expiry must still produce a usable window.
+      const originalTtlMinutes = Math.round((existing.expiresAt.getTime() - existing.createdAt.getTime()) / 60_000);
+      const ttlMinutes = Math.min(Math.max(originalTtlMinutes, 5), 24 * 60);
+      const enrollment = createNodeEnrollmentToken();
+
+      const [revoked] = await tx.update(nodeEnrollments)
+        .set({ expiresAt: now, usedAt: now })
+        .where(and(eq(nodeEnrollments.id, enrollmentId), isNull(nodeEnrollments.usedAt)))
+        .returning({ id: nodeEnrollments.id });
+      if (!revoked) return 'used';
+
+      const [created] = await tx.insert(nodeEnrollments).values({
+        tokenHash: enrollment.tokenHash,
+        region: existing.region,
+        label: existing.label,
+        expiresAt: new Date(now.getTime() + ttlMinutes * 60_000),
+        createdBy: req.auth!.sub,
+      }).returning({ id: nodeEnrollments.id, region: nodeEnrollments.region, label: nodeEnrollments.label, expiresAt: nodeEnrollments.expiresAt });
+      if (!created) throw new Error('enrollment_rotation_failed');
+
+      return { enrollmentId: created.id, token: enrollment.token, region: created.region, label: created.label, expiresAt: created.expiresAt, rotatedFrom: existing.id };
+    });
+
+    if (result === null) {
+      res.status(404).json({ error: 'enrollment not found', code: 'NOT_FOUND' });
+      return;
+    }
+    if (result === 'used') {
+      res.status(409).json({ error: 'a consumed or revoked enrollment cannot be rotated', code: 'ENROLLMENT_ALREADY_CONSUMED' });
+      return;
+    }
+    res.status(201).json(result);
+  }));
+
   router.delete('/api/v1/admin/node-enrollments/:enrollmentId', ...requireAdministrator, asyncHandler(async (req, res) => {
     const enrollmentId = req.params.enrollmentId;
     if (typeof enrollmentId !== 'string' || enrollmentId.length === 0) {

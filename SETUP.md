@@ -463,6 +463,11 @@ What still needs a human is the one-time enrollment token. That is deliberate:
 without it, anyone who starts a machine on your network could add their IP to the
 list your origins trust. Minting the token is one click.
 
+If a token expires or leaks before it is used, press **Rotate** next to it. The
+old token is invalidated immediately and a replacement with the same region,
+label and original lifetime is shown once. A token that has already enrolled a
+node cannot be rotated; manage that node instead.
+
 The controller refuses to store a private address (loopback, `10.x`, `192.168.x`,
 `172.16–31.x`, link-local, CGNAT) as a node's public IP, because such a value
 would allowlist something meaningless. Under **Nodes**, an address that moved on
@@ -680,7 +685,7 @@ client**; only do it if you can ship new builds.
 | `OPENPAY_API_KEY is set but OPENPAY_WEBHOOK_SECRET is empty` | half-configured gateway | set both, or neither |
 | Node stays `offline` | agent cannot reach the controller, or enrollment failed | `journalctl -u strict-proxy-agent -n 100` on the VPS |
 | Enrollment says "could not determine a public IP" | the VPS could not reach the IP-echo service, so set `NODE_PUBLIC_IP` explicitly | set `NODE_PUBLIC_IP=<vps public ip>` in `agent.env` and restart |
-| Node enrollment token rejected | expired (default 30 min) or already used | issue a new one — they are single-use and time-limited |
+| Node enrollment token rejected | expired (default 30 min) or already used | press **Rotate** in Enrollments for an unused token, otherwise issue a new one |
 | Client shows "tampered configuration" | signing key mismatch between controller and client build | rebuild the client with the controller's current public key and `SIGNING_KEY_ID` |
 | Client refuses to connect before login | production build with no signing key | rebuild with `STRICT_SIGNING_PUBLIC_KEY`; this is intentional |
 | Password-reset email links to `localhost` | `PUBLIC_APP_URL` not set (and, in Docker, not forwarded) | set it in `.env.docker` and restart |

@@ -197,6 +197,26 @@ test('the enroll button opens a dialog with the required fields', async () => {
   assert.ok(dialog.text().includes('TTL'));
 });
 
+test('an active enrollment token can be rotated from the dashboard', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.enrollmentsView(api, () => {});
+  const rotate = [...node.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Rotate');
+  assert.ok(rotate, 'live enrollment rows should expose Rotate');
+  rotate.dispatch('click');
+
+  const confirm = globalThis.document.body.children.find((c) => c instanceof FakeElement && c.tagName === 'DIALOG');
+  assert.ok(confirm, 'Rotate should ask for confirmation');
+  const go = [...confirm.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Rotate token');
+  assert.ok(go, 'the confirmation should name the action');
+  go.dispatch('click');
+
+  await new Promise((r) => setImmediate(r));
+  const post = api.calls.find((c) => c[0] === 'POST' && c[1] === '/api/v1/admin/node-enrollments/e1/rotate');
+  assert.ok(post, 'confirming rotation should POST to the rotate endpoint');
+});
+
 test('issuing a token from the dialog posts the enrollment', async () => {
   globalThis.document.body.replaceChildren();
 

@@ -294,6 +294,25 @@ function issueEnrollmentDialog(api, onIssued) {
   dlg.showModal();
 }
 
+/** Shows a replacement token exactly once, with its expiry and copy control. */
+function showRotatedEnrollmentToken({ token, expiresAt }) {
+  const dlg = h('dialog', {},
+    h('div', { class: 'dlg-head' }, h('h3', {}, 'Replacement enrollment token')),
+    h('div', { class: 'dlg-body' },
+      h('p', { class: 'muted small' }, 'The previous token is revoked. Copy the replacement now — it is shown once.'),
+      h('div', { class: 'copy' }, token),
+      h('button', { class: 'btn sm', onClick: () => copyText(token) }, 'Copy token'),
+      h('p', { class: 'muted small' }, `Expires ${date(expiresAt)}.`),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+}
+
 export async function nodesView(api) {
   const host = h('div', {});
   let rows = [];
@@ -441,6 +460,31 @@ export async function enrollmentsView(api) {
                   h('td', { class: 'small muted' }, date(e.expiresAt)),
                   h('td', { class: 'small muted' }, date(e.createdAt)),
                   h('td', { class: 'actions' },
+                    !e.usedAt
+                      ? h('button', {
+                          class: 'btn sm',
+                          onClick: async () => {
+                            const ok = await confirmDialog({
+                              title: 'Rotate this enrollment token?',
+                              body: h('div', {},
+                                h('p', {}, `A new token for ${e.region}${e.label ? ` (${e.label})` : ''} replaces this one.`),
+                                h('p', { class: 'muted small' }, 'The current token stops working immediately. The replacement keeps the original lifetime and is shown once.'),
+                              ),
+                              confirmLabel: 'Rotate token',
+                            });
+                            if (!ok) return;
+                            try {
+                              const res = await api.post(`/api/v1/admin/node-enrollments/${e.id}/rotate`, {});
+                              showRotatedEnrollmentToken({ token: res.token, expiresAt: res.expiresAt });
+                              toast('Token rotated');
+                              await load();
+                            } catch (err) {
+                              toast(err.message, 'err');
+                            }
+                          },
+                        }, 'Rotate')
+                      : null,
+                    !e.usedAt && !expired ? ' ' : null,
                     !e.usedAt && !expired
                       ? h('button', {
                           class: 'btn sm danger',
@@ -461,7 +505,9 @@ export async function enrollmentsView(api) {
                             }
                           },
                         }, 'Revoke')
-                      : h('span', { class: 'muted small' }, '—'),
+                      : e.usedAt
+                        ? h('span', { class: 'muted small' }, '—')
+                        : null,
                   ),
                 );
               })),

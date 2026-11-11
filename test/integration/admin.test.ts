@@ -31,6 +31,7 @@ const ADMIN_ROUTES: Array<[string, string, unknown]> = [
   ['DELETE', '/api/v1/admin/nodes/00000000-0000-0000-0000-000000000000', undefined],
   ['POST', '/api/v1/admin/node-enrollments', { region: 'eu-central' }],
   ['GET', '/api/v1/admin/node-enrollments', undefined],
+  ['POST', '/api/v1/admin/node-enrollments/00000000-0000-0000-0000-000000000000/rotate', undefined],
   ['DELETE', '/api/v1/admin/node-enrollments/00000000-0000-0000-0000-000000000000', undefined],
   ['GET', '/api/v1/admin/payments/events', undefined],
 ];
@@ -255,6 +256,51 @@ test('enrollment tokens can be listed and revoked', async () => {
     },
   });
   assert.equal(enroll.status, 400);
+});
+
+test('an active enrollment token can be rotated without losing its scope', async () => {
+  const admin = await h.adminToken();
+  const created = await h.request('POST', '/api/v1/admin/node-enrollments', {
+    token: admin,
+    body: { region: 'eu-central', label: 'Frankfurt 1', ttlMinutes: 30 },
+  });
+  assert.equal(created.status, 201);
+
+  const rotated = await h.request('POST', `/api/v1/admin/node-enrollments/${created.body.enrollmentId}/rotate`, { token: admin });
+  assert.equal(rotated.status, 201);
+  assert.notEqual(rotated.body.token, created.body.token);
+  assert.equal(rotated.body.region, 'eu-central');
+  assert.equal(rotated.body.label, 'Frankfurt 1');
+  assert.equal(rotated.body.rotatedFrom, created.body.enrollmentId);
+  const ttlSeconds = (new Date(rotated.body.expiresAt).getTime() - Date.now()) / 1000;
+  assert.ok(ttlSeconds >= 29 * 60, `rotation should preserve the original lifetime, got ${ttlSeconds}s`);
+
+  // The old token is dead immediately; the replacement is the only live one.
+  const oldEnroll = await h.request('POST', '/api/v1/nodes/enroll', {
+    body: {
+      token: created.body.token,
+      hostname: 'fra-old.example.com',
+      publicIp: '203.0.113.61',
+      realityServerName: 'www.microsoft.com',
+      realityShortIds: ['0011223344556677'],
+    },
+  });
+  assert.equal(oldEnroll.status, 400);
+
+  const newEnroll = await h.request('POST', '/api/v1/nodes/enroll', {
+    body: {
+      token: rotated.body.token,
+      hostname: 'fra-new.example.com',
+      publicIp: '203.0.113.62',
+      realityServerName: 'www.microsoft.com',
+      realityShortIds: ['0011223344556677'],
+    },
+  });
+  assert.equal(newEnroll.status, 201);
+
+  const used = await h.request('POST', `/api/v1/admin/node-enrollments/${rotated.body.enrollmentId}/rotate`, { token: admin });
+  assert.equal(used.status, 409);
+  assert.equal(used.body.code, 'ENROLLMENT_ALREADY_CONSUMED');
 });
 
 test('enrollment requires a region and clamps the TTL', async () => {
