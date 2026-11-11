@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/billing_models.dart';
+import '../../../core/checkout_launcher.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../application/billing_controller.dart';
 
@@ -136,18 +137,29 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
   Future<void> _startCheckout(String tier) async {
     final notifier = ref.read(billingProvider.notifier);
     final url = await notifier.startCheckout(tier);
-    if (!mounted || url == null) return;
+    if (!mounted) return;
+    if (url == null) {
+      final message = ref.read(billingProvider).error ?? 'Could not start checkout.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      return;
+    }
 
     // The provider hosts the payment page; the entitlement arrives later via
     // webhook, so we refresh rather than assuming success.
+    final opened = await openCheckoutUrl(url);
+    notifier.consumeCheckout();
+    if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     messenger.showSnackBar(
       SnackBar(
-        content: Text('Complete payment on the provider page to activate $tier.'),
+        content: Text(
+          opened
+              ? 'Complete payment on the provider page to activate $tier.'
+              : 'Open this link to pay: $url',
+        ),
         action: SnackBarAction(label: 'Reload', onPressed: () => notifier.load()),
       ),
     );
-    notifier.consumeCheckout();
   }
 }
 

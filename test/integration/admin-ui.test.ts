@@ -134,3 +134,19 @@ test('every mutating endpoint the dashboard calls accepts an admin', async () =>
     assert.ok(res.status >= 200 && res.status < 300, `expected success, got ${res.status}`);
   }
 });
+
+test('the controller index page is served at / and /index.html', async () => {
+  for (const reqPath of ['/', '/index.html']) {
+    const res = await h.request('GET', reqPath);
+    assert.equal(res.status, 200, `${reqPath} should serve the landing page`);
+    assert.match(String(res.headers.get('content-type') ?? ''), /text\/html/);
+    assert.match(String(res.headers.get('cache-control') ?? ''), /no-store/);
+  }
+
+  const html = await (await fetch(`${h.baseUrl}/`)).text();
+  assert.match(html, /StrictProxy/, 'the page should name the product');
+  assert.match(html, /href="\/admin"/, 'operators need a path to the console');
+  assert.match(html, /\/api\/v1\/app\/android/, 'the page should link the client feed');
+  assert.match(html, /\/healthz/, 'the status panel needs the health endpoint');
+  assert.ok(!/BEGIN PRIVATE KEY|JWT_SECRET|OPENPAY_API_KEY/.test(html), 'the page must not expose secrets');
+});

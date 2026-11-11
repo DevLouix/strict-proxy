@@ -7,6 +7,7 @@ import 'auth/presentation/password_reset_screen.dart';
 import 'home/presentation/home_screen.dart';
 import 'servers/presentation/servers_screen.dart';
 import 'billing/presentation/account_screen.dart';
+import 'billing/presentation/subscription_gate.dart';
 
 class RootGate extends ConsumerWidget {
   const RootGate({super.key});
@@ -20,7 +21,9 @@ class RootGate extends ConsumerWidget {
       case AuthStatus.unauthenticated:
         return const LoginScreen();
       case AuthStatus.authenticated:
-        return const HomeScreen();
+        // Signing in is not access: the paid plan is checked before the home
+        // screen (and its server picker) is built.
+        return const SubscriptionGate(child: HomeScreen());
     }
   }
 }
@@ -28,7 +31,8 @@ class RootGate extends ConsumerWidget {
 Route<dynamic>? onGenerateRoute(RouteSettings settings) {
   switch (settings.name) {
     case '/servers':
-      return MaterialPageRoute(builder: (_) => const ServersScreen());
+      // A deep link must not skip the entitlement check the home screen has.
+      return MaterialPageRoute(builder: (_) => const SubscriptionGate(child: ServersScreen()));
     case '/account':
       return MaterialPageRoute(builder: (_) => const AccountScreen());
     case '/reset-password':

@@ -206,9 +206,9 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    final message = await container.read(billingProvider.notifier).startCheckout('free');
+    final url = await container.read(billingProvider.notifier).startCheckout('free');
 
-    expect(message, 'not purchasable');
+    expect(url, isNull, reason: 'an error message must never be opened as a URL');
     expect(container.read(billingProvider).error, 'not purchasable');
     expect(container.read(billingProvider).startingCheckout, isFalse);
   });

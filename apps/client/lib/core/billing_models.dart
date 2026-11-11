@@ -117,6 +117,14 @@ class SubscriptionSummary {
   final String? pendingCheckout;
 
   bool get isActive => status == 'active';
+
+  /// Tiers that require a payment profile; `free` is a catalog entry, not an
+  /// entitlement to the paid app surface.
+  bool get isPaidTier => tier == 'standard' || tier == 'pro';
+
+  /// The one predicate the app gates on: a paid plan that is currently active.
+  bool get hasActivePaidPlan => isActive && isPaidTier;
+
   bool get hasQuota => bandwidthQuotaBytes != null;
 
   /// 0..1 fraction of the quota consumed; 0 when unlimited.

@@ -50,7 +50,12 @@ class BillingState {
   static const _unset = Object();
 }
 
-final billingProvider = StateNotifierProvider<BillingController, BillingState>((ref) => BillingController(ref));
+final billingProvider = StateNotifierProvider<BillingController, BillingState>((ref) {
+  // Rebuild per account. Without this, signing out and signing in as someone
+  // else would leave the previous account's entitlement visible for a frame.
+  ref.watch(authStateProvider.select((state) => state.email));
+  return BillingController(ref);
+});
 
 class BillingController extends StateNotifier<BillingState> {
   BillingController(this._ref) : super(const BillingState());
@@ -87,7 +92,11 @@ class BillingController extends StateNotifier<BillingState> {
     }
   }
 
-  /// Opens a checkout for [tier]; the returned session is surfaced in state.
+  /// Opens a checkout for [tier].
+  ///
+  /// Returns the provider's hosted URL, or null when the checkout could not be
+  /// opened; the reason is then in `state.error`. Returning an error message as
+  /// if it were a URL is how a "pay" button ends up opening nothing.
   Future<String?> startCheckout(String tier) async {
     if (state.startingCheckout) return null;
     state = state.copyWith(startingCheckout: true, error: null);
@@ -97,10 +106,10 @@ class BillingController extends StateNotifier<BillingState> {
       return session.checkoutUrl;
     } on ApiException catch (e) {
       state = state.copyWith(startingCheckout: false, error: e.message);
-      return e.message;
+      return null;
     } catch (e) {
       state = state.copyWith(startingCheckout: false, error: 'Could not start checkout: $e');
-      return 'Could not start checkout';
+      return null;
     }
   }
 

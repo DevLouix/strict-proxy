@@ -21,6 +21,7 @@ import { buildClientAppsAdminRouter } from './routes/client-apps-admin.js';
 import { buildClientCrashRouter } from './routes/client-crashes.js';
 import { errorHandler } from './middleware.js';
 import { mountAdminDashboard } from './admin-ui.js';
+import { mountIndexPage } from './index-page.js';
 
 export interface AppContext {
   app: Express;
@@ -113,6 +114,7 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
   app.use(buildClientAppsAdminRouter({ db, cfg }));
   app.use(buildClientCrashRouter({ db, cfg }));
 
+  mountIndexPage(app);
   mountAdminDashboard(app);
 
   app.use(buildRouter({ db, cfg, redis }));
