@@ -18,12 +18,18 @@ let dom: any;
 let views: any;
 let domHelpers: any;
 let clientApps: any;
+let disputes: any;
+let audit: any;
 
 test('the dashboard modules import cleanly', async () => {
   installDomShim();
   views = await import('../../apps/controller/src/admin/views.js');
   domHelpers = await import('../../apps/controller/src/admin/dom.js');
   clientApps = await import('../../apps/controller/src/admin/client-apps-view.js');
+  disputes = await import('../../apps/controller/src/admin/disputes-view.js');
+  assert.equal(typeof disputes.disputesView, 'function');
+  audit = await import('../../apps/controller/src/admin/audit-view.js');
+  assert.equal(typeof audit.auditView, 'function');
   assert.equal(typeof views.overviewView, 'function');
   assert.equal(typeof views.usersView, 'function');
   assert.equal(typeof views.nodesView, 'function');
@@ -97,6 +103,99 @@ for (const [name, fnName, needle] of RENDER_CASES) {
     assert.ok(node.text().includes(needle), `expected output to contain "${needle}"`);
   });
 }
+
+test('disputesView lists chargebacks and whether evidence was filed', async () => {
+  const api = stubApi();
+  const node = await disputes.disputesView(api);
+  const text = node.text();
+  assert.ok(text.includes('Disputes'));
+  assert.ok(text.includes('d1'), 'the dispute id should be listed');
+  assert.ok(text.includes('Customer claims no delivery'), 'the dispute reason should be shown');
+  assert.ok(text.includes('not filed'), 'an unanswered dispute should be called out');
+});
+
+test('a dispute can be opened and evidence filed from the dashboard', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await disputes.disputesView(api);
+  const open = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Open');
+  assert.ok(open, 'each dispute needs an Open control');
+  open.dispatch('click');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const dialog = globalThis.document.body.children.find((c: any) => c.tagName === 'DIALOG');
+  assert.ok(dialog, 'opening a dispute should show its detail');
+  assert.ok(dialog.text().includes('Evidence submissions'));
+  assert.ok(dialog.text().includes('Credentials were issued and used for 14 days.'));
+
+  const narrative = [...dialog.walk()].find((el: any) => el.tagName === 'TEXTAREA');
+  narrative.value = 'Credentials were delivered and used, so the service was provided.';
+  const form = [...dialog.walk()].find((el: any) => el.tagName === 'FORM');
+  assert.ok(form, 'the dialog should offer an evidence form');
+  form.dispatch('submit');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const filed = api.calls.find((c: any) => c[0] === 'POST' && c[1].endsWith('/disputes/d1/evidence'));
+  assert.ok(filed, 'submitting the form should file the evidence');
+  assert.match(filed[2].narrative, /service was provided/);
+});
+
+test('auditView lists operator actions with their actor', async () => {
+  const api = stubApi();
+  const node = await audit.auditView(api);
+  const text = node.text();
+  assert.ok(text.includes('Audit log'));
+  assert.ok(text.includes('admin@x.test'), 'the actor should be named');
+  assert.ok(text.includes('a@x.test disabled'), 'the summary should be shown');
+});
+
+test('a settled checkout can be refunded from the dashboard', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.paymentsView(api);
+  const refund = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Refund');
+  assert.ok(refund, 'paid checkouts need a Refund control');
+  refund.dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c: any) => c.tagName === 'DIALOG');
+  assert.ok(dialog, 'refunding should ask for confirmation');
+  const issue = [...dialog.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Issue refund');
+  issue.dispatch('click');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const call = api.calls.find((c: any) => c[0] === 'POST' && c[1] === '/api/v1/admin/billing/refund');
+  assert.ok(call, 'confirming should post the refund');
+  assert.equal(call[2].reference, 'ref_1');
+  assert.equal(call[2].amountMinor, undefined, 'the default is a full refund');
+});
+
+test('a user can be opened and a password reset issued', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.usersView(api, () => {});
+  const details = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Details');
+  assert.ok(details, 'each user row needs a Details control');
+  details.dispatch('click');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const dialog = globalThis.document.body.children.find((c: any) => c.tagName === 'DIALOG');
+  assert.ok(dialog, 'opening a user should show the detail drawer');
+  const text = dialog.text();
+  assert.ok(text.includes('device-1'), 'devices should be listed');
+  assert.ok(text.includes('fra-1'), 'node credentials should be listed');
+  assert.ok(text.includes('ref_1'), 'payments should be listed');
+
+  const reset = [...dialog.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Issue password reset');
+  assert.ok(reset, 'the drawer should offer a reset token');
+  reset.dispatch('click');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const call = api.calls.find((c: any) => c[0] === 'POST' && c[1].endsWith('/u1/password-reset'));
+  assert.ok(call, 'issuing a reset should post to the reset route');
+});
 
 test('clientAppsView renders releases, the upload form and crash reports', async () => {
   const api = stubApi();

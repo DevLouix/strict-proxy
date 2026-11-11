@@ -123,6 +123,7 @@ export async function createHarness(options: TestEnvOverrides = {}): Promise<Har
   async function resetDb(): Promise<void> {
     await db.execute(sql`
       TRUNCATE TABLE
+        admin_audit_log,
         client_crash_reports,
         client_release_artifacts,
         client_releases,

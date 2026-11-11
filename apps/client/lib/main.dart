@@ -8,6 +8,7 @@ import 'core/crash_reporter.dart';
 import 'core/theme.dart';
 import 'features/auth/presentation/auth_controller.dart';
 import 'features/app_shell.dart';
+import 'features/home/application/connection_controller.dart';
 
 void main() {
   // Every uncaught error is reported before the app goes down, so a crash that
@@ -34,7 +35,14 @@ class StrictProxyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     ref.listen(authStateProvider, (prev, next) {
-      // Hook for global session-expiry handling.
+      final signedOut = prev?.status == AuthStatus.authenticated &&
+          next.status == AuthStatus.unauthenticated;
+      if (signedOut) {
+        // The session ended, whether the user asked to sign out or the refresh
+        // token stopped working. Leaving the engine up would keep routing
+        // traffic for an account that is no longer signed in.
+        unawaited(ref.read(connectionStateProvider.notifier).disconnect());
+      }
     });
     return MaterialApp(
       title: 'StrictProxy',

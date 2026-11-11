@@ -17,6 +17,7 @@ import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
 import { clientCrashReports } from '../db/schema.js';
 import { asyncHandler, requireAdmin, requireJwt } from '../middleware.js';
+import { auditActor, recordAudit } from '../services/audit.js';
 import {
   CLIENT_ABIS,
   activeRelease,
@@ -188,6 +189,14 @@ export function buildClientAppsAdminRouter({ db, cfg }: { db: Db; cfg: Controlle
         fail(res, 404, 'no such release', 'NOT_FOUND');
         return;
       }
+      await recordAudit(db, {
+        ...auditActor(req),
+        action: "client_release.status_changed",
+        targetType: 'client_release',
+        targetId: String(buildNumber),
+        summary: `Android build ${buildNumber} set to ${status}`,
+        metadata: { buildNumber, status },
+      });
       res.json({ ok: true, buildNumber, status });
     }),
   );
@@ -206,6 +215,14 @@ export function buildClientAppsAdminRouter({ db, cfg }: { db: Db; cfg: Controlle
         fail(res, 404, 'no such release', 'NOT_FOUND');
         return;
       }
+      await recordAudit(db, {
+        ...auditActor(req),
+        action: "client_release.deleted",
+        targetType: 'client_release',
+        targetId: String(buildNumber),
+        summary: `Android build ${buildNumber} deleted`,
+        metadata: { buildNumber },
+      });
       res.json({ ok: true });
     }),
   );

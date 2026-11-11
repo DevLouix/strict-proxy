@@ -24,6 +24,12 @@ class ControllerApi {
   final http.Client _client;
   final TokenStore _tokens;
 
+  /// Called when a request proves the session cannot be repaired: the access
+  /// token was rejected and refreshing it failed too. The auth controller
+  /// wires this up so the app leaves the authenticated state instead of showing
+  /// a signed-in shell full of failed requests.
+  void Function()? onSessionExpired;
+
   TokenStore get tokens => _tokens;
 
   Uri _uri(String path) {
@@ -57,6 +63,9 @@ class ControllerApi {
     if (res.statusCode == 401 && retryOn401) {
       final refreshed = await tryRefresh();
       if (refreshed) return _send(fn, retryOn401: false);
+      // A 401 with no session at all is a failed sign-in, not an expiry, so
+      // only an existing token can mean the session is gone.
+      if (_tokens.accessToken != null) onSessionExpired?.call();
     }
 
     final decoded = res.bodyBytes.isEmpty

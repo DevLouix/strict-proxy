@@ -26,6 +26,7 @@ import { revokeAllRefreshTokens, revokeAllRefreshTokens as revokeRefreshes } fro
 import { createOpenPayClient, describeOpenPayError, isOpenPayConfigured } from '../services/openpay.js';
 import { sendMail, passwordResetEmail } from '../services/mail.js';
 import { billingCheckouts } from '../db/schema.js';
+import { auditActor, recordAudit } from '../services/audit.js';
 
 interface Ctx {
   db: Db;
@@ -221,6 +222,16 @@ export function buildAccountRouter(ctx: Ctx): Router {
       }
 
       const issued = await issuePasswordReset(ctx.db, userId, { issuedBy: req.auth!.sub });
+      await recordAudit(ctx.db, {
+        ...auditActor(req),
+        action: 'user.password_reset_issued',
+        targetType: 'user',
+        targetId: userId,
+        summary: `Password reset token issued for ${user.email}`,
+        // The token itself is never logged: the audit trail must not become a
+        // second copy of a one-time credential.
+        metadata: { expiresAt: issued.expiresAt.toISOString() },
+      });
       res.status(201).json({
         email: user.email,
         token: issued.token,
@@ -301,6 +312,19 @@ export function buildAccountRouter(ctx: Ctx): Router {
             .where(eq(subscriptions.userId, row.userId));
         }
 
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'billing.refund',
+          targetType: 'checkout',
+          targetId: reference,
+          summary: `${full ? 'Full' : 'Partial'} refund of ${amountMinor ?? row.amountMinor} on ${reference}${full ? '; access revoked' : ''}`,
+          metadata: {
+            amountMinor: amountMinor ?? row.amountMinor,
+            full,
+            accessRevoked: full,
+            reason: body.reason ?? null,
+          },
+        });
         res.json({ refund, full, accessRevoked: full });
       } catch (err) {
         const described = describeOpenPayError(err);

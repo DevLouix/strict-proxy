@@ -31,6 +31,7 @@ import { revokeAllUserCredentials } from '../services/nodes.js';
 import { revokeAllRefreshTokens } from '../services/auth.js';
 import { purchasableTiers, priceForTier } from '../services/catalog.js';
 import { isKnownTier } from '../services/tiers.js';
+import { auditActor, recordAudit } from '../services/audit.js';
 import type { SubscriptionTier } from '@strict-proxy/types';
 
 interface Ctx {
@@ -311,6 +312,14 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
       const client = createOpenPayClient(ctx.cfg);
       try {
         const change = await setTierPlanPrice(ctx.db, ctx.cfg, client, tier, amountMinor, req.auth?.sub);
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'billing.price_changed',
+          targetType: 'tier',
+          targetId: tier,
+          summary: `Price for ${tier} set to ${amountMinor} (minor units)`,
+          metadata: { tier, amountMinor, providerUpdated: change.providerUpdated, needsSync: change.needsSync },
+        });
         res.json({
           ...change,
           note: change.providerUpdated
@@ -350,6 +359,14 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
       try {
         const amountMinor = configuredAmount(ctx.cfg, tier);
         const change = await setTierPlanPrice(ctx.db, ctx.cfg, client, tier, amountMinor, req.auth?.sub);
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'billing.price_reset',
+          targetType: 'tier',
+          targetId: tier,
+          summary: `Price for ${tier} reset to the configured default (${amountMinor} minor units)`,
+          metadata: { tier, amountMinor },
+        });
         res.json({ ...change, resetToConfigured: true, note: 'the tier now costs the amount configured for this deployment' });
       } catch (err) {
         const described = describeOpenPayError(err);
@@ -384,6 +401,14 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
       const client = createOpenPayClient(ctx.cfg);
       try {
         const result = await removeTierPlan(ctx.db, ctx.cfg, client, planId);
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'billing.plan_removed',
+          targetType: 'plan',
+          targetId: planId,
+          summary: `Provider plan ${planId} ${result.archived ? 'archived (could not be removed)' : 'removed'}`,
+          metadata: { planId, archived: Boolean(result.archived) },
+        });
         res.json({
           ...result,
           note:
@@ -451,6 +476,14 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
           await revokeAllUserCredentials(ctx.db, resolvedUserId);
           await revokeAllRefreshTokens(ctx.db, resolvedUserId);
         }
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'subscription.cancelled',
+          targetType: 'user',
+          targetId: resolvedUserId || null,
+          summary: `Subscription ${target} cancelled${resolvedUserId ? '; access revoked' : ''}`,
+          metadata: { providerSubscriptionId: target, userId: resolvedUserId || null },
+        });
         res.json({ ok: true, providerSubscriptionId: target, userId: resolvedUserId || null, subscription: cancelled });
       } catch (err) {
         const described = describeOpenPayError(err);

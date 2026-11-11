@@ -63,6 +63,144 @@ export async function overviewView(api) {
 // Users
 // ---------------------------------------------------------------------------
 
+/**
+ * Opens one account in full: subscription, devices, credentials, payments and
+ * recent operator actions, plus the out-of-band password reset the admin API
+ * already supported but had no control for.
+ */
+function userDetailDialog(api, user, onChanged) {
+  const body = h('div', { class: 'dlg-body' }, h('p', { class: 'muted small' }, 'Loading account…'));
+  const tokenBox = h('div', { class: 'stack' });
+  const dlg = h('dialog', { class: 'wide' },
+    h('div', { class: 'dlg-head' }, h('h3', {}, user.email)),
+    body,
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+
+  async function load() {
+    let data;
+    try {
+      data = await api.get(`/api/v1/admin/users/${encodeURIComponent(user.id)}`);
+    } catch (err) {
+      mount(body, h('div', { class: 'empty' }, err.message || 'Could not load this account.'));
+      return;
+    }
+
+    const { user: account = user, subscription, devices = [], credentials = [], checkouts = [], audit = [] } = data;
+
+    const reset = h('button', { class: 'btn sm' }, 'Issue password reset');
+    reset.addEventListener('click', async () => {
+      reset.disabled = true;
+      reset.textContent = 'Issuing…';
+      try {
+        const issued = await api.post(`/api/v1/admin/users/${encodeURIComponent(user.id)}/password-reset`, {});
+        mount(tokenBox,
+          h('p', { class: 'muted small' }, `One-time token, shown once. Expires ${date(issued.expiresAt)}.`),
+          h('div', { class: 'copy' }, issued.token),
+          h('button', { class: 'btn sm', onClick: () => copyText(issued.token) }, 'Copy token'),
+        );
+        toast('Reset token issued');
+        if (onChanged) await onChanged();
+      } catch (err) {
+        toast(err.message || 'Could not issue a reset token', 'err');
+        reset.disabled = false;
+        reset.textContent = 'Issue password reset';
+      }
+    });
+
+    mount(body,
+      h('div', { class: 'row' }, badge(account.role ?? 'user'), account.disabledAt ? badge('disabled') : badge('active')),
+      h('table', {},
+        h('tbody', {}, ...[...[
+          ['User id', account.id],
+          ['Email', account.email],
+          ['Role', account.role],
+          ['Created', date(account.createdAt)],
+          ['Tier', subscription?.tier ?? 'free'],
+          ['Subscription', subscription?.status ?? '—'],
+          ['Period ends', subscription ? date(subscription.currentPeriodEnd) : '—'],
+          ['Auto-renew', subscription?.providerSubscriptionId ? 'yes' : 'no'],
+        ].map(([label, value]) => h('tr', {},
+          h('th', { class: 'small muted', style: 'width:160px;text-align:left' }, label),
+          h('td', { class: 'small' }, value ?? '—'),
+        ))]),
+      ),
+      h('h4', {}, 'Devices'),
+      devices.length === 0
+        ? h('div', { class: 'empty' }, 'No devices have signed in.')
+        : h('div', { class: 'table-wrap' },
+            h('table', {},
+              h('thead', {}, h('tr', {}, h('th', {}, 'Device'), h('th', {}, 'Name'), h('th', {}, 'Last seen'))),
+              h('tbody', {}, ...devices.map((d) => h('tr', {},
+                h('td', { class: 'small mono' }, d.deviceId),
+                h('td', { class: 'small' }, d.deviceName ?? '—'),
+                h('td', { class: 'small muted', title: date(d.lastSeenAt) }, ago(d.lastSeenAt)),
+              ))),
+            ),
+          ),
+      h('h4', {}, 'Node credentials'),
+      credentials.length === 0
+        ? h('div', { class: 'empty' }, 'No node credentials issued.')
+        : h('div', { class: 'table-wrap' },
+            h('table', {},
+              h('thead', {}, h('tr', {}, h('th', {}, 'Node'), h('th', {}, 'Region'), h('th', {}, 'State'), h('th', {}, 'Used'))),
+              h('tbody', {}, ...credentials.map((c) => h('tr', {},
+                h('td', {}, h('div', {}, c.hostname), h('span', { class: 'muted small mono' }, c.nodeId)),
+                h('td', { class: 'small' }, c.region),
+                h('td', {}, badge(c.revoked ? 'revoked' : 'active')),
+                h('td', { class: 'small' }, bytes(c.bytesUsed)),
+              ))),
+            ),
+          ),
+      h('h4', {}, 'Payments'),
+      checkouts.length === 0
+        ? h('div', { class: 'empty' }, 'No checkouts.')
+        : h('div', { class: 'table-wrap' },
+            h('table', {},
+              h('thead', {}, h('tr', {}, h('th', {}, 'Reference'), h('th', {}, 'Plan'), h('th', {}, 'Amount'), h('th', {}, 'Status'), h('th', {}, 'Created'))),
+              h('tbody', {}, ...checkouts.map((c) => h('tr', {},
+                h('td', { class: 'mono small' }, c.reference),
+                h('td', {}, badge(c.tier)),
+                h('td', { class: 'small' }, money(c.amountMinor, c.currency)),
+                h('td', {}, badge(c.status)),
+                h('td', { class: 'small muted' }, date(c.createdAt)),
+              ))),
+            ),
+          ),
+      h('h4', {}, 'Recent operator actions'),
+      audit.length === 0
+        ? h('div', { class: 'empty' }, 'Nothing recorded against this account.')
+        : h('div', { class: 'table-wrap' },
+            h('table', {},
+              h('thead', {}, h('tr', {}, h('th', {}, 'When'), h('th', {}, 'Actor'), h('th', {}, 'Action'), h('th', {}, 'Summary'))),
+              h('tbody', {}, ...audit.map((e) => h('tr', {},
+                h('td', { class: 'small muted', title: date(e.createdAt) }, ago(e.createdAt)),
+                h('td', { class: 'small' }, e.actorEmail ?? '—'),
+                h('td', { class: 'small mono' }, e.action),
+                h('td', { class: 'small' }, e.summary),
+              ))),
+            ),
+          ),
+      h('div', { class: 'panel' },
+        h('header', {}, h('h3', {}, 'Recovery')),
+        h('div', { class: 'body' },
+          h('p', { class: 'muted small' },
+            'Issuing a reset token does not sign the user out by itself. The token is single-use and short-lived; relay it out of band.'),
+          h('div', { class: 'actions' }, reset),
+          tokenBox,
+        ),
+      ),
+    );
+  }
+
+  void load();
+}
+
 export async function usersView(api, rerender) {
   const host = h('div', {});
   let filter = '';
@@ -189,6 +327,8 @@ export async function usersView(api, rerender) {
                 h('td', { class: 'small muted' }, date(u.currentPeriodEnd)),
                 h('td', { class: 'small muted' }, date(u.createdAt)),
                 h('td', { class: 'actions' },
+                  h('button', { class: 'btn sm', onClick: () => userDetailDialog(api, u, load) }, 'Details'),
+                  ' ',
                   h('button', { class: 'btn sm', onClick: () => editSubscriptionDialog(u) }, 'Subscription'),
                   ' ',
                   u.disabledAt
@@ -529,6 +669,71 @@ export async function enrollmentsView(api) {
 // Payments
 // ---------------------------------------------------------------------------
 
+/**
+ * Refunds a settled checkout. The control states what a full refund does before
+ * it is issued: cancelling access is a consequence, not a hidden side effect.
+ */
+function refundDialog(api, checkout, reload) {
+  const amount = h('input', { type: 'number', min: '0.01', step: '0.01', value: (checkout.amountMinor / 100).toFixed(2) });
+  const full = h('input', { type: 'checkbox', checked: true });
+  const reason = h('input', { placeholder: 'Reason recorded with the refund (optional)' });
+  const warning = h('p', { class: 'muted small' });
+  const submit = h('button', { class: 'btn danger' }, 'Issue refund');
+
+  const explain = () => {
+    amount.disabled = full.checked;
+    warning.textContent = full.checked
+      ? 'A full refund cancels the subscription, revokes every node credential and refresh token, and stops service immediately.'
+      : 'A partial refund leaves the subscription and access in place.';
+  };
+  full.addEventListener('change', explain);
+  explain();
+
+  const dlg = h('dialog', {},
+    h('div', { class: 'dlg-head' }, h('h3', {}, `Refund ${checkout.reference}`)),
+    h('div', { class: 'dlg-body' },
+      h('p', { class: 'small' },
+        `${checkout.user?.email ?? 'unknown customer'} · ${money(checkout.amountMinor, checkout.currency)} · ${checkout.tier}`),
+      h('label', { class: 'inline' }, full, h('span', { class: 'small' }, 'Refund the full amount')),
+      h('label', { class: 'field' }, h('span', {}, `Amount (${checkout.currency})`), amount),
+      h('label', { class: 'field' }, h('span', {}, 'Reason'), reason),
+      warning,
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
+      submit,
+    ),
+  );
+
+  submit.addEventListener('click', async () => {
+    const partial = Math.round(Number(amount.value) * 100);
+    if (!full.checked && (!Number.isFinite(partial) || partial <= 0 || partial > checkout.amountMinor)) {
+      toast(`Enter an amount between 0.01 and ${(checkout.amountMinor / 100).toFixed(2)} ${checkout.currency}`, 'err');
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = 'Refunding…';
+    try {
+      const result = await api.post('/api/v1/admin/billing/refund', {
+        reference: checkout.reference,
+        ...(full.checked ? {} : { amountMinor: partial }),
+        ...(reason.value.trim() ? { reason: reason.value.trim() } : {}),
+      });
+      toast(result.accessRevoked ? 'Full refund issued; access revoked' : 'Refund issued');
+      dlg.close();
+      await reload();
+    } catch (err) {
+      toast(err.message || 'Refund failed', 'err');
+      submit.disabled = false;
+      submit.textContent = 'Issue refund';
+    }
+  });
+
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+}
+
 export async function paymentsView(api) {
   const host = h('div', {});
   let filter = '';
@@ -591,6 +796,7 @@ export async function paymentsView(api) {
                 h('th', {}, 'Amount'),
                 h('th', {}, 'Status'),
                 h('th', {}, 'Opened'),
+                h('th', { class: 'right' }, 'Actions'),
               )),
               h('tbody', {}, ...checkoutRows.map((c) => h('tr', {},
                 h('td', {},
@@ -602,6 +808,11 @@ export async function paymentsView(api) {
                 h('td', { class: 'small' }, money(c.amountMinor, c.currency)),
                 h('td', {}, badge(c.status)),
                 h('td', { class: 'small muted' }, date(c.createdAt)),
+                h('td', { class: 'actions' },
+                  c.status === 'paid'
+                    ? h('button', { class: 'btn sm', onClick: () => refundDialog(api, c, load) }, 'Refund')
+                    : h('span', { class: 'muted small' }, '—'),
+                ),
               ))),
             ),
         ),

@@ -118,12 +118,16 @@ test('every view registered in navigation has a renderer', async () => {
   const opsSource = await readFile(path.join(ADMIN_DIR, 'billing-ops-view.js'), 'utf8');
   const clientAppsSource = await readFile(path.join(ADMIN_DIR, 'client-apps-view.js'), 'utf8');
   const backupSource = await readFile(path.join(ADMIN_DIR, 'backup-view.js'), 'utf8');
+  const disputesSource = await readFile(path.join(ADMIN_DIR, 'disputes-view.js'), 'utf8');
+  const auditSource = await readFile(path.join(ADMIN_DIR, 'audit-view.js'), 'utf8');
   const exported = new Set([
     ...declaredExports(viewsSource),
     ...declaredExports(settingsSource),
     ...declaredExports(opsSource),
     ...declaredExports(clientAppsSource),
     ...declaredExports(backupSource),
+    ...declaredExports(disputesSource),
+    ...declaredExports(auditSource),
   ]);
 
   for (const [, , , renderer] of entries) {
@@ -132,7 +136,7 @@ test('every view registered in navigation has a renderer', async () => {
 
   // The operator tabs must be reachable rather than defined and forgotten:
   // each one exists because the platform could not do something without it.
-  for (const label of ['Settings', 'Plans', 'Subscriptions', 'Client apps', 'Backup']) {
+  for (const label of ['Settings', 'Plans', 'Subscriptions', 'Client apps', 'Disputes', 'Audit log', 'Backup']) {
     assert.ok(entries.some(([, , l]) => l === label), `the ${label} tab is missing from navigation`);
   }
 });
@@ -179,6 +183,32 @@ test('the settings view never renders a stored secret back into the form', async
   // A read-back path would make the write-only guarantee cosmetic.
   assert.ok(!/\.summary\.password\b/.test(source), 'the view must not read summary.password');
   assert.match(source, /passwordSet/, 'the form should still say whether a password exists');
+});
+
+test('every dispute route has a control in the dashboard', async () => {
+  // A chargeback that can only be answered with curl is a chargeback that is
+  // lost by default.
+  const source = await readFile(path.join(ADMIN_DIR, 'disputes-view.js'), 'utf8');
+  const calls = [
+    'api.get(`/api/v1/admin/disputes${suffix}`)',
+    '`/api/v1/admin/disputes/${encodeURIComponent(summary.id)}`',
+    '`/api/v1/admin/disputes/${encodeURIComponent(summary.id)}/evidence`',
+    '`/api/v1/admin/disputes/${encodeURIComponent(disputeId)}/evidence/${encodeURIComponent(submission.id)}/submitted`',
+  ];
+  for (const call of calls) {
+    assert.ok(source.includes(call), `no dashboard control uses ${call}`);
+  }
+  assert.match(source, /narrative/, 'the evidence form must send a narrative');
+});
+
+test('the audit log, refunds and user detail have dashboard controls', async () => {
+  const auditSource = await readFile(path.join(ADMIN_DIR, 'audit-view.js'), 'utf8');
+  assert.ok(auditSource.includes("api.get('/api/v1/admin/audit?limit=200')"), 'the audit tab must read the log');
+
+  const viewsSource = await readFile(path.join(ADMIN_DIR, 'views.js'), 'utf8');
+  assert.ok(viewsSource.includes('/api/v1/admin/billing/refund'), 'the payments ledger must issue refunds');
+  assert.ok(viewsSource.includes('/password-reset'), 'the user drawer must issue reset tokens');
+  assert.ok(viewsSource.includes('`/api/v1/admin/users/${encodeURIComponent(user.id)}`'), 'the user drawer must load the account');
 });
 
 test('every operator billing route has a control in the dashboard', async () => {

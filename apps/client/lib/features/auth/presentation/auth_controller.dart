@@ -35,6 +35,9 @@ final authStateProvider =
 
 class AuthController extends StateNotifier<AuthState> {
   AuthController(this._ref) : super(const AuthState()) {
+    // A request that cannot refresh its own token ends the session; the app's
+    // auth listener then tears the tunnel down and the gate shows sign-in.
+    _ref.read(apiProvider).onSessionExpired = _handleSessionExpired;
     _restore();
   }
 
@@ -99,6 +102,13 @@ class AuthController extends StateNotifier<AuthState> {
     } on ApiException catch (e) {
       return e.message;
     }
+  }
+
+  /// Ends the local session after the API proved the tokens are unusable.
+  Future<void> _handleSessionExpired() async {
+    if (state.status != AuthStatus.authenticated) return;
+    await _ref.read(tokenStoreProvider).clear();
+    state = state.copyWith(status: AuthStatus.unauthenticated, email: null, tier: null);
   }
 
   Future<void> logout() async {

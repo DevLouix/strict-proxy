@@ -272,6 +272,37 @@ export const platformSettings = pgTable('platform_settings', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Operator action log.
+ *
+ * Destructive actions used to be unattributed. The actor's email is captured
+ * alongside the foreign key because users can be deleted, and an audit row that
+ * only pointed at a missing row would lose the name of whoever did it.
+ *
+ * Writes are best-effort: a failure to audit must never undo the action it
+ * describes, but it is logged loudly.
+ */
+export const adminAuditLog = pgTable(
+  'admin_audit_log',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    actorId: uuid('actor_id').references(() => users.id, { onDelete: 'set null' }),
+    actorEmail: text('actor_email'),
+    action: text('action').notNull(),
+    /** 'user' | 'node' | 'enrollment' | 'checkout' | 'client_release' | … */
+    targetType: text('target_type'),
+    targetId: text('target_id'),
+    summary: text('summary').notNull(),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('admin_audit_log_created_idx').on(t.createdAt),
+    index('admin_audit_log_actor_idx').on(t.actorId),
+    index('admin_audit_log_target_idx').on(t.targetType, t.targetId),
+  ],
+);
+
 /** JWT ID set for access-token revocation lists (post-logout invalidation). */
 export const revokedAccessTokens = pgTable('revoked_access_tokens', {
   jti: text('jti').primaryKey(),

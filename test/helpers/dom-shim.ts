@@ -130,6 +130,67 @@ export function stubApi() {
     overview: { users: 2, activeSubscriptions: 1, onlineNodes: 1, activeCredentials: 3 },
     billing: { checkouts: { total: 3, paid: 1, open: 1, expired: 1 }, revenue: { grossMinor: 750000, currency: 'NGN' }, gateway: 'openpay' },
     me: { user: { email: 'admin@x.test', role: 'admin' } },
+    checkouts: {
+      checkouts: [
+        {
+          reference: 'ref_1',
+          providerReference: 'op_ref_1',
+          tier: 'standard',
+          amountMinor: 2000,
+          currency: 'USD',
+          status: 'paid',
+          createdAt: '2026-03-01T00:00:00Z',
+          paidAt: '2026-03-01T00:05:00Z',
+          user: { id: 'u1', email: 'a@x.test' },
+        },
+      ],
+    },
+    audit: {
+      entries: [
+        {
+          id: 'a1',
+          actorId: 'u9',
+          actorEmail: 'admin@x.test',
+          action: 'user.updated',
+          targetType: 'user',
+          targetId: 'u1',
+          summary: 'a@x.test disabled',
+          metadata: { disabled: true },
+          createdAt: '2026-03-04T00:00:00Z',
+        },
+      ],
+    },
+    userDetail: {
+      user: {
+        id: 'u1',
+        email: 'a@x.test',
+        role: 'user',
+        disabledAt: null,
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-03-04T00:00:00Z',
+      },
+      subscription: {
+        tier: 'pro',
+        status: 'active',
+        currentPeriodEnd: '2026-12-01T00:00:00Z',
+        provider: 'openpay',
+        providerCustomerId: 'cus_1',
+        providerSubscriptionId: 'sub_1',
+        updatedAt: '2026-03-04T00:00:00Z',
+      },
+      devices: [
+        { deviceId: 'device-1', deviceName: 'Pixel 7', lastSeenAt: new Date().toISOString(), createdAt: '2026-01-01T00:00:00Z' },
+      ],
+      credentials: [
+        { nodeId: 'n1', hostname: 'fra-1', region: 'eu-central', revoked: false, bytesUsed: 2048, createdAt: '2026-01-01T00:00:00Z' },
+      ],
+      checkouts: [
+        { reference: 'ref_1', tier: 'standard', amountMinor: 2000, currency: 'USD', status: 'paid', createdAt: '2026-03-01T00:00:00Z' },
+      ],
+      audit: [
+        { id: 'a1', actorEmail: 'admin@x.test', action: 'user.updated', summary: 'a@x.test disabled', createdAt: '2026-03-04T00:00:00Z' },
+      ],
+    },
     users: {
       users: [
         { id: 'u1', email: 'a@x.test', role: 'user', tier: 'pro', subscriptionStatus: 'active', disabledAt: null, createdAt: '2026-01-01T00:00:00Z', currentPeriodEnd: '2026-12-01T00:00:00Z' },
@@ -164,6 +225,38 @@ export function stubApi() {
       activeSource: 'environment',
       environment: { configured: true, version: '0.1.0', buildNumber: 19 },
     },
+    disputes: {
+      disputes: [
+        {
+          id: 'd1',
+          transaction_id: 'ref_1',
+          provider: 'paystack',
+          dispute_type: 'product_not_received',
+          status: 'open',
+          amount: 2000,
+          currency: 'USD',
+          reason: 'Customer claims no delivery',
+          resolution: null,
+          evidence_submitted_at: null,
+          created_at: '2026-03-02T00:00:00Z',
+        },
+      ],
+      hasMore: false,
+    },
+    disputeEvidence: {
+      submissions: [
+        {
+          id: 's1',
+          dispute_id: 'd1',
+          submitted_by: 'admin',
+          narrative: 'Credentials were issued and used for 14 days.',
+          file_urls: [],
+          submission_status: 'pending',
+          provider_status: 'pending',
+          created_at: '2026-03-03T00:00:00Z',
+        },
+      ],
+    },
     crashes: {
       crashes: [
         {
@@ -188,9 +281,17 @@ export function stubApi() {
       if (path.startsWith('/api/v1/me')) return data.me;
       if (path.startsWith('/api/v1/admin/overview')) return data.overview;
       if (path.startsWith('/api/v1/admin/billing/summary')) return data.billing;
+      if (path.startsWith('/api/v1/admin/billing/checkouts')) return data.checkouts;
+      if (path.startsWith('/api/v1/admin/audit')) return data.audit;
+      if (/^\/api\/v1\/admin\/users\/[^/?]+$/.test(path)) return data.userDetail;
       if (path.startsWith('/api/v1/admin/users')) return data.users;
       if (path.startsWith('/api/v1/admin/nodes')) return data.nodes;
       if (path.startsWith('/api/v1/admin/node-enrollments')) return data.enrollments;
+      if (path.startsWith('/api/v1/admin/disputes')) {
+        if (path.endsWith('/evidence')) return data.disputeEvidence;
+        if (/^\/api\/v1\/admin\/disputes\/[^/?]+$/.test(path)) return { dispute: data.disputes.disputes[0] };
+        return data.disputes;
+      }
       if (path.startsWith('/api/v1/admin/payments/events')) return data.events;
       if (path.startsWith('/api/v1/admin/client-apps/android/crashes')) return data.crashes;
       if (path.startsWith('/api/v1/admin/client-apps/android/releases')) return data.clientReleases;

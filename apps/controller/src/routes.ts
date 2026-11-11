@@ -13,7 +13,7 @@ import { eq, sql, and, asc, desc, inArray, isNull } from 'drizzle-orm';
 import { generateEd25519Keypair, signJson, loadSigningPrivateKey, isPublicIpAddress, normalizeIpAddress } from '@strict-proxy/types';
 import type { PublicIpsResponse, SubscriptionTier, UserPublic } from '@strict-proxy/types';
 import type { Db } from './db/client.js';
-import { devices, nodeEnrollments, nodes, nodeCredentials, paymentEvents, refreshTokens, subscriptions, usageRollups, users } from './db/schema.js';
+import { billingCheckouts, devices, nodeEnrollments, nodes, nodeCredentials, paymentEvents, refreshTokens, subscriptions, usageRollups, users } from './db/schema.js';
 import type { ControllerConfig } from './env.js';
 import type { Redis } from 'ioredis';
 import {
@@ -31,6 +31,7 @@ import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
 import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
 import { mintEntitlementToken } from './services/entitlements.js';
+import { auditActor, listAuditEntries, recordAudit } from './services/audit.js';
 
 interface Ctx {
   db: Db;
@@ -272,6 +273,60 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ users: rows });
   }));
 
+  /**
+   * One account in full: subscription, devices, node credentials, payments and
+   * the operator actions taken against it. The users table alone could not
+   * answer "why did this customer lose access" without three other screens.
+   */
+  router.get('/api/v1/admin/users/:userId', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const userId = req.params.userId;
+    if (typeof userId !== 'string' || userId.length === 0) {
+      res.status(400).json({ error: 'userId is required', code: 'VALIDATION' });
+      return;
+    }
+    const [user] = await ctx.db
+      .select({ id: users.id, email: users.email, role: users.role, disabledAt: users.disabledAt, createdAt: users.createdAt, updatedAt: users.updatedAt })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!user) {
+      res.status(404).json({ error: 'user not found', code: 'NOT_FOUND' });
+      return;
+    }
+    const [subscription] = await ctx.db
+      .select({
+        tier: subscriptions.tier,
+        status: subscriptions.status,
+        currentPeriodEnd: subscriptions.currentPeriodEnd,
+        provider: subscriptions.provider,
+        providerCustomerId: subscriptions.providerCustomerId,
+        providerSubscriptionId: subscriptions.providerSubscriptionId,
+        updatedAt: subscriptions.updatedAt,
+      })
+      .from(subscriptions)
+      .where(eq(subscriptions.userId, userId))
+      .limit(1);
+    const [deviceRows, credentialRows, checkoutRows, auditRows] = await Promise.all([
+      ctx.db
+        .select({ deviceId: devices.deviceId, deviceName: devices.deviceName, lastSeenAt: devices.lastSeenAt, createdAt: devices.createdAt })
+        .from(devices)
+        .where(eq(devices.userId, userId)),
+      ctx.db
+        .select({ nodeId: nodeCredentials.nodeId, hostname: nodes.hostname, region: nodes.region, revoked: nodeCredentials.revoked, bytesUsed: nodeCredentials.bytesUsed, createdAt: nodeCredentials.createdAt })
+        .from(nodeCredentials)
+        .innerJoin(nodes, eq(nodes.id, nodeCredentials.nodeId))
+        .where(eq(nodeCredentials.userId, userId)),
+      ctx.db
+        .select({ reference: billingCheckouts.reference, providerReference: billingCheckouts.providerReference, tier: billingCheckouts.tier, amountMinor: billingCheckouts.amountMinor, currency: billingCheckouts.currency, status: billingCheckouts.status, paidAt: billingCheckouts.paidAt, createdAt: billingCheckouts.createdAt })
+        .from(billingCheckouts)
+        .where(eq(billingCheckouts.userId, userId))
+        .orderBy(desc(billingCheckouts.createdAt))
+        .limit(20),
+      listAuditEntries(ctx.db, { targetType: 'user', targetId: userId, limit: 20 }),
+    ]);
+    res.json({ user, subscription: subscription ?? null, devices: deviceRows, credentials: credentialRows, checkouts: checkoutRows, audit: auditRows });
+  }));
+
   router.patch('/api/v1/admin/users/:userId', ...requireAdministrator, asyncHandler(async (req, res) => {
     const userId = req.params.userId;
     if (typeof userId !== 'string' || userId.length === 0) {
@@ -296,6 +351,18 @@ export function buildRouter(ctx: Ctx): Router {
       await revokeAllUserCredentials(ctx.db, userId);
       await ctx.db.update(refreshTokens).set({ revokedAt: new Date() }).where(and(eq(refreshTokens.userId, userId), sql`${refreshTokens.revokedAt} IS NULL`));
     }
+    const changes = [
+      body.disabled === true ? 'disabled' : body.disabled === false ? 'enabled' : null,
+      body.role === undefined ? null : `role set to ${body.role}`,
+    ].filter(Boolean).join(', ');
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'user.updated',
+      targetType: 'user',
+      targetId: userId,
+      summary: `${updated.email} ${changes || 'updated'}`,
+      metadata: { disabled: body.disabled ?? null, role: body.role ?? null },
+    });
     res.json({ user: updated });
   }));
 
@@ -322,6 +389,14 @@ export function buildRouter(ctx: Ctx): Router {
       await revokeAllUserCredentials(ctx.db, userId);
       await ctx.db.update(refreshTokens).set({ revokedAt: new Date() }).where(and(eq(refreshTokens.userId, userId), sql`${refreshTokens.revokedAt} IS NULL`));
     }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'user.subscription_updated',
+      targetType: 'user',
+      targetId: userId,
+      summary: `Subscription set to ${tier}/${status}`,
+      metadata: { tier, status, currentPeriodEnd: periodEnd ? periodEnd.toISOString() : null },
+    });
     const sub = await getSubscription(ctx.db, userId);
     res.json({ userId, subscription: sub });
   }));
@@ -345,6 +420,14 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(500).json({ error: 'enrollment creation failed', code: 'INTERNAL' });
       return;
     }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'enrollment.issued',
+      targetType: 'enrollment',
+      targetId: created.id,
+      summary: `Enrollment token issued for ${created.region}${created.label ? ` (${created.label})` : ''}`,
+      metadata: { region: created.region, ttlMinutes },
+    });
     res.status(201).json({ enrollmentId: created.id, token: enrollment.token, region: created.region, label: created.label, expiresAt: created.expiresAt });
   }));
 
@@ -398,6 +481,14 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(409).json({ error: 'a consumed or revoked enrollment cannot be rotated', code: 'ENROLLMENT_ALREADY_CONSUMED' });
       return;
     }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'enrollment.rotated',
+      targetType: 'enrollment',
+      targetId: result.enrollmentId,
+      summary: `Enrollment token rotated for ${result.region}${result.label ? ` (${result.label})` : ''}`,
+      metadata: { rotatedFrom: result.rotatedFrom, expiresAt: result.expiresAt.toISOString() },
+    });
     res.status(201).json(result);
   }));
 
@@ -412,6 +503,13 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(404).json({ error: 'enrollment not found', code: 'NOT_FOUND' });
       return;
     }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'enrollment.revoked',
+      targetType: 'enrollment',
+      targetId: enrollmentId,
+      summary: `Enrollment token ${enrollmentId} revoked`,
+    });
     res.json({ ok: true });
   }));
 
@@ -504,6 +602,14 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
       return;
     }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'node.updated',
+      targetType: 'node',
+      targetId: nodeId,
+      summary: `Node ${updated.hostname} updated (${updated.status})`,
+      metadata: { ...body },
+    });
     res.json({ node: updated });
   }));
 
@@ -513,11 +619,18 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(400).json({ error: 'nodeId is required', code: 'VALIDATION' });
       return;
     }
-    const [removed] = await ctx.db.delete(nodes).where(eq(nodes.id, nodeId)).returning({ id: nodes.id });
+    const [removed] = await ctx.db.delete(nodes).where(eq(nodes.id, nodeId)).returning({ id: nodes.id, hostname: nodes.hostname });
     if (!removed) {
       res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
       return;
     }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'node.deleted',
+      targetType: 'node',
+      targetId: removed.id,
+      summary: `Node ${removed.hostname} deleted`,
+    });
     res.json({ ok: true });
   }));
 
@@ -525,6 +638,23 @@ export function buildRouter(ctx: Ctx): Router {
     const limit = Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500);
     const rows = await ctx.db.select().from(paymentEvents).orderBy(desc(paymentEvents.receivedAt)).limit(limit);
     res.json({ events: rows });
+  }));
+
+  /**
+   * The operator action log, newest first. Narrowable by action, actor or
+   * target so "who revoked this account" is a query rather than a search.
+   */
+  router.get('/api/v1/admin/audit', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const query = req.query as { limit?: string; action?: string; actorId?: string; targetType?: string; targetId?: string };
+    const requestedLimit = Number(query.limit ?? 100);
+    const entries = await listAuditEntries(ctx.db, {
+      limit: Number.isFinite(requestedLimit) ? requestedLimit : 100,
+      action: typeof query.action === 'string' && query.action ? query.action : undefined,
+      actorId: typeof query.actorId === 'string' && query.actorId ? query.actorId : undefined,
+      targetType: typeof query.targetType === 'string' && query.targetType ? query.targetType : undefined,
+      targetId: typeof query.targetId === 'string' && query.targetId ? query.targetId : undefined,
+    });
+    res.json({ entries });
   }));
   // -- network (client) ------------------------------------------------------
   router.get(
