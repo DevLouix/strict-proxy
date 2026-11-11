@@ -12,7 +12,9 @@ import 'package:strict_proxy_client/features/billing/presentation/subscription_g
 /// A controller with the state already loaded, so the gate can be exercised
 /// without a network, a session, or secure storage.
 class _FixedBilling extends BillingController {
-  _FixedBilling(Ref ref, SubscriptionSummary summary) : super(ref) {
+  final SubscriptionSummary summary;
+
+  _FixedBilling(super.ref, this.summary) {
     state = BillingState(
       subscription: summary,
       catalog: const BillingCatalog(
