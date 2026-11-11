@@ -437,7 +437,7 @@ than the caller.
 > pinned `^0.0.6`, so npm installed a second copy under
 > `apps/controller/node_modules`. The error mapping duck-types the HTTP status
 > instead of relying on class identity, and the two declarations are now kept in
-> step (both on `^0.0.10`). Check `ls apps/controller/node_modules/@fiatden` if an
+> step (both on `^0.0.11`). Check `ls apps/controller/node_modules/@fiatden` if an
 > SDK type starts behaving strangely.
 
 ### Still open
@@ -463,9 +463,9 @@ each one changed a decision:
 | `PlanCreateParams` requires `merchant_id` | it must be derived; `merchants.list` returns *child* merchants, so the app record is used instead |
 | `PlanCreateParams` omits `metadata`, but the API stores it | the tier tag is cast through rather than dropped; discovery depends on it |
 | `subscriptions.deletePlan` exists from SDK 0.0.6 | plans can be cleaned up; a delete leaves an *archived* plan when history references it |
-| The controller pinned `^0.0.5` while the root pinned `^0.0.6` | npm installed a second SDK copy for the controller, which is why `instanceof OpenPayError` failed; both now declare `^0.0.10` |
+| The controller pinned `^0.0.5` while the root pinned `^0.0.6` | npm installed a second SDK copy for the controller, which is why `instanceof OpenPayError` failed; both now declare `^0.0.11` |
 | `deletePlan` archives rather than deletes when referenced | archived plans are replaced on the next sync, and the replacement is reported |
-| `charges.tokenize` is not a separate blocker | the stored key is accepted; tokenize's failure is downstream of routing, not a second credential problem. SDK 0.0.10 keeps `TokenizeParams.plan_id`, but the product uses the card saved by hosted checkout instead of a second card-capture surface |
+| `charges.tokenize` is not a separate blocker | the stored key is accepted; tokenize's failure is downstream of routing, not a second credential problem. SDK 0.0.11 keeps `TokenizeParams.plan_id`, but the product uses the card saved by hosted checkout instead of a second card-capture surface |
 | `providers.validateConfig`/`getReadiness`/`getHealth` separate our key from the account | they answer different questions, and they disagree in a way that matters. `validateConfig('saved')` checks the key against the provider's bank list and can report `credentials_valid` — and `listConfigs().connection_status: valid` with it — while `getReadiness().credentials` reports `unreachable` and `health` reports `available: false`. A green key check does **not** mean the account can take money. The panel labels them "key check" and "routing" for exactly that reason. |
 | A failing account makes a *valid* key unroutable | the router refuses a provider once recent failures exceed its threshold, and says so: `recent platform failures exceed the routing threshold and these credentials are unverified`. `validateConfig({source:'saved', update_saved_status:true})` is what the provider asks for to clear that stale history, and it is what the **Test connection** button does — but it only helps if the account can then pass. |
 | An unroutable provider sends other calls to the next provider | with paystack unavailable, `charges.tokenize` stopped returning a 401 and started returning `No active korapay provider configuration for this merchant` — the router had moved on to an unconfigured provider, so the error names the wrong thing. Read it as "no provider could take this", not "korapay is missing". |

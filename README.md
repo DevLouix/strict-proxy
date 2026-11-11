@@ -390,7 +390,7 @@ falls back to the placeholder HMAC adapter so local development still works;
 `GET /api/v1/billing/catalog` then reports `gateway: "unconfigured"` and the
 client hides the upgrade path.
 
-> `@fiatden/openpay` is pre-1.0. This integration is on **0.0.10**; pin it and
+> `@fiatden/openpay` is pre-1.0. This integration is on **0.0.11**; pin it and
 > re-run the payments suite on upgrade.
 
 ### Verifying against a live gateway
