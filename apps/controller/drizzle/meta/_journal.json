@@ -29,6 +29,13 @@
       "when": 1792214600134,
       "tag": "0003_node_ip_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792310400000,
+      "tag": "0004_client_apps",
+      "breakpoints": true
     }
   ]
 }

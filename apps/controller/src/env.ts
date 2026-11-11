@@ -66,6 +66,12 @@ export interface ControllerConfig {
   clientAndroidApkPath: string;
   /** Release notes shown with the update prompt. */
   clientAndroidNotes: string;
+  /**
+   * Directory holding builds uploaded from the admin dashboard. Relative paths
+   * resolve from the controller's working directory; production pins an
+   * absolute path on a persistent volume so a redeploy keeps the published APK.
+   */
+  clientAndroidStorageDir: string;
 
   // -- Settings -------------------------------------------------------------
   /**
@@ -133,6 +139,7 @@ export function loadConfig(): ControllerConfig {
     clientAndroidBuildNumber: optionalInt('CLIENT_ANDROID_BUILD_NUMBER', 0),
     clientAndroidApkPath: optionalString('CLIENT_ANDROID_APK_PATH', ''),
     clientAndroidNotes: optionalString('CLIENT_ANDROID_NOTES', ''),
+    clientAndroidStorageDir: optionalString('CLIENT_ANDROID_STORAGE_DIR', 'var/client-releases'),
     settingsEncryptionKey: optionalString('SETTINGS_ENCRYPTION_KEY', ''),
   };
 

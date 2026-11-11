@@ -73,12 +73,22 @@ test('a published build reports its version, size and download path', async () =
       sizeBytes: APK_BYTES.length,
       notes: 'Faster connect',
       url: '/api/v1/app/android/download',
+      // An environment-configured APK is the single-APK fallback, so it is
+      // described as universal and needs no checksum (it was never uploaded).
+      artifacts: [
+        {
+          abi: 'universal',
+          sizeBytes: APK_BYTES.length,
+          sha256: '',
+          url: '/api/v1/app/android/download?abi=universal',
+        },
+      ],
     });
 
     const download = await fetch(`${s.base}/api/v1/app/android/download`);
     assert.equal(download.status, 200);
     assert.match(download.headers.get('content-type') ?? '', /android\.package-archive/);
-    assert.match(download.headers.get('content-disposition') ?? '', /strict-proxy-7\.apk/);
+    assert.match(download.headers.get('content-disposition') ?? '', /strict-proxy-7-universal\.apk/);
     assert.deepEqual(Buffer.from(await download.arrayBuffer()), APK_BYTES);
   } finally {
     await s.close();

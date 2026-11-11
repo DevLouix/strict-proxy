@@ -111,12 +111,18 @@ test('every view registered in navigation has a renderer', async () => {
   // The view ids and their renderers live in one VIEWS table; a typo there
   // silently drops a tab or throws on click.
   const entries = [...app.matchAll(/\{\s*id:\s*'([a-z-]+)',\s*label:\s*'([^']+)',\s*render:\s*([A-Za-z_$][\w$]*)\s*\}/g)];
-  assert.ok(entries.length >= 9, `expected the full view set, found ${entries.length}`);
+  assert.ok(entries.length >= 10, `expected the full view set, found ${entries.length}`);
 
   const viewsSource = await readFile(path.join(ADMIN_DIR, 'views.js'), 'utf8');
   const settingsSource = await readFile(path.join(ADMIN_DIR, 'settings-view.js'), 'utf8');
   const opsSource = await readFile(path.join(ADMIN_DIR, 'billing-ops-view.js'), 'utf8');
-  const exported = new Set([...declaredExports(viewsSource), ...declaredExports(settingsSource), ...declaredExports(opsSource)]);
+  const clientAppsSource = await readFile(path.join(ADMIN_DIR, 'client-apps-view.js'), 'utf8');
+  const exported = new Set([
+    ...declaredExports(viewsSource),
+    ...declaredExports(settingsSource),
+    ...declaredExports(opsSource),
+    ...declaredExports(clientAppsSource),
+  ]);
 
   for (const [, , , renderer] of entries) {
     assert.ok(exported.has(renderer), `navigation references ${renderer}, which no view module exports`);
@@ -124,8 +130,30 @@ test('every view registered in navigation has a renderer', async () => {
 
   // The operator tabs must be reachable rather than defined and forgotten:
   // each one exists because the platform could not do something without it.
-  for (const label of ['Settings', 'Plans', 'Subscriptions']) {
+  for (const label of ['Settings', 'Plans', 'Subscriptions', 'Client apps']) {
     assert.ok(entries.some(([, , l]) => l === label), `the ${label} tab is missing from navigation`);
+  }
+});
+
+test('client app releases can be uploaded, published and withdrawn from the dashboard', async () => {
+  // The whole point of the screen: an operator can ship a build without editing
+  // the controller's environment or copying a file into its container.
+  const source = await readFile(path.join(ADMIN_DIR, 'client-apps-view.js'), 'utf8');
+  const calls = [
+    "api.get('/api/v1/admin/client-apps/android/releases')",
+    '/api/v1/admin/client-apps/android/crashes?limit=50',
+    'api.uploadFile(',
+    '/artifacts?',
+    'releases/${buildNumber}/status',
+    "api.post(`/api/v1/admin/client-apps/android/releases/${buildNumber}/status`, { status })",
+    "api.del(`/api/v1/admin/client-apps/android/releases/${buildNumber}`)",
+  ];
+  for (const call of calls) {
+    assert.ok(source.includes(call), `no dashboard control uses ${call}`);
+  }
+  // Every ABI the controller accepts needs a choice in the upload form.
+  for (const abi of ['universal', 'arm64-v8a', 'armeabi-v7a', 'x86_64']) {
+    assert.ok(source.includes(`'${abi}'`), `the upload form is missing ABI ${abi}`);
   }
 });
 

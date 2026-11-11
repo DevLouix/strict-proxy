@@ -121,10 +121,15 @@ services:
       BILLING_CURRENCY: ${BILLING_CURRENCY:-NGN}
       STANDARD_TIER_AMOUNT_MINOR: ${STANDARD_TIER_AMOUNT_MINOR:-250000}
       PRO_TIER_AMOUNT_MINOR: ${PRO_TIER_AMOUNT_MINOR:-750000}
+      # Android builds uploaded from the admin dashboard. The volume below keeps
+      # them across a redeploy; without it every publish is undone by a deploy.
+      CLIENT_ANDROID_STORAGE_DIR: ${CLIENT_ANDROID_STORAGE_DIR:-/var/lib/strict-proxy/client-releases}
       DB_INIT_MAX_ATTEMPTS: ${DB_INIT_MAX_ATTEMPTS:-30}
     # Dokploy's domain is bound to this service and this port; do not add ports.
     # If you change CONTROLLER_INTERNAL_PORT, set the same number as the
     # domain's Internal port in Dokploy — Traefik does not read this file.
+    volumes:
+      - clientreleases:/var/lib/strict-proxy/client-releases
     expose:
       - "${CONTROLLER_INTERNAL_PORT:-8080}"
     healthcheck:
@@ -140,6 +145,8 @@ volumes:
     name: ${POSTGRES_DATA_VOLUME:-strict-proxy-pgdata}
   redisdata:
     name: ${REDIS_DATA_VOLUME:-strict-proxy-redisdata}
+  clientreleases:
+    name: ${CLIENT_RELEASES_VOLUME:-strict-proxy-client-releases}
 
 networks:
   backend:

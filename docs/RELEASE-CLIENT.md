@@ -202,9 +202,10 @@ diff, replacing that SHA, and rebuilding — never pointing it at a branch.
 ## Run a release
 
 The workflow builds `libbox.aar` for all four Android ABIs (Go 1.25.5 on the
-runner, matching the pinned engine's `go.mod`), compiles the APK,
-re-signs it with your keystore, verifies the signature, and uploads the artifact.
-Expect roughly 15–25 minutes on a cold cache because of the native build.
+runner, matching the pinned engine's `go.mod`), compiles **one APK per ABI**
+(`--split-per-abi`), re-signs each with your keystore, verifies the signature and
+the packaged engine, and uploads the artifacts. Expect roughly 15–25 minutes on
+a cold cache because of the native build.
 
 ```bash
 gh workflow run client-release \
@@ -242,16 +243,19 @@ export ANDROID_KEY_PASSWORD='...'   # omit if same as keystore password
 ./apps/client/tool/build-release-android.sh
 ```
 
-The artifact lands in `apps/client/build/dist/`. The script ends by asserting the
-APK's application id, launcher label, and packaged `libbox.so`, so a build with
-the placeholder id or without the engine fails instead of being handed over
-(`tool/verify-android-apk.sh`; CI runs the same check on the push artifact).
+The artifacts land in `apps/client/build/dist/`, one per ABI
+(`strict-proxy-0.2.0-20-arm64-v8a.apk`, `…-armeabi-v7a.apk`, `…-x86_64.apk`).
+Set `SPLIT_ABI=0` for a single universal APK. The script ends by asserting each
+APK's application id, launcher label, and a packaged `libbox.so` for every ABI it
+contains, so a build with the placeholder id or without the engine fails instead
+of being handed over (`tool/verify-android-apk.sh`; CI runs the same check).
 
 ## Distributing to users
 
 - **Direct install:** host the APK over HTTPS and give users the link. They must
   allow installs from the browser/file manager once. `adb install -r <apk>` works
-  for testing.
+  for testing; give each device the APK for its ABI (`arm64-v8a` for a modern
+  phone, `armeabi-v7a` for an older one).
 - **GitHub Releases:** every push to `main` that builds the client publishes a
   release tagged `client-<run_number>` with the signed APK and the Linux bundle
   (`gh release list`, newest first). `client-release`'s `release_tag` input
@@ -281,28 +285,69 @@ the APK and opens Android's package installer. The app is replaced in place and
 keeps its data and session. Android still shows one confirmation and refuses an
 APK signed with a different key, so keep using the same release keystore.
 
-Publish a build to the update feed by putting the signed APK on the controller
-host and setting these values (leave them unset to offer no update):
+#### Publish from the dashboard
 
-| Variable | Example | Meaning |
-|---|---|---|
-| `CLIENT_ANDROID_VERSION` | `0.2.0` | version name shown in the prompt |
-| `CLIENT_ANDROID_BUILD_NUMBER` | `12` | version code; must be above the installed build |
-| `CLIENT_ANDROID_APK_PATH` | `/data/client/strict-proxy-0.2.0-12.apk` | APK path inside the controller container |
-| `CLIENT_ANDROID_NOTES` | `Faster connect` | optional line shown with the prompt |
+Open **Admin → Client apps**. For each ABI you built, upload the APK with the
+version name, an increasing build number and the release notes; then publish.
+Publishing is a separate action from uploading, so a release with only one of
+three ABIs uploaded is stored as a **draft** until you say it is ready. The
+screen also lets you withdraw a build (users keep running it, but it stops being
+offered) and delete one (its APKs are removed from disk).
 
-`GET /api/v1/app/android` returns the metadata and
-`GET /api/v1/app/android/download` serves the APK. Both are unauthenticated — the
-APK is public, and its signature is what makes Android accept it — and both
-answer 404 when no complete release is configured. Mount the directory holding
-the APK into the controller container (for Compose, add a volume to the
-`controller` service) so it survives redeploys, then restart the controller.
+The highest **published** build is what `GET /api/v1/app/android` reports. The
+app compares that build number with the one compiled into it (`APP_BUILD_NUMBER`,
+passed as both `--build-number` and a dart-define), so a build number must
+always increase — never reuse one, and never publish a lower number to roll back;
+Android refuses to downgrade. To roll back, publish a *new* build whose code is
+older.
 
-The app compares `CLIENT_ANDROID_BUILD_NUMBER` with the build number it was built
-with (`APP_BUILD_NUMBER`, which the release script passes as both
-`--build-number` and a dart-define). `client.yml` uses `github.run_number`, so
-every push already produces an increasing build: copy that run's APK to the path
-above and set the matching values.
+Uploads are stored under `CLIENT_ANDROID_STORAGE_DIR` (default
+`var/client-releases`; Compose and Dokploy mount
+`/var/lib/strict-proxy/client-releases` on a named volume). Keep it on persistent
+storage, or a redeploy deletes the APKs apps are being offered.
+
+#### Publishing from a release pipeline
+
+`apps/client/tool/publish-android-release.sh` does the same thing without a
+browser: sign in as an administrator, upload every APK in `build/dist` under one
+build number, publish, then download the result back and compare SHA-256.
+
+```bash
+APP_VERSION=0.2.0 APP_BUILD_NUMBER=20 \
+CONTROLLER_URL=https://strictproxy.devlouix.com \
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='...' \
+  ./apps/client/tool/publish-android-release.sh
+```
+
+`PUBLISH=0` uploads a draft instead. The script fails if the feed does not end up
+offering the build it just uploaded, so a green run means installed apps can
+actually update.
+
+#### What the app downloads
+
+`GET /api/v1/app/android` returns the version, build number, notes and one entry
+per published ABI; `GET /api/v1/app/android/download?abi=<abi>` serves that
+exact APK. Both are unauthenticated — the APK is public, and its signature is
+what makes Android accept it — and both answer 404 when nothing is published.
+The app reads `Build.SUPPORTED_ABIS`, asks for its own ABI, and falls back to a
+`universal` APK. A release that has no APK for the device's ABI is refused with
+`CLIENT_ABI_UNAVAILABLE` rather than given a binary its CPU cannot run.
+
+#### Older deployments: environment configuration
+
+A deployment that predates the dashboard can still publish a single APK with
+`CLIENT_ANDROID_VERSION`, `CLIENT_ANDROID_BUILD_NUMBER`,
+`CLIENT_ANDROID_APK_PATH` (inside the controller container) and
+`CLIENT_ANDROID_NOTES`. It is served as a `universal` artifact, and the first
+build published from **Client apps** takes precedence over it.
+
+#### Crash reports
+
+The app posts uncaught Flutter and platform errors to
+`POST /api/v1/client/crashes` — unauthenticated, rate limited, truncated and
+deduplicated by a client-generated id. **Client apps** lists the most recent
+reports with build, ABI, device and stack trace, which is how a crash on a phone
+becomes diagnosable without `adb logcat`.
 
 ## iOS
 

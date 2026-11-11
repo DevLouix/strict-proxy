@@ -339,20 +339,38 @@ jobs:
           SKIP_LIBBOX: '1'
         run: ./apps/client/tool/build-release-android.sh
 
-      - name: Collect and verify the APK
+      # The build is split per ABI, so there is one APK per architecture; each
+      # is verified and renamed with its ABI so a user knows which to install.
+      - name: Collect and verify the APKs
         run: |
-          cp apps/client/build/dist/*.apk "strict-proxy-client-android-${GITHUB_SHA}.apk"
-          ls -l "strict-proxy-client-android-${GITHUB_SHA}.apk"
-          ./apps/client/tool/verify-android-apk.sh "strict-proxy-client-android-${GITHUB_SHA}.apk"
+          mkdir -p dist-android
+          shopt -s nullglob
+          apks=(apps/client/build/dist/*.apk)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo 'the build produced no APK' >&2
+            exit 1
+          fi
+
           export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           APKSIGNER="$(find "${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)/apksigner"
-          "$APKSIGNER" verify --print-certs "strict-proxy-client-android-${GITHUB_SHA}.apk" \
-            | grep -E 'certificate DN|SHA-256 digest' | head -2
+
+          for apk in "${apks[@]}"; do
+            base="$(basename "$apk" .apk)"          # strict-proxy-0.1.0-19-arm64-v8a
+            rest="${base#strict-proxy-}"
+            abi="${rest#*-}"
+            abi="${abi#*-}"
+            out="dist-android/strict-proxy-client-android-${GITHUB_SHA}-${abi:-universal}.apk"
+            cp "$apk" "$out"
+            ls -l "$out"
+            ./apps/client/tool/verify-android-apk.sh "$out"
+            "$APKSIGNER" verify --print-certs "$out" \
+              | grep -E 'certificate DN|SHA-256 digest' | head -2
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: strict-proxy-client-android-${{ github.sha }}
-          path: strict-proxy-client-android-${{ github.sha }}.apk
+          path: dist-android/*.apk
           if-no-files-found: error
 
   release:
@@ -394,8 +412,9 @@ jobs:
             echo "- controller: \`${URL}\`"
             echo "- version: \`0.1.0\`, build ${GITHUB_RUN_NUMBER}"
             echo "- installs over an earlier build only if it was signed with the same release keystore"
+            echo "- one APK per ABI: pick \`arm64-v8a\` for a modern phone, \`armeabi-v7a\` for an older one"
             echo
-            echo "Install: \`adb install -r strict-proxy-client-android.apk\`"
+            echo "Install: \`adb install -r strict-proxy-client-android-${GITHUB_SHA}-arm64-v8a.apk\`"
             echo
             echo "Built by [\`client\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
           } > "$notes"

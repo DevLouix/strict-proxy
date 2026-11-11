@@ -43,8 +43,15 @@ LABEL="$(sed -n "s/^application-label:'\(.*\)'$/\1/p" <<<"$BADGING" | head -1)"
 [[ "$LABEL" != strict_proxy_client ]] || fail "launcher label is still the raw project name ($LABEL); run tool/configure-android-host.sh"
 
 # The engine must actually be packaged, not merely present in the plugin source
-# tree: AGP silently drops what it cannot see.
-unzip -l "$APK" | grep -q 'lib/arm64-v8a/libbox\.so' \
-  || fail 'libbox.so is missing from the APK — the native engine was not bundled (see tool/build-libbox.sh)'
+# tree: AGP silently drops what it cannot see. A split APK only contains its own
+# ABI, so check that every ABI present has the engine — and that at least one
+# does.
+NATIVE_ABIS="$(unzip -l "$APK" | sed -n 's#.*lib/\([^/]*\)/[^/]*\.so$#\1#p' | sort -u)"
+[[ -n "$NATIVE_ABIS" ]] || fail 'the APK carries no native libraries; the engine was not bundled'
+while IFS= read -r abi; do
+  [[ -n "$abi" ]] || continue
+  unzip -l "$APK" | grep -q "lib/$abi/libbox\.so" \
+    || fail "libbox.so is missing for $abi — the native engine was not bundled (see tool/build-libbox.sh)"
+done <<<"$NATIVE_ABIS"
 
-echo "APK verified: id=$PACKAGE label=$LABEL engine=libbox.so"
+echo "APK verified: id=$PACKAGE label=$LABEL engine=libbox.so abis=$(tr '\n' ',' <<<"$NATIVE_ABIS" | sed 's/,$//')"

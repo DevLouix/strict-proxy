@@ -278,3 +278,89 @@ export const revokedAccessTokens = pgTable('revoked_access_tokens', {
   revokedAt: timestamp('revoked_at', { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
 });
+
+/**
+ * Android builds published from the admin dashboard's Client apps screen.
+ *
+ * One row per build number; the APKs themselves live on disk and are described
+ * by `client_release_artifacts`. The newest *published* row is what the app's
+ * in-app updater is offered. A draft is uploaded but not served, so an operator
+ * can stage a build (and check its checksum) before releasing it.
+ */
+export const clientReleases = pgTable(
+  'client_releases',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    platform: text('platform').notNull().default('android'),
+    /** Version name shown to users, e.g. `0.2.0`. */
+    version: text('version').notNull(),
+    /** Android version code; clients compare it with their own build number. */
+    buildNumber: integer('build_number').notNull(),
+    notes: text('notes').notNull().default(''),
+    /** 'draft' | 'published' | 'revoked' */
+    status: text('status').notNull().default('draft'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('client_releases_platform_build_uq').on(t.platform, t.buildNumber),
+    index('client_releases_status_idx').on(t.status),
+  ],
+);
+
+/**
+ * One APK per ABI for a release.
+ *
+ * Split builds are much smaller than a universal APK, so the updater asks for
+ * the artifact matching the device's CPU and falls back to `universal` when the
+ * operator uploaded a single APK.
+ */
+export const clientReleaseArtifacts = pgTable(
+  'client_release_artifacts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    releaseId: uuid('release_id')
+      .notNull()
+      .references(() => clientReleases.id, { onDelete: 'cascade' }),
+    /** `arm64-v8a` | `armeabi-v7a` | `x86_64` | `universal` */
+    abi: text('abi').notNull(),
+    /** Path relative to CLIENT_ANDROID_STORAGE_DIR. */
+    fileName: text('file_name').notNull(),
+    sizeBytes: bigint('size_bytes', { mode: 'number' }).notNull(),
+    sha256: text('sha256').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('client_release_artifacts_release_abi_uq').on(t.releaseId, t.abi)],
+);
+
+/**
+ * Crash reports posted by the mobile client.
+ *
+ * The home-screen crash was invisible to the operator because nothing left the
+ * device. Reports are unauthenticated (a crash can happen before sign-in) and
+ * therefore capped, truncated and deduplicated by the client-generated
+ * `report_id`, so a retry after a flaky network cannot fill the table.
+ */
+export const clientCrashReports = pgTable(
+  'client_crash_reports',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Client-generated id, used to make delivery idempotent. */
+    reportId: text('report_id'),
+    platform: text('platform').notNull().default('android'),
+    appVersion: text('app_version'),
+    buildNumber: integer('build_number'),
+    abi: text('abi'),
+    device: text('device'),
+    osVersion: text('os_version'),
+    message: text('message').notNull(),
+    stack: text('stack'),
+    context: jsonb('context').$type<Record<string, unknown>>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('client_crash_reports_report_uq').on(t.reportId),
+    index('client_crash_reports_created_idx').on(t.createdAt),
+  ],
+);

@@ -114,7 +114,7 @@ export function installDomShim() {
     body: new FakeElement('body'),
   };
   globalThis.window = { addEventListener: () => {} };
-  globalThis.location = { hash: '' };
+  globalThis.location = { hash: '', origin: 'https://admin.test' };
   Object.defineProperty(globalThis, 'navigator', {
     value: { clipboard: { writeText: async () => {} } },
     configurable: true,
@@ -145,6 +145,40 @@ export function stubApi() {
     events: {
       events: [{ id: 'evt_1', type: 'checkout.completed', applied: true, reason: null, receivedAt: '2026-01-01T00:00:00Z' }],
     },
+    clientReleases: {
+      platform: 'android',
+      abis: ['universal', 'arm64-v8a', 'armeabi-v7a', 'x86_64'],
+      releases: [
+        {
+          id: 'r1',
+          version: '0.2.0',
+          buildNumber: 20,
+          notes: 'Home screen fix',
+          status: 'draft',
+          createdAt: '2026-03-01T00:00:00Z',
+          publishedAt: null,
+          artifacts: [{ abi: 'arm64-v8a', sizeBytes: 52_000_000, sha256: 'a'.repeat(64) }],
+        },
+      ],
+      activeBuildNumber: 19,
+      activeSource: 'environment',
+      environment: { configured: true, version: '0.1.0', buildNumber: 19 },
+    },
+    crashes: {
+      crashes: [
+        {
+          id: 'c1',
+          createdAt: new Date().toISOString(),
+          buildNumber: 19,
+          appVersion: '0.1.0',
+          abi: 'arm64-v8a',
+          device: 'Google Pixel 7',
+          osVersion: '14',
+          message: 'Unhandled Exception: engine failed to initialise',
+          stack: '#0 main (package:strict_proxy_client/main.dart:1)',
+        },
+      ],
+    },
   };
 
   return {
@@ -158,6 +192,8 @@ export function stubApi() {
       if (path.startsWith('/api/v1/admin/nodes')) return data.nodes;
       if (path.startsWith('/api/v1/admin/node-enrollments')) return data.enrollments;
       if (path.startsWith('/api/v1/admin/payments/events')) return data.events;
+      if (path.startsWith('/api/v1/admin/client-apps/android/crashes')) return data.crashes;
+      if (path.startsWith('/api/v1/admin/client-apps/android/releases')) return data.clientReleases;
       throw new Error(`unstubbed GET ${path}`);
     },
     async post(path, body) {
@@ -171,6 +207,10 @@ export function stubApi() {
     async del(path) {
       this.calls.push(['DELETE', path]);
       return { ok: true };
+    },
+    async uploadFile(path, file) {
+      this.calls.push(['UPLOAD', path, file]);
+      return { release: { buildNumber: 20 }, artifact: { abi: 'arm64-v8a', sha256: 'a'.repeat(64) } };
     },
   };
 }

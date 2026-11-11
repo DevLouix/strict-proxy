@@ -19,6 +19,8 @@
 #   APP_BUILD_NUMBER            version code; must increase          (default 1)
 #   STRICT_ANDROID_APP_ID       expected application id             (default com.strictproxy.client)
 #   OUT_DIR                     artifact directory                  (default build/dist)
+#   SPLIT_ABI                   build one APK per ABI (default 1). Set 0 for a
+#                               single universal APK
 #   SKIP_LIBBOX=1               reuse an existing libbox.aar
 #   ANDROID_KEYSTORE_PATH / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS
 #   ANDROID_KEY_PASSWORD        (defaults to the keystore password)
@@ -73,7 +75,16 @@ flutter create --platforms=android .
 "${CLIENT_DIR}/tool/configure-android-host.sh"
 flutter pub get
 
-flutter build apk --release \
+# A universal APK carries the native engine for every ABI (the engine is the
+# bulk of the download). Splitting keeps each installation to the one CPU it
+# runs on; the in-app updater asks the controller for its own ABI.
+SPLIT_ABI="${SPLIT_ABI:-1}"
+SPLIT_ARGS=()
+if [[ "$SPLIT_ABI" == "1" ]]; then
+  SPLIT_ARGS+=(--split-per-abi)
+fi
+
+flutter build apk --release "${SPLIT_ARGS[@]}" \
   --build-name "$APP_VERSION" \
   --build-number "$APP_BUILD_NUMBER" \
   --dart-define=STRICT_ENV=production \
@@ -85,14 +96,35 @@ flutter build apk --release \
   --dart-define=APP_BUILD_NUMBER="$APP_BUILD_NUMBER"
 
 mkdir -p "$OUT_DIR"
-APK_OUT="${OUT_DIR}/strict-proxy-${APP_VERSION}-${APP_BUILD_NUMBER}.apk"
-"${CLIENT_DIR}/tool/sign-android-apk.sh" \
-  "${CLIENT_DIR}/build/app/outputs/flutter-apk/app-release.apk" \
-  "$APK_OUT"
+shopt -s nullglob
 
-# Refuse to hand over an APK with the placeholder id, a raw label, or no engine.
-"${CLIENT_DIR}/tool/verify-android-apk.sh" "$APK_OUT"
-
-echo
-echo "Release APK ready: $APK_OUT"
-echo "Install: adb install -r \"$APK_OUT\""
+# Sign and check every artifact before announcing success: a release with one
+# unsigned or engine-less ABI is worse than a failed build, because the phone
+# that matches it cannot update.
+if [[ "$SPLIT_ABI" == "1" ]]; then
+  APKS=(build/app/outputs/flutter-apk/app-*-release.apk)
+  if [[ ${#APKS[@]} -eq 0 ]]; then
+    echo 'flutter --split-per-abi produced no APKs' >&2
+    exit 1
+  fi
+  for apk in "${APKS[@]}"; do
+    name="$(basename "$apk")"
+    abi="${name#app-}"
+    abi="${abi%-release.apk}"
+    out="${OUT_DIR}/strict-proxy-${APP_VERSION}-${APP_BUILD_NUMBER}-${abi}.apk"
+    "${CLIENT_DIR}/tool/sign-android-apk.sh" "$apk" "$out"
+    "${CLIENT_DIR}/tool/verify-android-apk.sh" "$out"
+    echo "Release APK ready: $out (${abi})"
+  done
+  echo
+  echo "Install the APK matching the device: adb install -r \"${OUT_DIR}/strict-proxy-${APP_VERSION}-${APP_BUILD_NUMBER}-arm64-v8a.apk\""
+else
+  APK_OUT="${OUT_DIR}/strict-proxy-${APP_VERSION}-${APP_BUILD_NUMBER}.apk"
+  "${CLIENT_DIR}/tool/sign-android-apk.sh" \
+    "${CLIENT_DIR}/build/app/outputs/flutter-apk/app-release.apk" \
+    "$APK_OUT"
+  "${CLIENT_DIR}/tool/verify-android-apk.sh" "$APK_OUT"
+  echo
+  echo "Release APK ready: $APK_OUT"
+  echo "Install: adb install -r \"$APK_OUT\""
+fi

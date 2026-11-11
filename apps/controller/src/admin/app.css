@@ -307,6 +307,8 @@ dialog .dlg-foot { padding: 14px 18px; border-top: 1px solid var(--border); disp
 .copy {
   font-family: var(--mono);
   font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;

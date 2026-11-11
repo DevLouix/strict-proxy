@@ -17,17 +17,20 @@ before(() => {
 let dom: any;
 let views: any;
 let domHelpers: any;
+let clientApps: any;
 
 test('the dashboard modules import cleanly', async () => {
   installDomShim();
   views = await import('../../apps/controller/src/admin/views.js');
   domHelpers = await import('../../apps/controller/src/admin/dom.js');
+  clientApps = await import('../../apps/controller/src/admin/client-apps-view.js');
   assert.equal(typeof views.overviewView, 'function');
   assert.equal(typeof views.usersView, 'function');
   assert.equal(typeof views.nodesView, 'function');
   assert.equal(typeof views.enrollmentsView, 'function');
   assert.equal(typeof views.paymentsView, 'function');
   assert.equal(typeof views.usageView, 'function');
+  assert.equal(typeof clientApps.clientAppsView, 'function');
   void dom;
 });
 
@@ -95,6 +98,18 @@ for (const [name, fnName, needle] of RENDER_CASES) {
   });
 }
 
+test('clientAppsView renders releases, the upload form and crash reports', async () => {
+  const api = stubApi();
+  const node = await clientApps.clientAppsView(api);
+  const text = node.text();
+  assert.ok(text.includes('Client apps'));
+  assert.ok(text.includes('Upload a build'));
+  assert.ok(text.includes('Home screen fix'), 'release notes should be shown');
+  assert.ok(text.includes('arm64-v8a'), 'the uploaded APK ABI should be listed');
+  assert.ok(text.includes('Unhandled Exception'), 'crash reports should be listed');
+  assert.ok(text.includes('serving build 19'), 'the currently served build should be visible');
+});
+
 test('usersView hides disabled accounts by default', async () => {
   const api = stubApi();
   const node = await views.usersView(api, () => {});
@@ -139,6 +154,20 @@ test('every button handler in every view executes without throwing', async () =>
     }
   }
   assert.ok(clicked >= 5, `expected several interactive buttons, fired ${clicked}`);
+});
+
+test('every Client apps control executes without throwing', async () => {
+  const api = stubApi();
+  const node = await clientApps.clientAppsView(api);
+  let clicked = 0;
+  for (const el of node.walk()) {
+    if (el.tagName === 'BUTTON' && el._listeners.has('click')) {
+      el.dispatch('click');
+      clicked++;
+    }
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(clicked >= 3, `expected upload/publish/delete controls, fired ${clicked}`);
 });
 
 test('refresh buttons re-fetch from the API', async () => {

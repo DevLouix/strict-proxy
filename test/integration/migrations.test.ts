@@ -14,6 +14,9 @@ import { createHarness, type Harness } from '../helpers/harness.js';
 /** Tables the application depends on. */
 const EXPECTED_TABLES = [
   'billing_checkouts',
+  'client_crash_reports',
+  'client_release_artifacts',
+  'client_releases',
   'platform_settings',
   'password_reset_tokens',
   'devices',

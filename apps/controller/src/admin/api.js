@@ -144,6 +144,49 @@ export class ApiClient {
     return send('PUT', path, { body, token: this.token() });
   }
 
+  /**
+   * Uploads an APK as the raw request body.
+   *
+   * The release endpoint takes the file itself, not JSON or multipart, so a
+   * 60–90 MB build is not inflated by encoding. A 401 is retried once after a
+   * token refresh, exactly like the JSON helpers.
+   */
+  async uploadFile(path, file) {
+    const attempt = async (token) => {
+      const res = await fetch(path, {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/vnd.android.package-archive',
+        },
+        body: file,
+      });
+      const raw = await res.text();
+      let parsed = null;
+      if (raw) {
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          parsed = { error: raw };
+        }
+      }
+      return { res, parsed };
+    };
+
+    let result = await attempt(this.token());
+    if (result.res.status === 401) {
+      const refreshed = await tryRefresh();
+      if (refreshed) {
+        result = await attempt(refreshed);
+      } else {
+        clearSession();
+        onUnauthorized();
+      }
+    }
+    if (!result.res.ok) throw new ApiError(result.res.status, result.parsed);
+    return result.parsed;
+  }
+
   del(path) {
     return send('DELETE', path, { token: this.token() });
   }

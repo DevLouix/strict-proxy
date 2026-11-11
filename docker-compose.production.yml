@@ -154,6 +154,9 @@ services:
       CLIENT_ANDROID_BUILD_NUMBER: ${CLIENT_ANDROID_BUILD_NUMBER:-0}
       CLIENT_ANDROID_APK_PATH: ${CLIENT_ANDROID_APK_PATH:-}
       CLIENT_ANDROID_NOTES: ${CLIENT_ANDROID_NOTES:-}
+      # Builds uploaded from the admin dashboard live here. It must be on a
+      # volume, or a redeploy would delete the APK users are being offered.
+      CLIENT_ANDROID_STORAGE_DIR: ${CLIENT_ANDROID_STORAGE_DIR:-/var/lib/strict-proxy/client-releases}
       # Both are documented in .env.docker.example and both were previously
       # never forwarded into the container: settings secrets silently fell back
       # to a key derived from JWT_SECRET, and outbound mail linked to
@@ -170,6 +173,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - clientreleases:/var/lib/strict-proxy/client-releases
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8080) + '/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: ${CONTROLLER_HEALTH_INTERVAL:-10s}
@@ -300,6 +305,8 @@ volumes:
     name: ${REDIS_DATA_VOLUME:-strict-proxy-redisdata}
   nodeidentity:
     name: ${NODE_IDENTITY_VOLUME:-strict-proxy-nodeidentity}
+  clientreleases:
+    name: ${CLIENT_RELEASES_VOLUME:-strict-proxy-client-releases}
   caddyconfig:
     name: ${EDGE_CONFIG_VOLUME:-strict-proxy-caddyconfig}
   caddydata:

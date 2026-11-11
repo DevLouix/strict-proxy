@@ -104,6 +104,8 @@ export interface TestEnvOverrides {
   billingCurrency?: string;
   billingStandardAmountMinor?: number;
   billingProAmountMinor?: number;
+  /** Where dashboard-uploaded APKs are stored; tests use a temp directory. */
+  clientAndroidStorageDir?: string;
 }
 
 /**
@@ -142,4 +144,5 @@ export function applyTestEnv(infra: Infra, overrides: TestEnvOverrides = {}): vo
   process.env.BILLING_CURRENCY = overrides.billingCurrency ?? 'NGN';
   process.env.STANDARD_TIER_AMOUNT_MINOR = String(overrides.billingStandardAmountMinor ?? 250_000);
   process.env.PRO_TIER_AMOUNT_MINOR = String(overrides.billingProAmountMinor ?? 750_000);
+  process.env.CLIENT_ANDROID_STORAGE_DIR = overrides.clientAndroidStorageDir ?? 'var/client-releases';
 }
