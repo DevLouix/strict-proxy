@@ -453,6 +453,143 @@ function showRotatedEnrollmentToken({ token, expiresAt }) {
   dlg.showModal();
 }
 
+/**
+ * Edits the fleet-facing fields of a node. Credentials, status and REALITY keys
+ * are deliberately not here: draining has its own control, and rotating the
+ * signing material is a separate, audited action.
+ */
+function editNodeDialog(api, node, onSaved) {
+  const hostname = h('input', { value: node.hostname });
+  const region = h('input', { value: node.region });
+  const label = h('input', { value: node.label ?? '', placeholder: 'Optional display label' });
+  const publicIp = h('input', { value: node.publicIp, placeholder: '203.0.113.10' });
+  const tunnelPort = h('input', { type: 'number', min: '1', max: '65535', value: String(node.tunnelPort) });
+
+  const dlg = h('dialog', {},
+    h('div', { class: 'dlg-head' }, h('h3', {}, `Edit ${node.hostname}`)),
+    h('div', { class: 'dlg-body' },
+      h('label', { class: 'field' }, h('span', {}, 'Hostname'), hostname),
+      h('label', { class: 'field' }, h('span', {}, 'Region'), region),
+      h('label', { class: 'field' }, h('span', {}, 'Label'), label),
+      h('label', { class: 'field' }, h('span', {}, 'Public IP'), publicIp),
+      h('label', { class: 'field' }, h('span', {}, 'Tunnel port'), tunnelPort),
+      h('p', { class: 'muted small' },
+        'Saving a public IP marks it as admin-set, which overrides auto-detection until the node reports a new address.'),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
+      h('button', {
+        class: 'btn primary',
+        onClick: async () => {
+          const nextHostname = hostname.value.trim();
+          const nextRegion = region.value.trim();
+          const nextIp = publicIp.value.trim();
+          const nextPort = Number(tunnelPort.value);
+          if (!nextHostname || !nextRegion) {
+            toast('Hostname and region are required', 'err');
+            return;
+          }
+          if (!nextIp) {
+            toast('Public IP is required', 'err');
+            return;
+          }
+          if (!Number.isInteger(nextPort) || nextPort < 1 || nextPort > 65535) {
+            toast('Tunnel port must be an integer from 1 to 65535', 'err');
+            return;
+          }
+          try {
+            await api.patch(`/api/v1/admin/nodes/${node.id}`, {
+              hostname: nextHostname,
+              region: nextRegion,
+              label: label.value.trim() || null,
+              publicIp: nextIp,
+              tunnelPort: nextPort,
+            });
+            dlg.close();
+            toast('Node updated');
+            await onSaved();
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        },
+      }, 'Save'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+}
+
+/** Shows a freshly issued node secret exactly once, with the update steps. */
+function showRotatedNodeSecret({ hostname, secret, previousValidUntil }) {
+  const dlg = h('dialog', {},
+    h('div', { class: 'dlg-head' }, h('h3', {}, `New secret — ${hostname}`)),
+    h('div', { class: 'dlg-body' },
+      h('p', { class: 'muted small' }, 'Shown once. Copy it now — it cannot be read back.'),
+      h('div', { class: 'copy' }, secret),
+      h('button', { class: 'btn sm', onClick: () => copyText(secret) }, 'Copy secret'),
+      h('p', { class: 'muted small' },
+        previousValidUntil
+          ? `The old secret stops working ${date(previousValidUntil)}. Set NODE_HMAC_SECRET on the node (or in its identity file) and restart the agent before then.`
+          : 'The old secret stopped working immediately. Set NODE_HMAC_SECRET on the node (or in its identity file) and restart the agent.'),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+}
+
+/**
+ * Rotates a node's HMAC secret in place. The old secret keeps working for the
+ * chosen grace window so the operator can update the agent and restart it
+ * without the node going offline in between; zero is for a leaked secret.
+ */
+function rotateNodeSecretDialog(api, node, onRotated) {
+  const grace = h('input', { type: 'number', min: '0', max: '168', value: '24' });
+  const submit = h('button', { class: 'btn danger' }, 'Rotate secret');
+
+  const dlg = h('dialog', {},
+    h('div', { class: 'dlg-head' }, h('h3', {}, `Rotate secret — ${node.hostname}`)),
+    h('div', { class: 'dlg-body' },
+      h('p', {}, 'Issuing a new HMAC secret invalidates the current one after a grace window.'),
+      h('label', { class: 'field' }, h('span', {}, 'Hours the old secret keeps working (0–168)'), grace),
+      h('p', { class: 'muted small' },
+        'Use 0 if the current secret has already leaked. The new secret is shown once.'),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
+      submit,
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+
+  submit.addEventListener('click', async () => {
+    const hours = Number(grace.value);
+    if (!Number.isFinite(hours) || hours < 0 || hours > 168) {
+      toast('Grace must be between 0 and 168 hours', 'err');
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = 'Rotating…';
+    try {
+      const res = await api.post(`/api/v1/admin/nodes/${node.id}/rotate-secret`, { graceHours: hours });
+      dlg.close();
+      showRotatedNodeSecret({ hostname: node.hostname, secret: res.secret, previousValidUntil: res.previousValidUntil });
+      toast('Node secret rotated');
+      await onRotated();
+    } catch (err) {
+      toast(err.message, 'err');
+      submit.disabled = false;
+      submit.textContent = 'Rotate secret';
+    }
+  });
+}
+
 export async function nodesView(api) {
   const host = h('div', {});
   let rows = [];
@@ -519,6 +656,10 @@ export async function nodesView(api) {
                 h('td', { class: 'small muted', title: date(n.lastHeartbeatAt) }, ago(n.lastHeartbeatAt)),
                 h('td', { class: 'small muted mono' }, n.engineVersion),
                 h('td', { class: 'actions' },
+                  h('button', { class: 'btn sm', onClick: () => editNodeDialog(api, n, load) }, 'Edit'),
+                  ' ',
+                  h('button', { class: 'btn sm', onClick: () => rotateNodeSecretDialog(api, n, load) }, 'Rotate secret'),
+                  ' ',
                   n.status === 'draining'
                     ? h('button', {
                         class: 'btn sm',
@@ -657,10 +798,7 @@ export async function enrollmentsView(api) {
     );
   }
 
-  // Reuse the node view's dialog so token issuance lives in one place.
   mount(host, h('div', { class: 'empty' }, h('span', { class: 'spinner' })));
-  const nodesNode = await nodesView(api);
-  void nodesNode;
   await load();
   return host;
 }

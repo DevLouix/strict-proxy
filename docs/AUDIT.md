@@ -29,6 +29,8 @@ Two classes of gap stand out:
 | Users had no detail view | **Details** in the users table opens the subscription, devices, node credentials, payments, recent operator actions, and an issue-password-reset control. |
 | Client ignored session expiry | `ControllerApi.onSessionExpired` fires when a 401 cannot be refreshed; `AuthController` clears local tokens and leaves the authenticated state, so the gate shows sign-in. |
 | Signing out left the tunnel up | The app-level auth listener disconnects the engine whenever the session goes from authenticated to unauthenticated — on explicit logout, account deletion, or expiry. |
+| Nodes could only be drained | **Edit** in the fleet table now changes hostname, region, label, public IP and tunnel port, and records the change in the audit log. |
+| A node secret leak meant re-enrollment | **Rotate secret** issues a new HMAC secret in place, with an optional grace window during which the old one still verifies. The agent now names rotation in its 401 error, and the install script repairs a broken VPS resolver before enrolling. |
 
 ## Admin panel
 
@@ -52,10 +54,8 @@ Two classes of gap stand out:
 - **Per-user and per-node bandwidth analytics.** `usage_rollups` and
   `node_credentials.bytes_used` exist; the Usage tab shows load score and
   checkout counts instead.
-- **Node editing and history.** `PATCH /admin/nodes/:id` accepts hostname,
-  region, label, public IP and tunnel port; the UI exposes only drain/resume.
-- **Signing-key rotation.** The node HMAC secret has no in-place rotation, so a
-  leak means re-enrollment.
+- **Node history.** Nodes can now be edited, but there is no per-node timeline
+  of changes; the audit log records who changed one, not a side-by-side diff.
 - **Crash triage.** Crashes are listed with no grouping, filtering, or
   acknowledge/resolve state.
 - **Per-ABI withdraw and staged rollout.** Publishing and withdrawing act on a
@@ -110,7 +110,9 @@ Two classes of gap stand out:
 3. **Admin audit log** for every destructive action — done.
 4. **Session-expiry redirect and disconnect-on-logout** — done.
 5. **Admin user detail drawer** (devices, credentials, payments, password reset) — done.
-6. **Client self-service bundle:** device list and revocation, receipts, change
+6. **Node editing and in-place HMAC rotation** — done.
+7. **Admin 2FA / IP allowlist / session revocation** — open.
+8. **Client self-service bundle:** device list and revocation, receipts, change
    password, coupon field, pending-checkout prompt.
 
 ## Verification

@@ -118,7 +118,11 @@ jobs:
           cp -r node_modules release/node_modules
           cp package.json package-lock.json tsconfig.base.json release/
           tar -czf strict-proxy-node-agent-${GITHUB_SHA}.tar.gz -C release node-agent packages node_modules package.json package-lock.json tsconfig.base.json
+      # Artifact storage is a convenience: exhausting the account quota must not
+      # turn a passing build into a failed one. The archive is reproducible from
+      # the same commit, and release/package publishing does not depend on it.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: strict-proxy-node-agent-${{ github.sha }}
           path: strict-proxy-node-agent-${{ github.sha }}.tar.gz

@@ -191,7 +191,10 @@ jobs:
           } > "$file"
           cat "$file"
 
+      # The image is already published; this file only saves an operator a
+      # lookup. Exhausted artifact quota must not fail the release.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: node-agent-image-${{ github.sha }}
           path: dist/node-agent-image-${{ github.sha }}.txt

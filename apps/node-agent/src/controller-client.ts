@@ -15,7 +15,16 @@ export class ControllerClient {
     };
     if (body !== undefined) headers['content-type'] = 'application/json';
     const res = await fetch(`${this.cfg.controllerBaseUrl}${path}`, { method, headers, body: body === undefined ? undefined : bodyStr });
-    if (!res.ok) throw new Error(`controller ${method} ${path} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      const detail = (await res.text()).slice(0, 300);
+      if (res.status === 401) {
+        throw new Error(
+          `controller ${method} ${path} -> 401: ${detail}. ` +
+            'If this node\'s secret was rotated, set NODE_HMAC_SECRET to the new value and restart the agent.',
+        );
+      }
+      throw new Error(`controller ${method} ${path} -> ${res.status}: ${detail}`);
+    }
     return (await res.json()) as T;
   }
 

@@ -70,8 +70,12 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
  * Requires a valid HMAC-signed internal request from a registered node.
  * Signature covers method, path, timestamp, nonce and raw body hash; nonce is
  * single-use via Redis to block replays.
+ *
+ * `lookupSecrets` returns every secret currently valid for the node: the active
+ * one, plus the previous one while a rotation grace window is open. Returning a
+ * list here is what lets a secret be rotated without re-enrolling the node.
  */
-export function requireNodeHmac(cfg: ControllerConfig, db: Db, lookupSecret: (nodeId: string) => Promise<string | null>) {
+export function requireNodeHmac(cfg: ControllerConfig, db: Db, lookupSecrets: (nodeId: string) => Promise<string[] | null>) {
   return (req: Request, res: Response, next: NextFunction): void => {
     void (async () => {
       const nodeId = req.header('x-node-id');
@@ -89,8 +93,8 @@ export function requireNodeHmac(cfg: ControllerConfig, db: Db, lookupSecret: (no
         return;
       }
 
-      const secret = await lookupSecret(nodeId);
-      if (!secret) {
+      const secrets = await lookupSecrets(nodeId);
+      if (!secrets || secrets.length === 0) {
         res.status(401).json({ error: 'unknown node', code: 'NODE_UNKNOWN' });
         return;
       }
@@ -98,8 +102,9 @@ export function requireNodeHmac(cfg: ControllerConfig, db: Db, lookupSecret: (no
       const raw = (req as Request & { rawBody?: Buffer }).rawBody;
       const body = raw ? raw.toString('utf8') : '';
       const signingString = buildHmacSigningString({ method: req.method, path: req.path, timestamp, nonce, body });
-      const expected = hmacSign(secret, signingString);
-      if (!safeEqual(expected, signature)) {
+      // Accept the active secret or a not-yet-expired previous one, which is
+      // what makes rotation possible without a simultaneous node restart.
+      if (!secrets.some((secret) => safeEqual(hmacSign(secret, signingString), signature))) {
         res.status(401).json({ error: 'bad signature', code: 'NODE_BAD_SIGNATURE' });
         return;
       }

@@ -13,6 +13,7 @@ import { createHarness, type Harness } from '../helpers/harness.js';
 
 /** Tables the application depends on. */
 const EXPECTED_TABLES = [
+  'admin_audit_log',
   'billing_checkouts',
   'client_crash_reports',
   'client_release_artifacts',

@@ -210,6 +210,10 @@ traffic share one IP and one failure domain.
 3. Paste the node section of `.env.dokploy.example` into its environment and set
    `NODE_CONTROLLER_URL=https://api.example.com`, `NODE_ENROLLMENT_TOKEN`,
    `NODE_HOSTNAME` (the VPS's public hostname or IP), and `NODE_LABEL`.
+
+   If you co-locate a node with the controller, Dokploy's Traefik already owns
+   `443`. Set `NODE_TUNNEL_PORT=8443` on the node and open `8443/tcp` **and**
+   `8443/udp`; the agent records the port at enrollment and clients use it.
 4. Deploy. On first boot the agent exchanges the token for a permanent identity
    (node id, HMAC secret, REALITY keypair), stored in the `nodeidentity` volume.
 5. The node appears under **Admin → Nodes** as `offline`, then `online` within
@@ -352,6 +356,12 @@ changes on their next sync; redeploy them only when the agent itself changed.
 it afterwards. Rotating the signing key invalidates every installed client;
 only do it when you can ship new builds.
 
+A node's HMAC secret is rotated in **Admin → Nodes → Rotate secret**, not in
+Compose. The new secret is shown once; the old one keeps authenticating for the
+grace window you choose (24 hours by default, 0 for a leaked secret). Put the
+new value in that node's `NODE_HMAC_SECRET` (or its identity file) and restart
+the agent before the window closes. No re-enrollment is needed.
+
 **Scaling.** One controller is intended. Additional capacity comes from adding
 nodes, not controller replicas: the periodic sweep and rate limits assume a
 single process, and there is no distributed lock.
@@ -384,6 +394,8 @@ single process, and there is no distributed lock.
 | `database is not ready; retrying migration` then failure | password mismatch, or URL points at `localhost` | make `CONTROLLER_DATABASE_URL` use `postgres` and the same password |
 | `/readyz` fails, `/healthz` passes | Redis unreachable | check `REDIS_PASSWORD` matches `CONTROLLER_REDIS_URL` |
 | Node stays `offline` | cannot reach the controller, or enrollment failed | container logs on the node VPS; confirm `NODE_CONTROLLER_URL` is public HTTPS |
+| Node logs "Temporary failure resolving" | the VPS resolver cannot answer for the controller | `install-node.sh` repairs it with `1.1.1.1`/`8.8.8.8` and backs up the old file to `/etc/resolv.conf.strict-proxy.bak`; for Docker add `dns: [1.1.1.1, 8.8.8.8]` to the node service |
+| Node logs 401 `NODE_BAD_SIGNATURE` | its HMAC secret was rotated and the agent was not updated | paste the new secret into the node and restart before the grace window ends |
 | Node enrollment token rejected | expired or already used | rotate it in **Enrollments** if unused; otherwise issue a new one (single-use, default 30 min) |
 | Client says "tampered configuration" | client built with a different public key | rebuild with the current key and `SIGNING_KEY_ID` |
 | Client connects to nothing / native SDK error | APK built without `libbox.aar` | use the release workflow, which refuses to build without it |

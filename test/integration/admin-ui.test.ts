@@ -128,6 +128,8 @@ test('every mutating endpoint the dashboard calls accepts an admin', async () =>
     await h.request('PATCH', `/api/v1/admin/users/${user.id}/subscription`, { token: admin, body: { tier: 'standard', status: 'active' } }),
     await h.request('PATCH', `/api/v1/admin/nodes/${node.id}`, { token: admin, body: { status: 'draining' } }),
     await h.request('PATCH', `/api/v1/admin/nodes/${node.id}`, { token: admin, body: { status: 'online' } }),
+    await h.request('PATCH', `/api/v1/admin/nodes/${node.id}`, { token: admin, body: { hostname: 'ui-node.test', region: 'ui-region', label: 'UI node', publicIp: '203.0.113.90', tunnelPort: 8443 } }),
+    await h.request('POST', `/api/v1/admin/nodes/${node.id}/rotate-secret`, { token: admin, body: { graceHours: 1 } }),
     await h.request('POST', '/api/v1/admin/node-enrollments', { token: admin, body: { region: 'ui-test', ttlMinutes: 10 } }),
   ];
   for (const res of results) {

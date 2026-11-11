@@ -162,6 +162,14 @@ export const nodes = pgTable(
     engineVersion: text('engine_version').notNull().default('unknown'),
     /** HMAC secret for internal node API calls. Issued at registration. */
     hmacSecret: text('hmac_secret').notNull(),
+    /**
+     * The previous secret, honored until `previous_hmac_secret_expires_at`.
+     * Without a grace window, rotation would need the controller and the node
+     * to switch at the same instant; this lets the operator update the node and
+     * restart it without dropping it out of the fleet in between.
+     */
+    previousHmacSecret: text('previous_hmac_secret'),
+    previousHmacSecretExpiresAt: timestamp('previous_hmac_secret_expires_at', { withTimezone: true }),
     lastHeartbeatAt: timestamp('last_heartbeat_at', { withTimezone: true }),
     registeredAt: timestamp('registered_at', { withTimezone: true }).notNull().defaultNow(),
   },

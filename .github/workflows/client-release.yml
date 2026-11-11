@@ -159,7 +159,10 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./apps/client/tool/build-release-android.sh
 
+      # The APK is attached to the GitHub release below, so a full artifact
+      # quota should not fail a signed build that already succeeded.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: strict-proxy-android-${{ inputs.app_version }}-${{ inputs.app_build_number }}
           path: apps/client/build/dist/*.apk

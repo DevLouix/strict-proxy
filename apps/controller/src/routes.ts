@@ -613,6 +613,56 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ node: updated });
   }));
 
+  /**
+   * Rotates a node's HMAC secret in place, without re-enrollment.
+   *
+   * The previous secret keeps verifying for `graceHours` so the operator can
+   * update the agent and restart it without the node leaving the fleet in
+   * between. `graceHours: 0` retires it immediately, which is what a secret
+   * believed to be leaked needs. The new secret is returned once and is never
+   * exposed by a GET route or written to the audit log.
+   */
+  router.post('/api/v1/admin/nodes/:nodeId/rotate-secret', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const nodeId = req.params.nodeId;
+    if (typeof nodeId !== 'string' || nodeId.length === 0) {
+      res.status(400).json({ error: 'nodeId is required', code: 'VALIDATION' });
+      return;
+    }
+    const body = req.body as { graceHours?: number };
+    const graceHours = Number(body.graceHours ?? 24);
+    if (!Number.isFinite(graceHours) || graceHours < 0 || graceHours > 168) {
+      res.status(400).json({ error: 'graceHours must be between 0 and 168', code: 'VALIDATION' });
+      return;
+    }
+    const [node] = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, hmacSecret: nodes.hmacSecret }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+    if (!node) {
+      res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
+      return;
+    }
+
+    const secret = randomBytes(32).toString('base64url');
+    const previousValidUntil = graceHours > 0 ? new Date(Date.now() + graceHours * 3_600_000) : null;
+    await ctx.db.update(nodes).set({
+      hmacSecret: secret,
+      previousHmacSecret: graceHours > 0 ? node.hmacSecret : null,
+      previousHmacSecretExpiresAt: previousValidUntil,
+    }).where(eq(nodes.id, nodeId));
+
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'node.secret_rotated',
+      targetType: 'node',
+      targetId: nodeId,
+      summary: `HMAC secret rotated for ${node.hostname}`,
+      metadata: { graceHours, previousValidUntil: previousValidUntil ? previousValidUntil.toISOString() : null },
+    });
+    res.status(201).json({
+      nodeId,
+      secret,
+      previousValidUntil: previousValidUntil ? previousValidUntil.toISOString() : null,
+    });
+  }));
+
   router.delete('/api/v1/admin/nodes/:nodeId', ...requireAdministrator, asyncHandler(async (req, res) => {
     const nodeId = req.params.nodeId;
     if (typeof nodeId !== 'string' || nodeId.length === 0) {
@@ -713,8 +763,17 @@ export function buildRouter(ctx: Ctx): Router {
 
   // -- node internal API (HMAC) ----------------------------------------------
   const requireNode = requireNodeHmac(ctx.cfg, ctx.db, async (nodeId) => {
-    const [row] = await ctx.db.select({ hmacSecret: nodes.hmacSecret }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
-    return row ? row.hmacSecret : null;
+    const [row] = await ctx.db.select({
+      hmacSecret: nodes.hmacSecret,
+      previousHmacSecret: nodes.previousHmacSecret,
+      previousHmacSecretExpiresAt: nodes.previousHmacSecretExpiresAt,
+    }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+    if (!row) return null;
+    const secrets = [row.hmacSecret];
+    if (row.previousHmacSecret && row.previousHmacSecretExpiresAt && row.previousHmacSecretExpiresAt.getTime() > Date.now()) {
+      secrets.push(row.previousHmacSecret);
+    }
+    return secrets;
   });
 
   router.get(

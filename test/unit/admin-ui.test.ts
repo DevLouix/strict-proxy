@@ -296,6 +296,54 @@ test('the enroll button opens a dialog with the required fields', async () => {
   assert.ok(dialog.text().includes('TTL'));
 });
 
+test('a node can be edited without re-enrolling it', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.nodesView(api, () => {});
+  const edit = [...node.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Edit');
+  assert.ok(edit, 'each node row should expose Edit');
+  edit.dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c) => c instanceof FakeElement && c.tagName === 'DIALOG');
+  assert.ok(dialog, 'Edit should open a dialog');
+  assert.ok(dialog.text().includes('Hostname'));
+  assert.ok(dialog.text().includes('Tunnel port'));
+
+  const save = [...dialog.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Save');
+  assert.ok(save, 'the edit dialog should save');
+  save.dispatch('click');
+
+  await new Promise((r) => setImmediate(r));
+  const patch = api.calls.find((c) => c[0] === 'PATCH' && c[1] === '/api/v1/admin/nodes/n1');
+  assert.ok(patch, 'saving should PATCH the node');
+  assert.equal(patch[2].hostname, 'fra-1');
+  assert.equal(patch[2].tunnelPort, 443);
+});
+
+test('a node secret can be rotated from the dashboard', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.nodesView(api, () => {});
+  const rotate = [...node.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Rotate secret');
+  assert.ok(rotate, 'each node row should expose Rotate secret');
+  rotate.dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c) => c instanceof FakeElement && c.tagName === 'DIALOG');
+  assert.ok(dialog, 'Rotate secret should open a dialog');
+  assert.ok(dialog.text().includes('Hours the old secret keeps working'));
+
+  const submit = [...dialog.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Rotate secret');
+  assert.ok(submit, 'the dialog should confirm rotation');
+  submit.dispatch('click');
+
+  await new Promise((r) => setImmediate(r));
+  const post = api.calls.find((c) => c[0] === 'POST' && c[1] === '/api/v1/admin/nodes/n1/rotate-secret');
+  assert.ok(post, 'confirming should POST to the rotate-secret route');
+  assert.equal(post[2].graceHours, 24);
+});
+
 test('an active enrollment token can be rotated from the dashboard', async () => {
   globalThis.document.body.replaceChildren();
 
