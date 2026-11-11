@@ -212,7 +212,16 @@ jobs:
           CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
         run: |
           url="${CLIENT_CONTROLLER_URL%/}/healthz"
-          code="$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" || true)"
+          # One probe turned a momentary blip into a failed release build. The
+          # controller has no cold start, so a short retry window distinguishes
+          # "down" from "one request lost" without hiding a real outage.
+          code=""
+          for attempt in 1 2 3 4 5; do
+            code="$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" || true)"
+            [ "$code" = "200" ] && break
+            echo "attempt ${attempt}: ${code:-no response}; retrying"
+            sleep $((attempt * 5))
+          done
           if [ "$code" != "200" ]; then
             printf 'error: %s answered %s, not 200\n' "$url" "${code:-no response}" >&2
             exit 1
@@ -272,7 +281,15 @@ jobs:
           CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
         run: |
           url="${CLIENT_CONTROLLER_URL%/}/healthz"
-          code="$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" || true)"
+          # Retry briefly: a single lost request should not fail an APK build
+          # that has already passed its signing checks.
+          code=""
+          for attempt in 1 2 3 4 5; do
+            code="$(curl -sS -o /dev/null -m 20 -w '%{http_code}' "$url" || true)"
+            [ "$code" = "200" ] && break
+            echo "attempt ${attempt}: ${code:-no response}; retrying"
+            sleep $((attempt * 5))
+          done
           if [ "$code" != "200" ]; then
             printf 'error: %s answered %s, not 200.\n' "$url" "${code:-no response}" >&2
             echo 'The APK bakes this URL in, so it would not be able to log in.' >&2
