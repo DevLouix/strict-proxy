@@ -201,13 +201,34 @@ jobs:
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
+      # The runner's mirrorlist prefers azure.archive.ubuntu.com, which has
+      # throttled this job to ~15 kB/s and turned a 28 MB install into a
+      # 30-minute stall. The public archive also serves noble-security, so pin
+      # every Ubuntu source to it instead of retrying the throttled host.
+      - name: Use the public Ubuntu archive
+        run: |
+          MIRRORS=/etc/apt/apt-mirrors.txt
+          if [ -f "$MIRRORS" ]; then
+            echo 'https://archive.ubuntu.com/ubuntu/' | sudo tee "$MIRRORS" >/dev/null
+          fi
+          for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$file" ] || continue
+            sudo sed -i -E \
+              -e 's#https?://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+              -e 's#https?://security\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+              "$file"
+          done
+
       - name: Install Linux build dependencies
+        timeout-minutes: 15
         # libsecret-1-dev is required by flutter_secure_storage_linux's CMake
         # check (libsecret-1>=0.18.4); without it the Linux build fails while
         # configuration runs, before any Dart code is compiled.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev
+          APT_OPTIONS=(-o Acquire::ForceIPv4=true -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sudo apt-get update "${APT_OPTIONS[@]}"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_OPTIONS[@]}" \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev
       - name: Verify the controller URL answers
         if: vars.CLIENT_CONTROLLER_URL != ''
         env:
