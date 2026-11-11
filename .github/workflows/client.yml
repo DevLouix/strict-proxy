@@ -138,11 +138,9 @@ jobs:
           test -f "$AAR" || { echo "libbox.aar was not produced" >&2; exit 1; }
           ls -l "$AAR"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: libbox-aar-${{ github.sha }}
-          path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
-          if-no-files-found: error
+      # The AAR is handed to the Android job through the actions cache, not an
+      # uploaded artifact: it is a multi-hundred-megabyte build input, and the
+      # artifact store's quota is shared with the APKs users download.
 
   ios-verification:
     name: Verify the iOS client builds
@@ -308,10 +306,36 @@ jobs:
             /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
-      - uses: actions/download-artifact@v4
+      # Same key the libbox job caches under, so the engine is reused instead of
+      # rebuilt. A cold cache rebuilds it here rather than failing the APK.
+      - name: Restore the native engine
+        id: libbox-cache
+        uses: actions/cache/restore@v4
         with:
-          name: libbox-aar-${{ github.sha }}
-          path: apps/client/packages/libbox_bridge/android/libs
+          path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          key: libbox-${{ hashFiles('apps/client/libbox.ref') }}
+
+      - name: Install the Android NDK for a libbox rebuild
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          MANAGER="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$MANAGER" "ndk;28.0.13004108" >/dev/null 2>&1 || true
+          test -d "$SDK/ndk/28.0.13004108"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        with:
+          go-version: '1.25.5'
+          cache: false
+
+      - name: Rebuild libbox when the cache is cold
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          ./apps/client/tool/build-libbox.sh --android-only
 
       # AGP cannot package a local .aar inside the library module, so the AAR is
       # expanded into classes.jar + jni/<abi>/libbox.so before Gradle runs.
