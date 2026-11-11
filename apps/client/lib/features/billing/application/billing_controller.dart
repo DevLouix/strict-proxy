@@ -50,12 +50,7 @@ class BillingState {
   static const _unset = Object();
 }
 
-final billingProvider = StateNotifierProvider<BillingController, BillingState>((ref) {
-  // Rebuild per account. Without this, signing out and signing in as someone
-  // else would leave the previous account's entitlement visible for a frame.
-  ref.watch(authStateProvider.select((state) => state.email));
-  return BillingController(ref);
-});
+final billingProvider = StateNotifierProvider<BillingController, BillingState>((ref) => BillingController(ref));
 
 class BillingController extends StateNotifier<BillingState> {
   BillingController(this._ref) : super(const BillingState());
@@ -115,6 +110,9 @@ class BillingController extends StateNotifier<BillingState> {
 
   /// Clears the pending checkout once the UI has acted on it.
   void consumeCheckout() => state = state.copyWith(checkout: null);
+
+  /// Drops every loaded value so the next account cannot inherit them.
+  void reset() => state = const BillingState();
 
   void clearError() => state = state.copyWith(error: null);
 }

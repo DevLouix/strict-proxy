@@ -21,6 +21,9 @@ class SubscriptionGate extends ConsumerStatefulWidget {
 }
 
 class _SubscriptionGateState extends ConsumerState<SubscriptionGate> with WidgetsBindingObserver {
+  /// Account whose subscription the current billing state belongs to.
+  String? _entitlementEmail;
+
   @override
   void initState() {
     super.initState();
@@ -53,6 +56,18 @@ class _SubscriptionGateState extends ConsumerState<SubscriptionGate> with Widget
     final auth = ref.watch(authStateProvider);
     // RootGate owns sign-in; a route guard must not replace it with a paywall.
     if (auth.status != AuthStatus.authenticated) return widget.child;
+
+    // Entitlement is per account: drop anything loaded for a previous one
+    // before showing the app, so a sign-out/sign-in cannot leak access.
+    if (_entitlementEmail != auth.email) {
+      _entitlementEmail = auth.email;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.read(billingProvider.notifier).reset();
+        _load();
+      });
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
 
     final billing = ref.watch(billingProvider);
     final subscription = billing.subscription;
