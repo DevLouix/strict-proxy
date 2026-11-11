@@ -55,11 +55,10 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
-      - name: Install Linux and Android build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev openjdk-17-jdk
-
+      # This job only creates host projects and runs Dart tests/analysis; it
+      # does not compile a Linux or Android target. The runner already has the
+      # tools Flutter needs, and apt here has repeatedly hung before any build
+      # step ran.
       - name: Generate Flutter host projects
         working-directory: apps/client
         run: |
@@ -343,10 +342,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install APK signing tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zip
+      # zip is preinstalled on the runner. Avoid apt-get update here too: the
+      # signing script only needs zip, and a stalled mirror must not block an
+      # APK that has already passed its release-configuration checks.
+      - name: Check APK signing tools
+        run: command -v zip
 
       # Flutter, Gradle, the libbox JNI libraries and the signing copy together
       # exceed the runner's free space. Neither the emulator images nor the
