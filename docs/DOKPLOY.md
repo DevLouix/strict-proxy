@@ -316,6 +316,8 @@ new host — use the operator export as well: it writes the durable platform
 state (users, subscriptions, fleet, credentials, billing ledger, settings) to a
 single JSON file, and the matching import restores it transactionally. What is
 and is not included, and the restore drill, is in [BACKUP.md](BACKUP.md).
+Administrators can download and restore the same snapshot from
+**Admin → Backup**, without running curl on the server.
 
 ```bash
 # export (admin access token from /admin)

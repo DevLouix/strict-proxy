@@ -117,11 +117,13 @@ test('every view registered in navigation has a renderer', async () => {
   const settingsSource = await readFile(path.join(ADMIN_DIR, 'settings-view.js'), 'utf8');
   const opsSource = await readFile(path.join(ADMIN_DIR, 'billing-ops-view.js'), 'utf8');
   const clientAppsSource = await readFile(path.join(ADMIN_DIR, 'client-apps-view.js'), 'utf8');
+  const backupSource = await readFile(path.join(ADMIN_DIR, 'backup-view.js'), 'utf8');
   const exported = new Set([
     ...declaredExports(viewsSource),
     ...declaredExports(settingsSource),
     ...declaredExports(opsSource),
     ...declaredExports(clientAppsSource),
+    ...declaredExports(backupSource),
   ]);
 
   for (const [, , , renderer] of entries) {
@@ -130,7 +132,7 @@ test('every view registered in navigation has a renderer', async () => {
 
   // The operator tabs must be reachable rather than defined and forgotten:
   // each one exists because the platform could not do something without it.
-  for (const label of ['Settings', 'Plans', 'Subscriptions', 'Client apps']) {
+  for (const label of ['Settings', 'Plans', 'Subscriptions', 'Client apps', 'Backup']) {
     assert.ok(entries.some(([, , l]) => l === label), `the ${label} tab is missing from navigation`);
   }
 });
@@ -155,6 +157,21 @@ test('client app releases can be uploaded, published and withdrawn from the dash
   for (const abi of ['universal', 'arm64-v8a', 'armeabi-v7a', 'x86_64']) {
     assert.ok(source.includes(`'${abi}'`), `the upload form is missing ABI ${abi}`);
   }
+});
+
+test('the backup screen downloads and restores without a curl step', async () => {
+  const source = await readFile(path.join(ADMIN_DIR, 'backup-view.js'), 'utf8');
+  for (const call of [
+    "api.get('/api/v1/admin/backup/export')",
+    "api.post('/api/v1/admin/backup/import', { ...snapshot, confirm: 'replace' })",
+    "type: 'file'",
+    "accept: 'application/json,.json'",
+  ]) {
+    assert.ok(source.includes(call), `the Backup tab is missing ${call}`);
+  }
+  assert.match(source, /confirm\(/, 'restore must ask before replacing every row');
+  assert.match(source, /SIGNING_PRIVATE_KEY_PEM/, 'the screen must name the signing key the JSON does not carry');
+  assert.match(source, /SETTINGS_ENCRYPTION_KEY/, 'the screen must name the settings key the JSON does not carry');
 });
 
 test('the settings view never renders a stored secret back into the form', async () => {

@@ -7,6 +7,7 @@ import { overviewView, usersView, nodesView, enrollmentsView, paymentsView, usag
 import { settingsView } from './settings-view.js';
 import { plansView, subscriptionsView } from './billing-ops-view.js';
 import { clientAppsView } from './client-apps-view.js';
+import { backupView } from './backup-view.js';
 
 const api = new ApiClient();
 const root = document.getElementById('root');
@@ -21,6 +22,7 @@ const VIEWS = [
   { id: 'plans', label: 'Plans', render: plansView },
   { id: 'subscriptions', label: 'Subscriptions', render: subscriptionsView },
   { id: 'client-apps', label: 'Client apps', render: clientAppsView },
+  { id: 'backup', label: 'Backup', render: backupView },
   { id: 'settings', label: 'Settings', render: settingsView },
 ];
 

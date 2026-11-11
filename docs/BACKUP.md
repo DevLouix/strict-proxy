@@ -26,6 +26,9 @@ produces a platform whose clients reject every signed bundle.
 | `payment_events` | webhook idempotency ledger |
 | `usage_rollups` | bandwidth accounting |
 | `platform_settings` | operator settings; the SMTP password stays encrypted |
+| `client_releases` | Android build metadata, notes and publish state |
+| `client_release_artifacts` | per-ABI file names, sizes and checksums |
+| `client_crash_reports` | crash reports shown on the Client apps screen |
 
 Deliberately **excluded**, because they are credentials rather than state:
 
@@ -46,6 +49,11 @@ Not in the JSON at all, and required for a working restore:
 - Anything on node VPSes: their identity lives in the `nodeidentity` volume. The
   backup carries the controller's half, so a node that still has its volume
   reconnects without re-enrolling.
+- Android APK files. The release and artifact rows are restored, but the files
+  live under `CLIENT_ANDROID_STORAGE_DIR` (`var/client-releases` by default, or
+  the mounted volume in Docker). Copy that directory to the new controller if
+  the platform serves app updates; otherwise the metadata points at files that
+  are not there.
 
 ## Export
 
@@ -58,9 +66,10 @@ curl -fsS -H "Authorization: Bearer $TOKEN" \
   -o "strict-proxy-backup-$(date +%F).json"
 ```
 
-The response is an attachment (`Content-Disposition`), never cached, and
-contains password hashes and node private keys: store it like the database
-itself, encrypted at rest and not in git.
+The same download is available at **Admin → Backup → Download backup**. The
+response is an attachment (`Content-Disposition`), never cached, and contains
+password hashes and node private keys: store it like the database itself,
+encrypted at rest and not in git.
 
 Shape:
 
@@ -99,7 +108,9 @@ curl -fsS -X POST https://api.example.com/api/v1/admin/backup/import \
 
 `confirm: "replace"` is required; without it the endpoint answers
 `400 CONFIRMATION_REQUIRED` and writes nothing. The response reports per-table
-row counts and reminds you that all sessions were replaced.
+row counts and reminds you that all sessions were replaced. The same flow is in
+**Admin → Backup → Restore this backup**; it asks for confirmation, then signs
+the current session out so you can sign in with an account from the snapshot.
 
 Refused with `400 INVALID_BACKUP`, and nothing written:
 
@@ -118,10 +129,12 @@ Refused with `400 INVALID_BACKUP`, and nothing written:
 2. Restore the same `SETTINGS_ENCRYPTION_KEY`; otherwise re-enter the SMTP
    password in **Settings**.
 3. Sign in again: the token you imported with belongs to a replaced user row.
-4. Confirm the fleet: nodes with intact identity volumes return to `online`
+4. If you serve Android updates, copy `CLIENT_ANDROID_STORAGE_DIR` from the old
+   controller. A restored release row without its APK will not download.
+5. Confirm the fleet: nodes with intact identity volumes return to `online`
    within about 30 seconds; nodes without one need a new enrollment token.
-5. `curl -fsS https://api.example.com/readyz` and open `/admin`.
-6. Keep the snapshot used for the restore with the deployment's environment
+6. `curl -fsS https://api.example.com/readyz` and open `/admin`.
+7. Keep the snapshot used for the restore with the deployment's environment
    backup, so the pair can be replayed.
 
 ## Restore drill

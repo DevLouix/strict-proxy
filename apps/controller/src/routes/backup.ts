@@ -36,6 +36,9 @@ const TABLES = [
   'payment_events',
   'usage_rollups',
   'platform_settings',
+  'client_releases',
+  'client_release_artifacts',
+  'client_crash_reports',
 ] as const;
 
 type TableName = (typeof TABLES)[number];
@@ -161,6 +164,9 @@ export function buildBackupRouter(ctx: { db: Db; cfg: ControllerConfig }): Route
               subscriptions,
               nodes,
               platform_settings,
+              client_crash_reports,
+              client_release_artifacts,
+              client_releases,
               users
             RESTART IDENTITY CASCADE
           `);

@@ -58,7 +58,10 @@ test('export contains the fleet and credentials but no sessions or one-time toke
   const res = await exportBackup();
   assert.equal(res.status, 200);
   const tables = Object.keys(res.body.tables);
-  for (const expected of ['users', 'subscriptions', 'nodes', 'node_credentials', 'billing_checkouts', 'payment_events', 'platform_settings']) {
+  for (const expected of [
+    'users', 'subscriptions', 'nodes', 'node_credentials', 'billing_checkouts', 'payment_events', 'platform_settings',
+    'client_releases', 'client_release_artifacts', 'client_crash_reports',
+  ]) {
     assert.ok(tables.includes(expected), `${expected} should be exported`);
   }
   for (const excluded of ['devices', 'refresh_tokens', 'revoked_access_tokens', 'password_reset_tokens']) {
@@ -106,6 +109,47 @@ test('a snapshot restores users, nodes and credentials with their ids intact', a
   assert.ok(creds[0].n >= 0);
   const enrollments = await h.query<any>(`SELECT label FROM node_enrollments`);
   assert.equal(enrollments[0].label, 'Amsterdam');
+});
+
+test('client release metadata and crash reports survive a restore', async () => {
+  const releaseId = '11111111-1111-4111-8111-111111111111';
+  const artifactId = '22222222-2222-4222-8222-222222222222';
+  await h.query(`
+    INSERT INTO client_releases (id, platform, version, build_number, notes, status, published_at)
+    VALUES ('${releaseId}', 'android', '9.9.9', 999, 'restore test', 'published', now())
+  `);
+  await h.query(`
+    INSERT INTO client_release_artifacts (id, release_id, abi, file_name, size_bytes, sha256)
+    VALUES ('${artifactId}', '${releaseId}', 'universal', 'release-999.apk', 12345, '${'a'.repeat(64)}')
+  `);
+  await h.query(`
+    INSERT INTO client_crash_reports (report_id, platform, app_version, build_number, abi, device, os_version, message, stack)
+    VALUES ('crash-restore-1', 'android', '9.9.9', 999, 'universal', 'Test device', '14', 'boom', '#0 main')
+  `);
+
+  const snapshot = await exportBackup();
+  assert.equal(snapshot.status, 200);
+  assert.equal(snapshot.body.counts.client_releases, 1);
+  assert.equal(snapshot.body.counts.client_release_artifacts, 1);
+  assert.equal(snapshot.body.counts.client_crash_reports, 1);
+
+  await h.resetDb();
+  const admin = await h.seedUser('client-importer@example.test', 'admin');
+  const token = (await h.login(admin.email, admin.password, 'admin-device')).accessToken;
+  const restored = await h.request('POST', '/api/v1/admin/backup/import', {
+    token,
+    body: { ...snapshot.body, confirm: 'replace' },
+  });
+  assert.equal(restored.status, 200);
+
+  const releases = await h.query<any>(`SELECT id, version, status FROM client_releases`);
+  assert.deepEqual(releases.map((row) => ({ ...row })), [{ id: releaseId, version: '9.9.9', status: 'published' }]);
+  const artifacts = await h.query<any>(`SELECT release_id, abi, file_name, size_bytes::int AS size_bytes FROM client_release_artifacts`);
+  assert.deepEqual(artifacts.map((row) => ({ ...row })), [
+    { release_id: releaseId, abi: 'universal', file_name: 'release-999.apk', size_bytes: 12345 },
+  ]);
+  const crashes = await h.query<any>(`SELECT report_id, message FROM client_crash_reports`);
+  assert.deepEqual(crashes.map((row) => ({ ...row })), [{ report_id: 'crash-restore-1', message: 'boom' }]);
 });
 
 test('restored password hashes still authenticate', async () => {
