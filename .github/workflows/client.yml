@@ -332,8 +332,20 @@ jobs:
           path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
           key: libbox-${{ hashFiles('apps/client/libbox.ref') }}
 
+      # Trust the file, not the cache-hit flag: a restore can place the AAR
+      # while reporting no hit, and rebuilding it then is pure waste.
+      - name: Check for the native engine
+        id: engine
+        run: |
+          if [ -f apps/client/packages/libbox_bridge/android/libs/libbox.aar ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+            echo 'libbox.aar is present; skipping the engine build'
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install the Android NDK for a libbox rebuild
-        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        if: steps.engine.outputs.present != 'true'
         run: |
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           MANAGER="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
@@ -343,13 +355,13 @@ jobs:
           echo "ANDROID_NDK_ROOT=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v5
-        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        if: steps.engine.outputs.present != 'true'
         with:
           go-version: '1.25.5'
           cache: false
 
-      - name: Rebuild libbox when the cache is cold
-        if: steps.libbox-cache.outputs.cache-hit != 'true'
+      - name: Rebuild libbox when the engine is absent
+        if: steps.engine.outputs.present != 'true'
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
           ./apps/client/tool/build-libbox.sh --android-only
@@ -358,11 +370,15 @@ jobs:
       # and several GB of Go build cache behind. Gradle then needs the same disk
       # for three APKs, the signing copies and its own intermediates, and the
       # runner dies mid-build when it runs out. Keep the AAR; drop the rest.
+      #
+      # `go clean`, not `rm -rf`: the module cache is deliberately read-only, so
+      # rm fails with EACCES halfway through and takes the job down with it.
       - name: Reclaim the engine build space
-        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        if: steps.engine.outputs.present != 'true'
         run: |
-          rm -rf "$HOME/go/pkg/mod" "$HOME/.cache/go-build" "$HOME/go/bin" \
-            apps/client/.cache/sing-box-libbox
+          go clean -modcache || true
+          go clean -cache || true
+          rm -rf apps/client/.cache/sing-box-libbox "$HOME/go/bin"
           df -h /
 
       # AGP cannot package a local .aar inside the library module, so the AAR is
