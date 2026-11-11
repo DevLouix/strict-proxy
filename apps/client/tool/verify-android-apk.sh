@@ -46,11 +46,15 @@ LABEL="$(sed -n "s/^application-label:'\(.*\)'$/\1/p" <<<"$BADGING" | head -1)"
 # tree: AGP silently drops what it cannot see. A split APK only contains its own
 # ABI, so check that every ABI present has the engine — and that at least one
 # does.
-NATIVE_ABIS="$(unzip -l "$APK" | sed -n 's#.*lib/\([^/]*\)/[^/]*\.so$#\1#p' | sort -u)"
+# Read the listing once. Piping `unzip -l` into `grep -q` looks equivalent but
+# fails under `pipefail`: grep exits at the first match, unzip then dies from
+# SIGPIPE, and the pipeline reports 141 even though the entry exists.
+ENTRIES="$(unzip -l "$APK")" || fail "unzip could not read $APK"
+NATIVE_ABIS="$(sed -n 's#.*lib/\([^/]*\)/[^/]*\.so$#\1#p' <<<"$ENTRIES" | sort -u)"
 [[ -n "$NATIVE_ABIS" ]] || fail 'the APK carries no native libraries; the engine was not bundled'
 while IFS= read -r abi; do
   [[ -n "$abi" ]] || continue
-  unzip -l "$APK" | grep -q "lib/$abi/libbox\.so" \
+  grep -q "lib/$abi/libbox\.so" <<<"$ENTRIES" \
     || fail "libbox.so is missing for $abi — the native engine was not bundled (see tool/build-libbox.sh)"
 done <<<"$NATIVE_ABIS"
 
