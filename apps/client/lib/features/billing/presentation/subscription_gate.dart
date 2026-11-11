@@ -21,13 +21,14 @@ class SubscriptionGate extends ConsumerStatefulWidget {
 }
 
 class _SubscriptionGateState extends ConsumerState<SubscriptionGate> with WidgetsBindingObserver {
-  /// Account whose subscription the current billing state belongs to.
-  String? _entitlementEmail;
-
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // The billing provider outlives a session; drop anything a previous account
+    // loaded before deciding access for this one. The gate is rebuilt by
+    // RootGate on every sign-in, so this is the per-account boundary.
+    ref.read(billingProvider.notifier).reset();
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
@@ -46,29 +47,12 @@ class _SubscriptionGateState extends ConsumerState<SubscriptionGate> with Widget
 
   void _load() {
     if (!mounted) return;
-    if (ref.read(authStateProvider).status != AuthStatus.authenticated) return;
     if (ref.read(billingProvider).loading) return;
     ref.read(billingProvider.notifier).load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final auth = ref.watch(authStateProvider);
-    // RootGate owns sign-in; a route guard must not replace it with a paywall.
-    if (auth.status != AuthStatus.authenticated) return widget.child;
-
-    // Entitlement is per account: drop anything loaded for a previous one
-    // before showing the app, so a sign-out/sign-in cannot leak access.
-    if (_entitlementEmail != auth.email) {
-      _entitlementEmail = auth.email;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ref.read(billingProvider.notifier).reset();
-        _load();
-      });
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-
     final billing = ref.watch(billingProvider);
     final subscription = billing.subscription;
 
@@ -76,8 +60,8 @@ class _SubscriptionGateState extends ConsumerState<SubscriptionGate> with Widget
       if (billing.error != null && !billing.loading) {
         return _UnverifiedScreen(onRetry: _load);
       }
-      // The gate can be built before authentication is restored (or before
-      // the first load finishes); schedule one load once the tree is stable.
+      // Do not build the app before the entitlement is known; a paid account
+      // sees only this spinner for the length of one request.
       if (!billing.loading) {
         WidgetsBinding.instance.addPostFrameCallback((_) => _load());
       }

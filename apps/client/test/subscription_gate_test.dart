@@ -1,59 +1,36 @@
 // The entitlement gate is the only thing between a signed-in account and the
-// server list, so these tests pin the three cases that matter: a free account is
+// server list, so these tests pin the cases that matter: a free account is
 // paywalled, an active paid account reaches the app, and a lapsed paid plan does
 // not fall through.
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:strict_proxy_client/core/api_client.dart';
 import 'package:strict_proxy_client/core/billing_models.dart';
-import 'package:strict_proxy_client/core/storage/token_store.dart';
-import 'package:strict_proxy_client/features/auth/presentation/auth_controller.dart';
+import 'package:strict_proxy_client/features/billing/application/billing_controller.dart';
 import 'package:strict_proxy_client/features/billing/presentation/subscription_gate.dart';
 
-class _FakeApi extends ControllerApi {
-  _FakeApi(this.summary);
-
-  final SubscriptionSummary summary;
-
-  @override
-  Future<Map<String, dynamic>> me() async => {
-        'user': {'email': 'user@example.test', 'tier': summary.tier},
-        'devices': <dynamic>[],
-      };
-
-  @override
-  Future<SubscriptionSummary> subscription() async => summary;
-
-  @override
-  Future<UsageReport> usage() async => const UsageReport(totalBytes: 0, credentials: []);
-
-  @override
-  Future<BillingCatalog> billingCatalog() async => const BillingCatalog(
+/// A controller with the state already loaded, so the gate can be exercised
+/// without a network, a session, or secure storage.
+class _FixedBilling extends BillingController {
+  _FixedBilling(Ref ref, SubscriptionSummary summary) : super(ref) {
+    state = BillingState(
+      subscription: summary,
+      catalog: const BillingCatalog(
         gateway: 'openpay',
         currency: 'NGN',
         tiers: [
           TierPrice(tier: 'standard', label: 'Standard', amountMinor: 250000, currency: 'NGN'),
           TierPrice(tier: 'pro', label: 'Pro', amountMinor: 750000, currency: 'NGN'),
         ],
-      );
-
-  @override
-  void dispose() {}
-}
-
-/// Reports a stored session so AuthController restores it as authenticated.
-class _SignedInTokenStore extends TokenStore {
-  @override
-  Future<void> load() async {
-    accessToken = 'test-access-token';
+      ),
+    );
   }
 
   @override
-  Future<void> clear() async {
-    accessToken = null;
-    refreshToken = null;
-  }
+  void reset() {}
+
+  @override
+  Future<void> load() async {}
 }
 
 SubscriptionSummary _summary({String tier = 'free', String status = 'active'}) => SubscriptionSummary(
@@ -68,17 +45,16 @@ SubscriptionSummary _summary({String tier = 'free', String status = 'active'}) =
       pendingCheckout: null,
     );
 
-Widget _gated(_FakeApi api) => ProviderScope(
+Widget _gated(SubscriptionSummary summary) => ProviderScope(
       overrides: [
-        apiProvider.overrideWithValue(api),
-        tokenStoreProvider.overrideWithValue(_SignedInTokenStore()),
+        billingProvider.overrideWith((ref) => _FixedBilling(ref, summary)),
       ],
       child: const MaterialApp(home: SubscriptionGate(child: Text('APP'))),
     );
 
 void main() {
   testWidgets('a free account sees the paywall instead of the app', (tester) async {
-    await tester.pumpWidget(_gated(_FakeApi(_summary(tier: 'free'))));
+    await tester.pumpWidget(_gated(_summary(tier: 'free')));
     await tester.pumpAndSettle();
 
     expect(find.text('Subscription required'), findsOneWidget);
@@ -87,7 +63,7 @@ void main() {
   });
 
   testWidgets('an active paid account reaches the app', (tester) async {
-    await tester.pumpWidget(_gated(_FakeApi(_summary(tier: 'standard'))));
+    await tester.pumpWidget(_gated(_summary(tier: 'standard')));
     await tester.pumpAndSettle();
 
     expect(find.text('APP'), findsOneWidget);
@@ -95,7 +71,7 @@ void main() {
   });
 
   testWidgets('a lapsed paid plan is sent back to the paywall', (tester) async {
-    await tester.pumpWidget(_gated(_FakeApi(_summary(tier: 'pro', status: 'expired'))));
+    await tester.pumpWidget(_gated(_summary(tier: 'pro', status: 'expired')));
     await tester.pumpAndSettle();
 
     expect(find.text('APP'), findsNothing);
