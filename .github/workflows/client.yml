@@ -189,10 +189,13 @@ jobs:
   linux-artifact:
     name: Build Linux client artifact
     needs: verify
-    # PRs only verify; a push or a manual dispatch publishes artifacts, so a
+    # PRs only verify; a push or a manual dispatch publishes a release, so a
     # re-run after changing the release secrets actually produces an APK.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    # Release assets use release storage, not the Actions artifact quota.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -237,21 +240,53 @@ jobs:
             --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
       - name: Archive Linux client
         run: tar -czf strict-proxy-client-linux-${GITHUB_SHA}.tar.gz -C apps/client/build/linux/x64/release/bundle .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: strict-proxy-client-linux-${{ github.sha }}
-          path: strict-proxy-client-linux-${{ github.sha }}.tar.gz
-          if-no-files-found: error
+      # The artifact store fills up and then refuses every upload, which used
+      # to fail the run after a good build. A release asset is the durable copy
+      # anyway, so publish there and skip the artifact entirely.
+      - name: Attach the Linux bundle to the release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+          TAG: client-${{ github.run_number }}
+        run: |
+          notes="$(mktemp)"
+          {
+            echo "Signed Android APK and Linux bundle built from \`${GITHUB_SHA}\`."
+            echo
+            echo "- controller: \`${URL}\`"
+            echo "- version: \`0.1.0\`, build ${GITHUB_RUN_NUMBER}"
+            echo "- installs over an earlier build only if it was signed with the same release keystore"
+            echo "- one APK per ABI: pick \`arm64-v8a\` for a modern phone, \`armeabi-v7a\` for an older one"
+            echo
+            echo "Install: \`adb install -r strict-proxy-client-android-${GITHUB_SHA}-arm64-v8a.apk\`"
+            echo
+            echo "Built by [\`client\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+          } > "$notes"
+          # The Android job races us to the same tag; a lost create is fine as
+          # long as the release exists before the upload.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "StrictProxy client 0.1.0 (build ${GITHUB_RUN_NUMBER})" \
+              --notes-file "$notes" || true
+          fi
+          gh release upload "$TAG" "strict-proxy-client-linux-${GITHUB_SHA}.tar.gz" --clobber
+          gh release view "$TAG" --json tagName,assets \
+            --jq '.tagName + ": " + ([.assets[].name] | join(", "))'
 
   android-artifact:
     name: Build Android client artifact
     needs:
       - verify
       - libbox
-    # PRs only verify; a push or a manual dispatch publishes artifacts, so a
+    # PRs only verify; a push or a manual dispatch publishes a release, so a
     # re-run after changing the release secrets actually produces an APK.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     env:
       # Present only when the repository has release signing configured; the
       # build steps below pick the strongest artifact those values allow.
@@ -435,40 +470,10 @@ jobs:
               | grep -E 'certificate DN|SHA-256 digest' | head -2
           done
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: strict-proxy-client-android-${{ github.sha }}
-          path: dist-android/*.apk
-          if-no-files-found: error
-
-  release:
-    name: Publish the client build to Releases
-    needs:
-      - android-artifact
-      - linux-artifact
-    # A release is user-facing: only from main, never from a pull request, and
-    # not from a release branch (client-release owns versioned tags).
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    permissions:
-      # The workflow default is read-only; only this job creates a release.
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: strict-proxy-client-*
-          merge-multiple: true
-          path: dist
-
-      - name: Show what will be published
-        run: ls -lh dist
-
-      # Run artifacts expire and are only reachable from the run page; a
-      # release is where a user can actually find and install the APK.
-      - name: Create or update the release
+      - name: Attach the APKs to the release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No checkout in this job, so gh cannot infer the repository from git.
           GH_REPO: ${{ github.repository }}
           URL: ${{ vars.CLIENT_CONTROLLER_URL }}
           TAG: client-${{ github.run_number }}
@@ -486,14 +491,23 @@ jobs:
             echo
             echo "Built by [\`client\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
           } > "$notes"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.apk dist/*.tar.gz --clobber
-            gh release edit "$TAG" --notes-file "$notes"
-          else
-            gh release create "$TAG" dist/*.apk dist/*.tar.gz \
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
               --target "$GITHUB_SHA" \
               --title "StrictProxy client 0.1.0 (build ${GITHUB_RUN_NUMBER})" \
-              --notes-file "$notes"
+              --notes-file "$notes" || true
           fi
+          uploaded=false
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" dist-android/*.apk --clobber; then
+              uploaded=true
+              break
+            fi
+            echo "upload attempt ${attempt} failed; retrying"
+            sleep 5
+          done
+          [ "$uploaded" = true ] || { echo 'could not attach the APKs to the release' >&2; exit 1; }
           gh release view "$TAG" --json tagName,assets \
             --jq '.tagName + ": " + ([.assets[].name] | join(", "))'
+
+
