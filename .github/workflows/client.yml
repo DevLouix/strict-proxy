@@ -337,6 +337,17 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
           ./apps/client/tool/build-libbox.sh --android-only
 
+      # A cold engine build leaves the sing-box checkout, the Go module cache
+      # and several GB of Go build cache behind. Gradle then needs the same disk
+      # for three APKs, the signing copies and its own intermediates, and the
+      # runner dies mid-build when it runs out. Keep the AAR; drop the rest.
+      - name: Reclaim the engine build space
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf "$HOME/go/pkg/mod" "$HOME/.cache/go-build" "$HOME/go/bin" \
+            apps/client/.cache/sing-box-libbox
+          df -h /
+
       # AGP cannot package a local .aar inside the library module, so the AAR is
       # expanded into classes.jar + jni/<abi>/libbox.so before Gradle runs.
       - name: Unpack libbox for the Gradle plugin
