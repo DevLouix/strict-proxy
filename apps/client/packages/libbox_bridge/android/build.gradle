@@ -9,6 +9,9 @@ android {
 
     defaultConfig {
         minSdk 21
+        // The generated libbox Java is only reachable from native code and
+        // reflection, so R8 must be told to keep it (see consumer-rules.pro).
+        consumerProguardFiles "consumer-rules.pro"
     }
 
     compileOptions {

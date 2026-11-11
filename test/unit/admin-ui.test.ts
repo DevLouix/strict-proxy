@@ -364,6 +364,46 @@ test('an active enrollment token can be rotated from the dashboard', async () =>
   assert.ok(post, 'confirming rotation should POST to the rotate endpoint');
 });
 
+test('a finished enrollment token can be deleted', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.enrollmentsView(api, () => {});
+  const del = [...node.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Delete');
+  assert.ok(del, 'used and expired rows should expose Delete');
+  del.dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c) => c instanceof FakeElement && c.tagName === 'DIALOG');
+  assert.ok(dialog, 'Delete should ask for confirmation');
+  const confirm = [...dialog.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Delete');
+  assert.ok(confirm, 'the confirmation should name the action');
+  confirm.dispatch('click');
+
+  await new Promise((r) => setImmediate(r));
+  const call = api.calls.find((c) => c[0] === 'DELETE' && c[1] === '/api/v1/admin/node-enrollments/e2');
+  assert.ok(call, 'confirming should DELETE the finished token');
+});
+
+test('finished enrollment tokens can be cleared in bulk', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.enrollmentsView(api, () => {});
+  const clear = [...node.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Clear finished');
+  assert.ok(clear, 'the header should offer a bulk cleanup');
+  clear.dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c) => c instanceof FakeElement && c.tagName === 'DIALOG');
+  assert.ok(dialog, 'clearing should ask for confirmation');
+  const confirm = [...dialog.walk()].find((el) => el.tagName === 'BUTTON' && el.text() === 'Clear finished');
+  assert.ok(confirm);
+  confirm.dispatch('click');
+
+  await new Promise((r) => setImmediate(r));
+  const call = api.calls.find((c) => c[0] === 'DELETE' && c[1] === '/api/v1/admin/node-enrollments');
+  assert.ok(call, 'confirming should purge finished tokens');
+});
+
 test('issuing a token from the dialog posts the enrollment', async () => {
   globalThis.document.body.replaceChildren();
 

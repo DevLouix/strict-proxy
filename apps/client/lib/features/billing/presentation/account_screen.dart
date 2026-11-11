@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/billing_models.dart';
 import '../../../core/checkout_launcher.dart';
+import '../../../core/widgets/password_field.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../application/billing_controller.dart';
 
@@ -36,7 +37,9 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
         actions: [
           IconButton(
             tooltip: 'Refresh',
-            onPressed: state.loading ? null : () => ref.read(billingProvider.notifier).load(),
+            onPressed: state.loading
+                ? null
+                : () => ref.read(billingProvider.notifier).load(),
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -49,7 +52,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
             if (state.error != null) ...[
               _ErrorBanner(
                 message: state.error!,
-                onDismiss: () => ref.read(billingProvider.notifier).clearError(),
+                onDismiss: () =>
+                    ref.read(billingProvider.notifier).clearError(),
               ),
               const SizedBox(height: 12),
             ],
@@ -66,7 +70,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
             else ...[
               _PlanCard(
                 subscription: state.subscription!,
-                onEnableAutoRenew: () => ref.read(billingProvider.notifier).enableAutoRenew(),
+                onEnableAutoRenew: () =>
+                    ref.read(billingProvider.notifier).enableAutoRenew(),
               ),
               const SizedBox(height: 16),
               if (state.subscription!.hasQuota) ...[
@@ -89,7 +94,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
                       : 'This deployment has no payment gateway configured, so upgrades are disabled.',
                 ),
               ],
-              if (state.usage != null && state.usage!.credentials.isNotEmpty) ...[
+              if (state.usage != null &&
+                  state.usage!.credentials.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 _PerNodeUsage(usage: state.usage!),
               ],
@@ -97,7 +103,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
             const SizedBox(height: 24),
             Text(
               'Usage is metered per node and counted over a rolling 30-day window.',
-              style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+              style:
+                  theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
@@ -122,7 +129,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
       return;
     }
 
-    final err = await ref.read(authStateProvider.notifier).deleteAccount(password);
+    final err =
+        await ref.read(authStateProvider.notifier).deleteAccount(password);
     if (!mounted) return;
     if (err != null) {
       _showMessage(err);
@@ -134,7 +142,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _startCheckout(String tier) async {
@@ -142,8 +151,10 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
     final url = await notifier.startCheckout(tier);
     if (!mounted) return;
     if (url == null) {
-      final message = ref.read(billingProvider).error ?? 'Could not start checkout.';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      final message =
+          ref.read(billingProvider).error ?? 'Could not start checkout.';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
       return;
     }
 
@@ -160,7 +171,8 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
               ? 'Complete payment on the provider page to activate $tier.'
               : 'Open this link to pay: $url',
         ),
-        action: SnackBarAction(label: 'Reload', onPressed: () => notifier.load()),
+        action:
+            SnackBarAction(label: 'Reload', onPressed: () => notifier.load()),
       ),
     );
   }
@@ -199,11 +211,11 @@ class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
             'This permanently deletes your account and ends every session. It cannot be undone.',
           ),
           const SizedBox(height: 16),
-          TextField(
+          PasswordField(
             controller: _password,
-            obscureText: true,
             autofocus: true,
-            decoration: const InputDecoration(labelText: 'Confirm your password'),
+            label: 'Confirm your password',
+            onFieldSubmitted: (value) => Navigator.of(context).pop(value),
           ),
         ],
       ),
@@ -252,7 +264,8 @@ class _DangerZone extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
               child: OutlinedButton(
                 onPressed: () => onDelete(),
-                style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
+                style:
+                    OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
                 child: const Text('Delete account'),
               ),
             ),
@@ -264,7 +277,8 @@ class _DangerZone extends StatelessWidget {
 }
 
 class _PlanCard extends StatelessWidget {
-  const _PlanCard({required this.subscription, required this.onEnableAutoRenew});
+  const _PlanCard(
+      {required this.subscription, required this.onEnableAutoRenew});
   final SubscriptionSummary subscription;
   final Future<void> Function() onEnableAutoRenew;
 
@@ -283,7 +297,8 @@ class _PlanCard extends StatelessWidget {
               children: [
                 Text(
                   subscription.tier.toUpperCase(),
-                  style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+                  style: theme.textTheme.headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(width: 10),
                 _StatusChip(status: subscription.status),
@@ -301,9 +316,13 @@ class _PlanCard extends StatelessWidget {
               Row(
                 children: [
                   Icon(
-                    subscription.autoRenew ? Icons.autorenew : Icons.autorenew_outlined,
+                    subscription.autoRenew
+                        ? Icons.autorenew
+                        : Icons.autorenew_outlined,
                     size: 16,
-                    color: subscription.autoRenew ? Colors.greenAccent : theme.hintColor,
+                    color: subscription.autoRenew
+                        ? Colors.greenAccent
+                        : theme.hintColor,
                   ),
                   const SizedBox(width: 6),
                   Expanded(
@@ -371,11 +390,16 @@ class _UsageCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Bandwidth this window', style: theme.textTheme.labelMedium),
+                Text('Bandwidth this window',
+                    style: theme.textTheme.labelMedium),
                 Text(
-                  exhausted ? 'Quota reached' : '${formatBytes(subscription.bytesRemaining ?? 0)} left',
+                  exhausted
+                      ? 'Quota reached'
+                      : '${formatBytes(subscription.bytesRemaining ?? 0)} left',
                   style: theme.textTheme.labelMedium?.copyWith(
-                    color: exhausted ? Colors.redAccent : theme.colorScheme.primary,
+                    color: exhausted
+                        ? Colors.redAccent
+                        : theme.colorScheme.primary,
                   ),
                 ),
               ],
@@ -399,7 +423,8 @@ class _UsageCard extends StatelessWidget {
               const SizedBox(height: 10),
               Text(
                 'You have used your monthly data allowance. Upgrade to restore access.',
-                style: theme.textTheme.bodySmall?.copyWith(color: Colors.redAccent),
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: Colors.redAccent),
               ),
             ],
           ],
@@ -418,13 +443,21 @@ class _LimitsCard extends StatelessWidget {
     return Card(
       child: Column(
         children: [
-          _LimitRow(label: 'Simultaneous devices', value: '${subscription.deviceSeats}'),
+          _LimitRow(
+              label: 'Simultaneous devices',
+              value: '${subscription.deviceSeats}'),
           const Divider(height: 1),
-          _LimitRow(label: 'Server access', value: subscription.maxNodes >= 999 ? 'All nodes' : '${subscription.maxNodes} nodes'),
+          _LimitRow(
+              label: 'Server access',
+              value: subscription.maxNodes >= 999
+                  ? 'All nodes'
+                  : '${subscription.maxNodes} nodes'),
           const Divider(height: 1),
           _LimitRow(
             label: 'Monthly data',
-            value: subscription.hasQuota ? formatBytes(subscription.bandwidthQuotaBytes!) : 'Unlimited',
+            value: subscription.hasQuota
+                ? formatBytes(subscription.bandwidthQuotaBytes!)
+                : 'Unlimited',
           ),
         ],
       ),
@@ -442,7 +475,8 @@ class _LimitRow extends StatelessWidget {
     return ListTile(
       dense: true,
       title: Text(label),
-      trailing: Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
+      trailing:
+          Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
     );
   }
 }
@@ -462,7 +496,8 @@ class _UpgradeSection extends StatelessWidget {
 
   /// Ranks tiers so the cheapest appears first.
   List<TierPrice> get _ordered {
-    final list = [...catalog.tiers]..sort((a, b) => a.amountMinor.compareTo(b.amountMinor));
+    final list = [...catalog.tiers]
+      ..sort((a, b) => a.amountMinor.compareTo(b.amountMinor));
     return list;
   }
 
@@ -481,12 +516,16 @@ class _UpgradeSection extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 10),
             child: Card(
               child: ListTile(
-                title: Text(tier.label, style: const TextStyle(fontWeight: FontWeight.w600)),
+                title: Text(tier.label,
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
                 subtitle: Text('Billed monthly · ${tier.formatted}'),
                 trailing: FilledButton(
                   onPressed: busy ? null : () => onUpgrade(tier.tier),
                   child: busy
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
                       : Text(currentTier == 'free' ? 'Upgrade' : 'Switch'),
                 ),
               ),
@@ -506,7 +545,8 @@ class _PerNodeUsage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final sorted = [...usage.credentials]..sort((a, b) => b.bytesUsed.compareTo(a.bytesUsed));
+    final sorted = [...usage.credentials]
+      ..sort((a, b) => b.bytesUsed.compareTo(a.bytesUsed));
 
     return Card(
       child: Column(
@@ -519,9 +559,13 @@ class _PerNodeUsage extends StatelessWidget {
           for (final c in sorted)
             ListTile(
               dense: true,
-              leading: Icon(c.revoked ? Icons.block : Icons.circle, size: 10, color: c.revoked ? Colors.redAccent : Colors.greenAccent),
-              title: Text(c.nodeId.isEmpty ? 'Unknown node' : c.nodeId, style: theme.textTheme.bodySmall),
-              trailing: Text(formatBytes(c.bytesUsed), style: theme.textTheme.bodySmall),
+              leading: Icon(c.revoked ? Icons.block : Icons.circle,
+                  size: 10,
+                  color: c.revoked ? Colors.redAccent : Colors.greenAccent),
+              title: Text(c.nodeId.isEmpty ? 'Unknown node' : c.nodeId,
+                  style: theme.textTheme.bodySmall),
+              trailing: Text(formatBytes(c.bytesUsed),
+                  style: theme.textTheme.bodySmall),
             ),
         ],
       ),
@@ -545,8 +589,11 @@ class _ErrorBanner extends StatelessWidget {
           children: [
             const Icon(Icons.error_outline, color: Colors.redAccent, size: 18),
             const SizedBox(width: 8),
-            Expanded(child: Text(message, style: const TextStyle(color: Colors.redAccent))),
-            IconButton(icon: const Icon(Icons.close, size: 18), onPressed: onDismiss),
+            Expanded(
+                child: Text(message,
+                    style: const TextStyle(color: Colors.redAccent))),
+            IconButton(
+                icon: const Icon(Icons.close, size: 18), onPressed: onDismiss),
           ],
         ),
       ),

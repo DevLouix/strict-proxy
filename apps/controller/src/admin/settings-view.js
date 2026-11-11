@@ -7,6 +7,7 @@
  * out of the dashboard. Clearing is an explicit action.
  */
 import { h, mount, toast } from './dom.js';
+import { passwordField } from './password-toggle.js';
 
 export async function settingsView(api) {
   const host = h('div', {});
@@ -33,7 +34,7 @@ export async function settingsView(api) {
     const port0 = h('input', { type: 'number', value: String(summary?.port ?? 587), min: '1', max: '65535' });
     const secure0 = h('input', { type: 'checkbox', checked: Boolean(summary?.secure) });
     const user0 = h('input', { type: 'text', value: summary?.username ?? '', placeholder: 'postmaster@example.com', spellcheck: 'false', autocomplete: 'off' });
-    const pass0 = h('input', { type: 'password', placeholder: summary?.passwordSet ? '•••••••• (unchanged)' : 'not set', autocomplete: 'new-password' });
+    const pass0 = passwordField(h('input', { type: 'password', placeholder: summary?.passwordSet ? '•••••••• (unchanged)' : 'not set', autocomplete: 'new-password' }));
     const from0 = h('input', { type: 'email', value: summary?.fromAddress ?? '', placeholder: 'no-reply@example.com', spellcheck: 'false' });
     const name0 = h('input', { type: 'text', value: summary?.fromName ?? '', placeholder: 'StrictProxy' });
     const testTo0 = h('input', { type: 'email', placeholder: 'you@example.com', spellcheck: 'false' });

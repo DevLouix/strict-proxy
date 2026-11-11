@@ -45,6 +45,34 @@ GRADLE="${ANDROID_DIR}/app/build.gradle.kts"
 MANIFEST="${ANDROID_DIR}/app/src/main/AndroidManifest.xml"
 [[ -f "$MANIFEST" ]] || fail "missing AndroidManifest.xml at ${MANIFEST}"
 
+# Release APKs are shrunk with R8. gomobile's Java is invisible to the shrinker:
+# native code calls go.Seq.getRef by name, and libbox itself is loaded
+# reflectively. The generated host is recreated by `flutter create`, so the keep
+# rules are written here rather than committed under android/. The plugin also
+# ships the same rules as consumer rules; this app-level copy is a backstop for
+# hosts that do not merge them.
+PROGUARD_RULES="${ANDROID_DIR}/app/proguard-rules.pro"
+if ! grep -q 'go.Seq.getRef' "$PROGUARD_RULES" 2>/dev/null; then
+  cat > "$PROGUARD_RULES" <<'RULES'
+# Keep gomobile's generated Java: native code calls go.Seq.getRef by name and
+# the bridge loads io.nekohasekai.libbox.* reflectively.
+-keep class go.** { *; }
+-keep class io.nekohasekai.** { *; }
+-keepclasseswithmembers class * {
+    native <methods>;
+}
+RULES
+fi
+
+if ! grep -q 'strict-proxy: gomobile keep rules' "$GRADLE"; then
+  sed -i.bak '/^[[:space:]]*release[[:space:]]*{[[:space:]]*$/a\
+            // strict-proxy: gomobile keep rules\
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")' "$GRADLE"
+  rm -f "${GRADLE}.bak"
+  grep -q 'strict-proxy: gomobile keep rules' "$GRADLE" \
+    || fail "could not register proguard-rules.pro in ${GRADLE}"
+fi
+
 # Flutter writes the id twice (namespace for code/R, applicationId for the
 # installed package). Both must move together or the launcher activity stops
 # resolving after installation.

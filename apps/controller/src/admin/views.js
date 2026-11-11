@@ -715,6 +715,25 @@ export async function enrollmentsView(api) {
         ),
         h('div', { class: 'row' },
           h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
+          h('button', {
+            class: 'btn sm',
+            onClick: async () => {
+              const ok = await confirmDialog({
+                title: 'Clear finished tokens?',
+                body: h('p', {}, 'Deletes every used, revoked or expired token record. Active tokens are kept, so an enrollment in progress still works.'),
+                confirmLabel: 'Clear finished',
+                danger: true,
+              });
+              if (!ok) return;
+              try {
+                const res = await api.del('/api/v1/admin/node-enrollments');
+                toast(`${res.deleted ?? 0} finished token${res.deleted === 1 ? '' : 's'} cleared`);
+                await load();
+              } catch (err) {
+                toast(err.message, 'err');
+              }
+            },
+          }, 'Clear finished'),
           h('button', { class: 'btn primary sm', onClick: () => issueEnrollmentDialog(api, load) }, 'Issue new'),
         ),
       ),
@@ -741,7 +760,7 @@ export async function enrollmentsView(api) {
                   h('td', { class: 'small muted' }, date(e.expiresAt)),
                   h('td', { class: 'small muted' }, date(e.createdAt)),
                   h('td', { class: 'actions' },
-                    !e.usedAt
+                    !e.usedAt && !expired
                       ? h('button', {
                           class: 'btn sm',
                           onClick: async () => {
@@ -766,29 +785,28 @@ export async function enrollmentsView(api) {
                         }, 'Rotate')
                       : null,
                     !e.usedAt && !expired ? ' ' : null,
-                    !e.usedAt && !expired
-                      ? h('button', {
-                          class: 'btn sm danger',
-                          onClick: async () => {
-                            const ok = await confirmDialog({
-                              title: 'Revoke this token?',
-                              body: h('p', {}, 'The token becomes unusable immediately. It cannot be reinstated.'),
-                              confirmLabel: 'Revoke',
-                              danger: true,
-                            });
-                            if (!ok) return;
-                            try {
-                              await api.del(`/api/v1/admin/node-enrollments/${e.id}`);
-                              toast('Token revoked');
-                              await load();
-                            } catch (err) {
-                              toast(err.message, 'err');
-                            }
-                          },
-                        }, 'Revoke')
-                      : e.usedAt
-                        ? h('span', { class: 'muted small' }, '—')
-                        : null,
+                    h('button', {
+                      class: 'btn sm danger',
+                      onClick: async () => {
+                        const active = !e.usedAt && !expired;
+                        const ok = await confirmDialog({
+                          title: active ? 'Delete this active token?' : 'Delete this token record?',
+                          body: h('p', {}, active
+                            ? 'Deleting the token revokes it immediately; it cannot be used to enroll a node.'
+                            : 'This removes the finished token from the list. It is already unusable.'),
+                          confirmLabel: 'Delete',
+                          danger: true,
+                        });
+                        if (!ok) return;
+                        try {
+                          await api.del(`/api/v1/admin/node-enrollments/${e.id}`);
+                          toast('Enrollment token deleted');
+                          await load();
+                        } catch (err) {
+                          toast(err.message, 'err');
+                        }
+                      },
+                    }, !e.usedAt && !expired ? 'Revoke & delete' : 'Delete'),
                   ),
                 );
               })),

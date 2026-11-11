@@ -3,6 +3,7 @@
  */
 import { ApiClient, getSession, clearSession, setUnauthorizedHandler } from './api.js';
 import { h, mount, toast } from './dom.js';
+import { passwordField } from './password-toggle.js';
 import { overviewView, usersView, nodesView, enrollmentsView, paymentsView, usageView } from './views.js';
 import { settingsView } from './settings-view.js';
 import { plansView, subscriptionsView } from './billing-ops-view.js';
@@ -53,7 +54,7 @@ function loginScreen() {
     },
   },
     h('label', { class: 'field' }, h('span', {}, 'Email'), email),
-    h('label', { class: 'field' }, h('span', {}, 'Password'), password),
+    h('label', { class: 'field' }, h('span', {}, 'Password'), passwordField(password)),
     error,
     submit,
   );

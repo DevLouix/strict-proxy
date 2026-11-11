@@ -9,7 +9,7 @@
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
-import { eq, sql, and, asc, desc, inArray, isNull } from 'drizzle-orm';
+import { eq, sql, and, asc, desc, inArray, isNull, isNotNull, lte, or } from 'drizzle-orm';
 import { generateEd25519Keypair, signJson, loadSigningPrivateKey, isPublicIpAddress, normalizeIpAddress } from '@strict-proxy/types';
 import type { PublicIpsResponse, SubscriptionTier, UserPublic } from '@strict-proxy/types';
 import type { Db } from './db/client.js';
@@ -436,6 +436,29 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ enrollments: rows });
   }));
 
+  /**
+   * Deletes every finished token record in one action.
+   *
+   * Used and expired rows are only history; without this, the enrollment list
+   * grows forever. Active tokens are deliberately kept so an enrollment that is
+   * currently in progress cannot be swept away.
+   */
+  router.delete('/api/v1/admin/node-enrollments', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const deleted = await ctx.db.delete(nodeEnrollments)
+      .where(or(isNotNull(nodeEnrollments.usedAt), lte(nodeEnrollments.expiresAt, new Date())))
+      .returning({ id: nodeEnrollments.id });
+    if (deleted.length > 0) {
+      await recordAudit(ctx.db, {
+        ...auditActor(req),
+        action: 'enrollments.purged',
+        targetType: 'enrollment',
+        summary: `${deleted.length} finished enrollment token${deleted.length === 1 ? '' : 's'} deleted`,
+        metadata: { count: deleted.length },
+      });
+    }
+    res.json({ ok: true, deleted: deleted.length });
+  }));
+
   router.post('/api/v1/admin/node-enrollments/:enrollmentId/rotate', ...requireAdministrator, asyncHandler(async (req, res) => {
     const enrollmentId = req.params.enrollmentId;
     if (typeof enrollmentId !== 'string' || enrollmentId.length === 0) {
@@ -498,19 +521,25 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(400).json({ error: 'enrollmentId is required', code: 'VALIDATION' });
       return;
     }
-    const [revoked] = await ctx.db.update(nodeEnrollments).set({ expiresAt: new Date(), usedAt: new Date() }).where(eq(nodeEnrollments.id, enrollmentId)).returning({ id: nodeEnrollments.id });
-    if (!revoked) {
+    const [existing] = await ctx.db.select({ usedAt: nodeEnrollments.usedAt, expiresAt: nodeEnrollments.expiresAt })
+      .from(nodeEnrollments).where(eq(nodeEnrollments.id, enrollmentId)).limit(1);
+    if (!existing) {
       res.status(404).json({ error: 'enrollment not found', code: 'NOT_FOUND' });
       return;
     }
+    const state = existing.usedAt ? 'used' : existing.expiresAt.getTime() <= Date.now() ? 'expired' : 'active';
+    // A hard delete is the point: marking the row used would keep exactly the
+    // garbage the list is being cleaned of. The token hash disappears with it.
+    await ctx.db.delete(nodeEnrollments).where(eq(nodeEnrollments.id, enrollmentId));
     await recordAudit(ctx.db, {
       ...auditActor(req),
-      action: 'enrollment.revoked',
+      action: 'enrollment.deleted',
       targetType: 'enrollment',
       targetId: enrollmentId,
-      summary: `Enrollment token ${enrollmentId} revoked`,
+      summary: `Enrollment token ${enrollmentId} deleted (${state})`,
+      metadata: { state },
     });
-    res.json({ ok: true });
+    res.json({ ok: true, deleted: true });
   }));
 
   router.post('/api/v1/nodes/enroll', limit('nodes.enroll'), asyncHandler(async (req, res) => {

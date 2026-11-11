@@ -201,7 +201,10 @@ export function stubApi() {
       nodes: [{ id: 'n1', hostname: 'fra-1', region: 'eu-central', label: 'Frankfurt 1', publicIp: '203.0.113.1', tunnelPort: 443, status: 'online', loadScore: 12, lastHeartbeatAt: new Date().toISOString(), engineVersion: '1.13.21' }],
     },
     enrollments: {
-      enrollments: [{ id: 'e1', region: 'eu-west', label: null, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), usedAt: null, createdAt: '2026-01-01T00:00:00Z' }],
+      enrollments: [
+        { id: 'e1', region: 'eu-west', label: null, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), usedAt: null, createdAt: '2026-01-01T00:00:00Z' },
+        { id: 'e2', region: 'us-east', label: 'old', expiresAt: new Date(Date.now() - 60_000).toISOString(), usedAt: new Date(Date.now() - 120_000).toISOString(), createdAt: '2026-01-01T00:00:00Z' },
+      ],
     },
     events: {
       events: [{ id: 'evt_1', type: 'checkout.completed', applied: true, reason: null, receivedAt: '2026-01-01T00:00:00Z' }],
@@ -310,7 +313,7 @@ export function stubApi() {
     },
     async del(path) {
       this.calls.push(['DELETE', path]);
-      return { ok: true };
+      return { ok: true, deleted: 1 };
     },
     async uploadFile(path, file) {
       this.calls.push(['UPLOAD', path, file]);
