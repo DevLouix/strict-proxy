@@ -202,6 +202,20 @@ class ControllerApi {
     return CheckoutSession.fromJson(body);
   }
 
+  /// Starts the monthly subscription from the card saved at checkout.
+  ///
+  /// Returns null when auto-renew is active, or a human-readable reason when
+  /// the account cannot be made recurring (for example, no saved card).
+  Future<String?> activateRecurring() async {
+    final body = await _send(() => _client.post(
+          _uri('/api/v1/billing/recurring/activate'),
+          headers: _headers(),
+          body: '{}',
+        ));
+    if (body['activated'] == true) return null;
+    return body['message'] as String? ?? body['error'] as String? ?? 'Auto-renew could not be enabled.';
+  }
+
   /// Per-node bandwidth consumption for the signed-in user.
   Future<UsageReport> usage() async {
     final body = await _send(() => _client.get(_uri('/api/v1/billing/usage'), headers: _headers()));

@@ -32,7 +32,7 @@ async function startProtectedOrigin(
       ...options,
     } as Parameters<typeof createGatekeeperMiddleware>[0]),
   );
-  app.get('/protected', (_req, res) => res.json({ ok: true, secret: 'fleet-only' }));
+  app.get('/protected', (req, res) => res.json({ ok: true, secret: 'fleet-only', tier: req.strictProxy?.tier ?? null }));
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -43,10 +43,21 @@ async function startProtectedOrigin(
   };
 }
 
-async function visit(url: string, clientIp: string): Promise<{ status: number; body: any }> {
-  const res = await fetch(url, { headers: { 'x-forwarded-for': clientIp } });
+async function visit(url: string, clientIp: string, headers: Record<string, string> = {}): Promise<{ status: number; body: any }> {
+  const res = await fetch(url, { headers: { 'x-forwarded-for': clientIp, ...headers } });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+/** Mints the short-lived token a client would present to a gated site. */
+async function entitlementFor(email: string, tier: string): Promise<string> {
+  const user = await h.seedUser(email);
+  await h.setTier(user.id, tier);
+  const tokens = await h.login(user.email, user.password, `device-${email}`);
+  const res = await h.request<{ token: string }>('GET', '/api/v1/entitlement', { token: tokens.accessToken });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.token.startsWith('sp1.'));
+  return res.body.token;
 }
 
 before(async () => {
@@ -202,4 +213,95 @@ test('the signed list is cached and refreshed within the TTL', async () => {
 
   await new Promise((r) => setTimeout(r, 1200));
   assert.equal((await visit(`${gkBaseUrl}/protected`, '203.0.113.51')).status, 200, 'cache must refresh after the TTL');
+});
+
+// ---------------------------------------------------------------------------
+// Plan gating
+// ---------------------------------------------------------------------------
+
+test('a pro-only site rejects standard and admits pro', async () => {
+  await h.seedNode({ status: 'online', publicIp: '203.0.113.60' });
+  const standard = await entitlementFor('standard-gate@example.test', 'standard');
+  const pro = await entitlementFor('pro-gate@example.test', 'pro');
+
+  const origin = await startProtectedOrigin({ requiredTier: 'pro' });
+  try {
+    const missing = await visit(`${origin.baseUrl}/protected`, '203.0.113.60');
+    assert.equal(missing.status, 401);
+    assert.equal(missing.body.code, 'GATEKEEPER_ENTITLEMENT_REQUIRED');
+
+    const denied = await visit(`${origin.baseUrl}/protected`, '203.0.113.60', {
+      'x-strict-proxy-entitlement': standard,
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, 'GATEKEEPER_TIER_INSUFFICIENT');
+    assert.equal(denied.body.actualTier, 'standard');
+    assert.equal(denied.body.requiredTier, 'pro');
+
+    const allowed = await visit(`${origin.baseUrl}/protected`, '203.0.113.60', {
+      'x-strict-proxy-entitlement': pro,
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.body.tier, 'pro', 'the verified plan must be available to the site');
+  } finally {
+    await origin.stop();
+  }
+});
+
+test('a standard site admits standard and pro, but not free', async () => {
+  await h.seedNode({ status: 'online', publicIp: '203.0.113.61' });
+  const free = await entitlementFor('free-gate@example.test', 'free');
+  const standard = await entitlementFor('standard-gate-2@example.test', 'standard');
+  const pro = await entitlementFor('pro-gate-2@example.test', 'pro');
+
+  const origin = await startProtectedOrigin({ requiredTier: 'standard' });
+  try {
+    const denied = await visit(`${origin.baseUrl}/protected`, '203.0.113.61', {
+      'x-strict-proxy-entitlement': free,
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, 'GATEKEEPER_TIER_INSUFFICIENT');
+    assert.equal(denied.body.actualTier, 'free');
+
+    assert.equal((await visit(`${origin.baseUrl}/protected`, '203.0.113.61', { 'x-strict-proxy-entitlement': standard })).status, 200);
+    assert.equal((await visit(`${origin.baseUrl}/protected`, '203.0.113.61', { 'x-strict-proxy-entitlement': pro })).status, 200);
+  } finally {
+    await origin.stop();
+  }
+});
+
+test('failureMode open skips only the fleet check, never plan gating', async () => {
+  const token = await entitlementFor('open-mode@example.test', 'standard');
+  const origin = await startProtectedOrigin({
+    controllerBaseUrl: 'http://127.0.0.1:1',
+    failureMode: 'open',
+    requiredTier: 'standard',
+  });
+  try {
+    const missing = await visit(`${origin.baseUrl}/protected`, '203.0.113.70');
+    assert.equal(missing.status, 401, 'an unreachable controller must not bypass the plan check');
+    assert.equal(missing.body.code, 'GATEKEEPER_ENTITLEMENT_REQUIRED');
+
+    const allowed = await visit(`${origin.baseUrl}/protected`, '203.0.113.70', {
+      'x-strict-proxy-entitlement': token,
+    });
+    assert.equal(allowed.status, 200);
+  } finally {
+    await origin.stop();
+  }
+});
+
+test('a forged entitlement token is rejected even from a fleet IP', async () => {
+  await h.seedNode({ status: 'online', publicIp: '203.0.113.62' });
+  const token = await entitlementFor('forged-gate@example.test', 'pro');
+  const forged = `${token.slice(0, -2)}${token.endsWith('A') ? 'B' : 'A'}`;
+
+  const origin = await startProtectedOrigin({ requiredTier: 'standard' });
+  try {
+    const res = await visit(`${origin.baseUrl}/protected`, '203.0.113.62', { 'x-strict-proxy-entitlement': forged });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.code, 'GATEKEEPER_ENTITLEMENT_INVALID');
+  } finally {
+    await origin.stop();
+  }
 });

@@ -57,6 +57,9 @@ class BillingController extends StateNotifier<BillingState> {
 
   final Ref _ref;
 
+  /// One automatic attempt per account/session. A manual retry can reset it.
+  bool _autoRenewAttempted = false;
+
   ControllerApi get _api => _ref.read(apiProvider);
 
   /// Loads subscription, catalog and usage together.
@@ -80,6 +83,7 @@ class BillingController extends StateNotifier<BillingState> {
         catalog = null;
       }
       state = state.copyWith(loading: false, subscription: subscription, usage: usage, catalog: catalog);
+      await _tryEnableAutoRenew(subscription);
     } on ApiException catch (e) {
       state = state.copyWith(loading: false, error: e.message);
     } catch (e) {
@@ -111,8 +115,40 @@ class BillingController extends StateNotifier<BillingState> {
   /// Clears the pending checkout once the UI has acted on it.
   void consumeCheckout() => state = state.copyWith(checkout: null);
 
+  /// Turns the card saved by the first payment into a monthly subscription.
+  ///
+  /// Runs once per load for an active paid account whose provider subscription
+  /// is not attached yet. This is what makes the first purchase recur; it is
+  /// safe to call repeatedly because the server is idempotent.
+  Future<void> _tryEnableAutoRenew(SubscriptionSummary subscription) async {
+    if (_autoRenewAttempted || !subscription.hasActivePaidPlan || subscription.autoRenew) return;
+    _autoRenewAttempted = true;
+    try {
+      final reason = await _api.activateRecurring();
+      if (reason == null) {
+        final refreshed = await _api.subscription();
+        state = state.copyWith(subscription: refreshed);
+      } else {
+        state = state.copyWith(error: reason);
+      }
+    } on ApiException catch (e) {
+      state = state.copyWith(error: e.message);
+    } catch (e) {
+      state = state.copyWith(error: 'Auto-renew could not be enabled: $e');
+    }
+  }
+
+  /// Retries auto-renew after the automatic attempt failed.
+  Future<void> enableAutoRenew() async {
+    _autoRenewAttempted = false;
+    await load();
+  }
+
   /// Drops every loaded value so the next account cannot inherit them.
-  void reset() => state = const BillingState();
+  void reset() {
+    _autoRenewAttempted = false;
+    state = const BillingState();
+  }
 
   void clearError() => state = state.copyWith(error: null);
 }

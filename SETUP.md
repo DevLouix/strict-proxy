@@ -382,8 +382,15 @@ To take real money:
 ### Prices
 
 `STANDARD_TIER_AMOUNT_MINOR` and `PRO_TIER_AMOUNT_MINOR` are **minor units** —
-kobo, cents. `250000` with `BILLING_CURRENCY=NGN` is ₦2,500.00. They are the
-deployment defaults; section 8 changes them without a redeploy.
+cents. The defaults are `200` and `1000` with `BILLING_CURRENCY=USD`, which is
+**$2.00** and **$10.00 per month**. They are the deployment defaults; section 8
+changes them without a redeploy.
+
+The first month is paid through hosted checkout. Once its webhook has granted
+the plan, the client activates auto-renew from the saved card; the provider plan
+has a 30-day trial equal to the paid month, so activation does not charge again.
+Press **Create missing plans** after changing prices so the provider plans match
+the catalog.
 
 ---
 

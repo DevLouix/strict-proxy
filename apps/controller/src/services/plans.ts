@@ -31,6 +31,16 @@ const PLAN_SETTING_PREFIX = 'openpay.plan.';
 /** Operator override / cache for this deployment's merchant id. */
 export const MERCHANT_SETTING_KEY = 'openpay.merchantId';
 
+/**
+ * Trial applied to a tier's provider plan.
+ *
+ * A subscription is started only after the customer's first hosted checkout has
+ * been paid and verified, so the first month is already covered. The trial stops
+ * the provider from charging that month a second time when the subscription is
+ * created; the first recurring charge lands when the paid month ends.
+ */
+export const RECURRING_TRIAL_DAYS = 30;
+
 /** Marker written into plan metadata so a plan can be recognised as ours. */
 export const PLAN_TIER_METADATA_KEY = 'strict_proxy_tier';
 
@@ -46,6 +56,8 @@ export interface TierPlan {
   actualAmountMinor: number;
   currency: string;
   interval: string;
+  /** Provider-side free days before the first recurring charge. */
+  trialDays: number;
   status: string;
   /**
    * Whether a subscription can actually be started against this plan.
@@ -221,6 +233,7 @@ export async function ensureTierPlan(
         actualAmountMinor: Number(existing.plan['amount'] ?? 0),
         currency: String(existing.plan['currency'] ?? price.currency),
         interval: `${String(existing.plan['interval_count'] ?? 1)} ${String(existing.plan['interval_unit'] ?? 'month')}`,
+        trialDays: Number(existing.plan['trial_days'] ?? 0),
         status: String(existing.plan['status'] ?? 'unknown'),
         usable,
         // A live plan is never silently repriced; the drift is reported instead.
@@ -240,6 +253,7 @@ export async function ensureTierPlan(
     currency: price.currency as never,
     interval_unit: 'month',
     interval_count: 1,
+    trial_days: RECURRING_TRIAL_DAYS,
     // The SDK's `PlanCreateParams` omits `metadata`, but the API accepts it and
     // stores it (verified live: written on create, returned on read). Without it
     // a plan could only be recognised by name, which is not a safe key. Cast
@@ -261,6 +275,7 @@ export async function ensureTierPlan(
     actualAmountMinor: Number(plan['amount'] ?? price.amountMinor),
     currency: String(plan['currency'] ?? price.currency),
     interval: `${String(plan['interval_count'] ?? 1)} ${String(plan['interval_unit'] ?? 'month')}`,
+    trialDays: Number(plan['trial_days'] ?? RECURRING_TRIAL_DAYS),
     status: String(plan['status'] ?? 'active'),
     usable: isUsablePlan(plan),
     priceMismatch: false,

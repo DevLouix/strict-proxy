@@ -121,9 +121,30 @@ app.use(createGatekeeperMiddleware({
   cacheTtlSeconds: 300,        // cached fleet IP list
   trustForwardedFor: true,     // only behind a trusted reverse proxy
   failureMode: 'closed',       // controller down => deny
+  requiredTier: 'pro',         // omit for fleet-only; 'standard' also admits pro
 }));
-// Non-fleet clients now receive 403 GATEKEEPER_DENIED (customizable).
+// Non-fleet clients receive 403 GATEKEEPER_DENIED. Fleet clients without a
+// valid plan receive 401/403 GATEKEEPER_ENTITLEMENT_* / TIER_INSUFFICIENT.
 ```
+
+The client fetches a short-lived token from `GET /api/v1/entitlement` with its
+access token and sends it as `x-strict-proxy-entitlement`:
+
+```ts
+const { token } = await fetch(`${CONTROLLER}/api/v1/entitlement`, {
+  headers: { authorization: `Bearer ${accessToken}` },
+}).then((r) => r.json());
+await fetch('https://pro-only.example.com/api', {
+  headers: { 'x-strict-proxy-entitlement': token },
+});
+```
+
+The Gatekeeper verifies the Ed25519 signature offline, then applies the plan
+hierarchy: a `standard` site admits `standard` and `pro`; a `pro` site admits
+only `pro`; `free` and lapsed plans are refused. Tokens default to five minutes
+(`ENTITLEMENT_TOKEN_TTL_SECONDS`, 60–900), so a cancellation takes effect within
+one token lifetime even without a controller call. On success the verified
+identity is available to the site as `req.strictProxy` (`userId`, `email`, `tier`).
 
 ## API surface
 
@@ -135,8 +156,10 @@ app.use(createGatekeeperMiddleware({
 | `GET /api/v1/me` | JWT | Profile + device seats |
 | `GET /api/v1/network/config` | JWT + active sub | Signed dynamic VLESS+REALITY bundle per user |
 | `GET /api/v1/network/nodes/public-ips` | public (signed) | Ed25519-signed fleet IP list for Gatekeeper |
-| `GET /api/v1/billing/catalog` / `subscription` / `usage` | JWT | Price catalog, plan state, bandwidth usage |
-| `POST /api/v1/billing/checkout` | JWT | Open a hosted OpenPay checkout |
+| `GET /api/v1/entitlement` | JWT | Short-lived Ed25519-signed plan token for Gatekeeper sites |
+| `GET /api/v1/billing/catalog` / `subscription` / `usage` | JWT | Price catalog, plan state (including `autoRenew`), bandwidth usage |
+| `POST /api/v1/billing/checkout` | JWT | Open a hosted OpenPay checkout (saves the card) |
+| `POST /api/v1/billing/recurring/activate` | JWT | Attach the saved card to the monthly subscription |
 | `GET /api/v1/billing/receipt/:reference` | JWT (own checkouts only) | Rendered provider invoice for a settled checkout |
 | `POST /api/v1/admin/node-enrollments` | admin JWT | Create a one-time enrollment token scoped to a region |
 | `GET /api/v1/admin/node-enrollments` / `DELETE .../:id` | admin JWT | Audit/revoke enrollment tokens |
@@ -330,11 +353,11 @@ arbitrary user. The `user_id` branch is an optimisation, not a trust boundary.
 | Tier | Default price (minor units) | Environment setting |
 |---|---|---|
 | `free` | not purchasable | — |
-| `standard` | 250000 | `STANDARD_TIER_AMOUNT_MINOR` |
-| `pro` | 750000 | `PRO_TIER_AMOUNT_MINOR` |
+| `standard` | 200 | `STANDARD_TIER_AMOUNT_MINOR` |
+| `pro` | 1000 | `PRO_TIER_AMOUNT_MINOR` |
 
-Currency comes from `BILLING_CURRENCY` (default `NGN`); amounts are minor units
-(kobo). The controller entrypoint refuses to boot on a non-positive or
+Currency comes from `BILLING_CURRENCY` (default `USD`); amounts are minor units
+(cents), so the defaults are **$2.00/month** and **$10.00/month**. The controller entrypoint refuses to boot on a non-positive or
 non-numeric amount, and on a half-configured gateway — a key without its
 webhook secret would mean every payment is silently dropped.
 
@@ -342,7 +365,14 @@ The environment holds the **default**. An operator can change what a tier costs
 from **Admin → Plans → Change** without a redeploy; that reprices the provider
 plan and the catalog together, so the advertised price and the billed price
 cannot be left disagreeing. An override carries the amount only — the currency
-and which tiers are purchasable stay deployment configuration. `PUT` and
+and which tiers are purchasable stay deployment configuration.
+
+The first payment is a hosted checkout; once its webhook has granted the plan,
+the app calls `POST /api/v1/billing/recurring/activate`, which turns the card
+saved by checkout into a monthly provider subscription. The provider plan carries
+a 30-day trial equal to the already-paid month, so the first renewal — not the
+activation itself — is the next charge. `subscription.renewed` extends access
+from there; a failed renewal follows the existing dunning path. `PUT` and
 `DELETE` on `/api/v1/admin/billing/plans/price` are the API behind that control.
 
 | Route | Purpose |
@@ -360,8 +390,8 @@ falls back to the placeholder HMAC adapter so local development still works;
 `GET /api/v1/billing/catalog` then reports `gateway: "unconfigured"` and the
 client hides the upgrade path.
 
-> `@fiatden/openpay` was pre-1.0 at the time of integration. Pin the version
-> and re-run the payments suite on upgrade.
+> `@fiatden/openpay` is pre-1.0. This integration is on **0.0.10**; pin it and
+> re-run the payments suite on upgrade.
 
 ### Verifying against a live gateway
 

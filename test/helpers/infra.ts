@@ -141,8 +141,8 @@ export function applyTestEnv(infra: Infra, overrides: TestEnvOverrides = {}): vo
   process.env.OPENPAY_SIGNATURE_HEADER = overrides.openpaySignatureHeader ?? 'x-webhook-signature-v1';
   process.env.OPENPAY_TIMESTAMP_TOLERANCE_SECONDS = String(overrides.openpayTimestampToleranceSeconds ?? 300);
   process.env.OPENPAY_PLATFORM_NAME = 'StrictProxy Test';
-  process.env.BILLING_CURRENCY = overrides.billingCurrency ?? 'NGN';
-  process.env.STANDARD_TIER_AMOUNT_MINOR = String(overrides.billingStandardAmountMinor ?? 250_000);
-  process.env.PRO_TIER_AMOUNT_MINOR = String(overrides.billingProAmountMinor ?? 750_000);
+  process.env.BILLING_CURRENCY = overrides.billingCurrency ?? 'USD';
+  process.env.STANDARD_TIER_AMOUNT_MINOR = String(overrides.billingStandardAmountMinor ?? 200);
+  process.env.PRO_TIER_AMOUNT_MINOR = String(overrides.billingProAmountMinor ?? 1_000);
   process.env.CLIENT_ANDROID_STORAGE_DIR = overrides.clientAndroidStorageDir ?? 'var/client-releases';
 }

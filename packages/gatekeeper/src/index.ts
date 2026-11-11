@@ -1,21 +1,31 @@
 /**
  * Gatekeeper SDK for Express.
  *
- * Denies access to any request whose client IP is not routed through an
- * active strict-proxy exit node. The authorized IP list is pulled from the
- * Central Controller, verified with its Ed25519 signature, and cached
- * in-memory with a TTL.
+ * Two independent checks:
+ *
+ *   1. The client IP must be an active strict-proxy exit node, verified from the
+ *      controller's Ed25519-signed list and cached with a TTL.
+ *   2. When `requiredTier` is set, the request must carry a valid entitlement
+ *      token for that tier or higher. `pro` satisfies a `standard` site;
+ *      `standard` never satisfies a `pro` site.
+ *
+ * The entitlement token is short-lived and signed by the controller, so the
+ * plan check is offline: no controller round trip per request, and no way for a
+ * caller to pick its own tier. A site can read the verified identity from
+ * `req.strictProxy`.
  */
 import type { RequestHandler, Request, Response, NextFunction } from 'express';
-import { loadSigningPublicKey, verifyJson } from '@strict-proxy/types';
-import type { PublicIpsResponse } from '@strict-proxy/types';
+import { loadSigningPublicKey, verifyJson, SUBSCRIPTION_TIERS } from '@strict-proxy/types';
+import type { EntitlementClaims, PublicIpsResponse, SubscriptionTier } from '@strict-proxy/types';
+
+export type PaidTier = Exclude<SubscriptionTier, 'free'>;
 
 export interface GatekeeperOptions {
   /** Central Controller base URL, e.g. https://controller.example.com */
   controllerBaseUrl: string;
   /**
-   * Ed25519 public key PEM(s) used to verify the signed IP list, keyed by
-   * keyId for rotation. At minimum the current controller key.
+   * Ed25519 public key PEM(s) used to verify the signed IP list and entitlement
+   * tokens, keyed by keyId for rotation. At minimum the current controller key.
    */
   publicKeys: Record<string, string>;
   /** Cache TTL in seconds. Defaults to 300 (must be < controller list TTL). */
@@ -23,8 +33,21 @@ export interface GatekeeperOptions {
   /** Refetch timeout in ms. Defaults to 5000. */
   fetchTimeoutMs?: number;
   /**
+   * Minimum plan required for this site. A `standard` site admits standard and
+   * pro accounts; a `pro` site admits only pro.
+   */
+  requiredTier?: PaidTier;
+  /**
+   * Header carrying the entitlement token. Defaults to
+   * `x-strict-proxy-entitlement`.
+   */
+  entitlementHeader?: string;
+  /** Clock skew allowed when checking token issue/expiry. Defaults to 30s. */
+  entitlementLeewaySeconds?: number;
+  /**
    * Response for unauthorized (non-fleet) clients. Defaults to a 403 JSON
-   * paywall payload. Set `redirectUrl` to send a 302 instead.
+   * paywall payload. Set `redirectUrl` to send a 302 instead. A custom response
+   * is also used for plan denials.
    */
   denyResponse?: { status: number; body: unknown } | { redirectUrl: string };
   /**
@@ -41,6 +64,107 @@ export interface GatekeeperOptions {
 interface CacheEntry {
   ips: Set<string>;
   expiresAtMs: number;
+}
+
+/** Exposed identity for a request that passed both checks. */
+export interface VerifiedEntitlement {
+  userId: string;
+  email: string;
+  tier: SubscriptionTier;
+  expiresAt: string;
+  currentPeriodEnd: string | null;
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      strictProxy?: VerifiedEntitlement;
+    }
+  }
+}
+
+/** Tier hierarchy used by site gating: pro includes everything standard has. */
+export const TIER_RANK: Record<SubscriptionTier, number> = { free: 0, standard: 1, pro: 2 };
+
+/** True when `actual` meets or exceeds the plan `required`. */
+export function tierSatisfies(actual: SubscriptionTier, required: SubscriptionTier): boolean {
+  return TIER_RANK[actual] >= TIER_RANK[required];
+}
+
+export type EntitlementFailure = 'malformed' | 'unknown_key' | 'bad_signature' | 'expired' | 'inactive';
+
+export interface EntitlementVerification {
+  ok: boolean;
+  entitlement?: VerifiedEntitlement;
+  reason?: EntitlementFailure;
+}
+
+function isClaims(value: unknown): value is EntitlementClaims {
+  if (!value || typeof value !== 'object') return false;
+  const c = value as Record<string, unknown>;
+  return (
+    c['version'] === 1 &&
+    typeof c['keyId'] === 'string' &&
+    typeof c['sub'] === 'string' &&
+    typeof c['email'] === 'string' &&
+    typeof c['tier'] === 'string' &&
+    SUBSCRIPTION_TIERS.includes(c['tier'] as SubscriptionTier) &&
+    (c['status'] === 'active' || c['status'] === 'inactive') &&
+    (c['currentPeriodEnd'] === null || typeof c['currentPeriodEnd'] === 'string') &&
+    typeof c['issuedAt'] === 'string' &&
+    typeof c['expiresAt'] === 'string'
+  );
+}
+
+/**
+ * Verifies `sp1.<claims>.<signature>` offline.
+ *
+ * Fails closed for anything unexpected. The signature proves the claims, not
+ * that the plan is still usable: the tier gate separately refuses a free or
+ * lapsed tier. That keeps "no plan" distinct from "forged token" for the
+ * caller, and makes the 403 say which plan is needed.
+ */
+export function verifyEntitlementToken(
+  token: string | undefined,
+  publicKeys: Record<string, string>,
+  opts: { nowMs?: number; leewaySeconds?: number } = {},
+): EntitlementVerification {
+  if (!token) return { ok: false, reason: 'malformed' };
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== 'sp1') return { ok: false, reason: 'malformed' };
+
+  let claims: unknown;
+  try {
+    claims = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'));
+  } catch {
+    return { ok: false, reason: 'malformed' };
+  }
+  if (!isClaims(claims)) return { ok: false, reason: 'malformed' };
+
+  const keyPem = publicKeys[claims.keyId];
+  if (!keyPem) return { ok: false, reason: 'unknown_key' };
+  const signatureB64 = Buffer.from(parts[2]!, 'base64url').toString('base64');
+  if (!verifyJson(loadSigningPublicKey(claims.keyId, keyPem), claims, signatureB64)) {
+    return { ok: false, reason: 'bad_signature' };
+  }
+
+  const now = opts.nowMs ?? Date.now();
+  const leewayMs = (opts.leewaySeconds ?? 30) * 1000;
+  const expiresAt = Date.parse(claims.expiresAt);
+  const issuedAt = Date.parse(claims.issuedAt);
+  if (!Number.isFinite(expiresAt) || expiresAt + leewayMs < now) return { ok: false, reason: 'expired' };
+  if (!Number.isFinite(issuedAt) || issuedAt - leewayMs > now) return { ok: false, reason: 'inactive' };
+
+  return {
+    ok: true,
+    entitlement: {
+      userId: claims.sub,
+      email: claims.email,
+      tier: claims.tier,
+      expiresAt: claims.expiresAt,
+      currentPeriodEnd: claims.currentPeriodEnd,
+    },
+  };
 }
 
 /** Extracts the client IP, honoring X-Forwarded-For when configured. */
@@ -66,12 +190,14 @@ export function clientIpOf(req: Request, trustForwardedFor: boolean): string | n
  *   app.use(createGatekeeperMiddleware({
  *     controllerBaseUrl: process.env.CONTROLLER_URL!,
  *     publicKeys: { primary: process.env.GATEKEEPER_PUBLIC_KEY_PEM! },
+ *     requiredTier: 'pro', // only Pro (and any higher tier) may enter
  *   }));
  */
 export function createGatekeeperMiddleware(options: GatekeeperOptions): RequestHandler {
   const ttlMs = (options.cacheTtlSeconds ?? 300) * 1000;
   const failureClosed = (options.failureMode ?? 'closed') === 'closed';
   const log = options.logger ?? (() => undefined);
+  const entitlementHeader = (options.entitlementHeader ?? 'x-strict-proxy-entitlement').toLowerCase();
   let cache: CacheEntry | null = null;
   let inFlight: Promise<Set<string>> | null = null;
 
@@ -128,35 +254,90 @@ export function createGatekeeperMiddleware(options: GatekeeperOptions): RequestH
 
       if (!ips) {
         if (failureClosed) {
-          deny(req, res, options);
+          deny(req, res, options, 'ip');
           return;
         }
-        next();
-        return;
+        // Open mode is about the controller being unreachable, not about the
+        // plan. Entitlement verification is offline, so it still runs below.
+        log('gatekeeper: fleet IP check unavailable; failureMode=open allows the IP through');
+      } else {
+        const ip = clientIpOf(req, options.trustForwardedFor ?? false);
+        if (!ip || !ips.has(ip)) {
+          deny(req, res, options, 'ip');
+          return;
+        }
       }
 
-      const ip = clientIpOf(req, options.trustForwardedFor ?? false);
-      if (ip && ips.has(ip)) {
-        next();
-        return;
+      if (options.requiredTier) {
+        const token = req.header(entitlementHeader);
+        const verified = verifyEntitlementToken(token, options.publicKeys, {
+          leewaySeconds: options.entitlementLeewaySeconds,
+        });
+        if (!verified.ok) {
+          deny(req, res, options, verified.reason === 'malformed' && !token ? 'entitlement_missing' : 'entitlement_invalid');
+          return;
+        }
+        if (!tierSatisfies(verified.entitlement!.tier, options.requiredTier)) {
+          deny(req, res, options, 'tier_insufficient', verified.entitlement!.tier);
+          return;
+        }
+        req.strictProxy = verified.entitlement;
       }
-      deny(req, res, options);
+
+      next();
     })().catch(next);
   };
 }
 
-function deny(req: Request, res: Response, options: GatekeeperOptions): void {
+type DenialReason = 'ip' | 'entitlement_missing' | 'entitlement_invalid' | 'tier_insufficient';
+
+function deny(req: Request, res: Response, options: GatekeeperOptions, reason: DenialReason, tier?: SubscriptionTier): void {
+  void req;
   if ('redirectUrl' in (options.denyResponse ?? {})) {
     const target = (options.denyResponse as { redirectUrl: string }).redirectUrl;
     res.redirect(302, target);
     return;
   }
   const custom = options.denyResponse as { status: number; body: unknown } | undefined;
-  res.status(custom?.status ?? 403).json(
-    custom?.body ?? {
+  if (custom) {
+    res.status(custom.status).json(custom.body);
+    return;
+  }
+
+  if (reason === 'ip') {
+    res.status(403).json({
       error: 'Access denied: you must be connected through the strict-proxy network.',
       code: 'GATEKEEPER_DENIED',
       hint: 'Connect your VPN client and retry.',
-    },
-  );
+    });
+    return;
+  }
+
+  if (reason === 'entitlement_missing') {
+    res.status(401).json({
+      error: 'This site requires a StrictProxy plan.',
+      code: 'GATEKEEPER_ENTITLEMENT_REQUIRED',
+      requiredTier: options.requiredTier ?? null,
+      hint: 'Sign in to the StrictProxy app, fetch /api/v1/entitlement, and send it in the entitlement header.',
+    });
+    return;
+  }
+
+  if (reason === 'entitlement_invalid') {
+    res.status(401).json({
+      error: 'Your StrictProxy entitlement token is invalid or has expired.',
+      code: 'GATEKEEPER_ENTITLEMENT_INVALID',
+      requiredTier: options.requiredTier ?? null,
+      hint: 'Refresh your entitlement token and retry.',
+    });
+    return;
+  }
+
+  res.status(403).json({
+    error: `This site requires the ${options.requiredTier} plan.`,
+    code: 'GATEKEEPER_TIER_INSUFFICIENT',
+    requiredTier: options.requiredTier ?? null,
+    actualTier: tier ?? null,
+    hint: `Upgrade to ${options.requiredTier} to access this site.`,
+  });
 }

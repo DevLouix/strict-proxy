@@ -154,7 +154,9 @@ agent from "helpfully" wiring up something that does not belong here.
 
 | Call | Where | Why |
 |---|---|---|
-| `checkout.create` | `services/billing.ts` | hosted payment page, the only way a customer pays |
+| `checkout.create` | `services/billing.ts` | hosted payment page for the first month; saves the card for recurring billing |
+| `subscriptions.create` | `services/recurring.ts` | starts the monthly subscription from the saved card after the first payment clears |
+| `customers.paymentMethods` | `services/recurring.ts` | finds the reusable card saved by checkout |
 | `checkout.create({coupon_code})` | `routes/billing.ts` | discounts, validated before the session opens |
 | `coupons.validate` | `routes/billing.ts` | reject a bad code as a 400, not at payment time |
 | `disputes.list` / `get` / `listEvidenceSubmissions` | `routes/disputes.ts` | contest a chargeback instead of losing it |
@@ -194,7 +196,7 @@ it is wrong for a VPN that meters its own bandwidth.
 
 | Not used | Reason |
 |---|---|
-| `subscriptions.create` | starting a subscription needs a tokenised payment method; the merchant's settlement-provider key is rejected, so this is blocked at the account, not the code (see *Still open*) |
+| `charges.tokenize` | the hosted checkout already saves the card; tokenization adds a second payment surface the mobile client cannot render |
 | `billing.*`, `metering.*` | our usage is bandwidth per node, which only we can measure |
 | `wallets.*`, `financialAccounts.*` | WaaS is for embedding a balance in a third-party product |
 | `payouts.*` | no node-operator payouts |
@@ -403,6 +405,13 @@ The merchant id is derived from the app record. `merchants.list` is *not* usable
 for this — verified live, it returns child merchants under the account rather
 than the caller.
 
+> **Recurring activation:** the first checkout is one-off; once its webhook has
+> granted the plan, `services/recurring.ts` starts a subscription against the
+> same tier's plan using the saved card. The plan carries a 30-day trial equal
+> to the already-paid period, which is what prevents a double first charge. A
+> failure leaves the paid month intact and is reported (`no_saved_card`,
+> `no_customer`, `plan_not_sellable`) instead of silently enabling auto-renew.
+>
 > **Unverified:** whether OpenPay reprices a subscription that is already in
 > flight when its plan's amount changes, or keeps the amount it was created
 > with. It cannot be checked from here while subscriptions cannot be created
@@ -428,14 +437,14 @@ than the caller.
 > pinned `^0.0.6`, so npm installed a second copy under
 > `apps/controller/node_modules`. The error mapping duck-types the HTTP status
 > instead of relying on class identity, and the two declarations are now kept in
-> step (both on `^0.0.7`). Check `ls apps/controller/node_modules/@fiatden` if an
+> step (both on `^0.0.10`). Check `ls apps/controller/node_modules/@fiatden` if an
 > SDK type starts behaving strangely.
 
 ### Still open
 
 | Gap | Impact | Why / where |
 |---|---|---|
-| **Recurring checkout not reachable yet** | plans are provisioned and `subscription.renewed` is handled and tested, but nothing can be charged until the provider account can take money, so the first purchase is still a one-time checkout | Confirmed live, repeatedly, with the SDK at `0.0.7`. The single root cause is the **provider account**, not the key: `checkout.create` returns `502 provider_channel_inactive` — "the provider account has no enabled payment channel yet. Complete the provider account setup (enable channels, finish provider-side KYC) and retry." The merchant record agrees: `kyc_status: pending`, settlement account number is the placeholder `0000000000`, and `merchants.listSettlementAccounts` returns `[]`. Because every attempt fails, the account's success rate sits near 2.6%, which trips the router (`recent platform failures exceed the routing threshold and these credentials are unverified`) and makes even a valid key unroutable; **Test connection** clears that stale history but cannot make a channel exist. Watch for two misleading signals: a green key check (`credentials_valid`) does not mean the account can charge, and with paystack excluded the router moves on, so `charges.tokenize` reports `No active korapay provider configuration` instead of the real cause. No code change is pending: the webhook already handles `subscription.activated`, and SDK `0.0.7` can start the subscription from the provider side (`TokenizeParams.plan_id`) or from a card saved by `checkout.create`. |
+| **Live recurring charge not observed yet** | code now starts a monthly subscription from the card saved by the first checkout, with a 30-day trial so the paid month is not charged twice; the provider account still has to be able to take money | The recurring path is covered with a stubbed provider (`recurring-activation.test.ts`), and the existing webhook tests cover `subscription.renewed` / `failed` / `paused`. It has not been exercised against the live merchant because `checkout.create` still returns `502 provider_channel_inactive` — `kyc_status: pending` and no settlement account. Once that account is enabled, watch the first activation: it calls `customers.paymentMethods` and then `subscriptions.create` with `trial_days: 30`. If the provider does not save a reusable card, activation reports `no_saved_card` instead of pretending auto-renew is on. |
 | **iOS verified in CI only** | Linux release and Android debug APK are built and verified locally; iOS needs macOS + Xcode so it is built by `ios-verification` in CI with `--no-codesign` (compile verification, not signing) | an Apple team identity is required to sign a real build |
 | **Single workspace** | `app_id` scoping unused; one app (`Core`) exists and plans inherit it | OpenPay `apps` |
 | **No node-operator payouts** | operators are paid out of band | OpenPay `payouts` — a product decision, not a defect |
@@ -454,9 +463,9 @@ each one changed a decision:
 | `PlanCreateParams` requires `merchant_id` | it must be derived; `merchants.list` returns *child* merchants, so the app record is used instead |
 | `PlanCreateParams` omits `metadata`, but the API stores it | the tier tag is cast through rather than dropped; discovery depends on it |
 | `subscriptions.deletePlan` exists from SDK 0.0.6 | plans can be cleaned up; a delete leaves an *archived* plan when history references it |
-| The controller pinned `^0.0.5` while the root pinned `^0.0.6` | npm installed a second SDK copy for the controller, which is why `instanceof OpenPayError` failed; both now declare `^0.0.7` |
+| The controller pinned `^0.0.5` while the root pinned `^0.0.6` | npm installed a second SDK copy for the controller, which is why `instanceof OpenPayError` failed; both now declare `^0.0.10` |
 | `deletePlan` archives rather than deletes when referenced | archived plans are replaced on the next sync, and the replacement is reported |
-| `charges.tokenize` is not a separate blocker | the stored key is accepted; tokenize's failure is downstream of routing, not a second credential problem. SDK `0.0.7` added `TokenizeParams.plan_id`, so the provider can start the subscription itself (see *Still open*) |
+| `charges.tokenize` is not a separate blocker | the stored key is accepted; tokenize's failure is downstream of routing, not a second credential problem. SDK 0.0.10 keeps `TokenizeParams.plan_id`, but the product uses the card saved by hosted checkout instead of a second card-capture surface |
 | `providers.validateConfig`/`getReadiness`/`getHealth` separate our key from the account | they answer different questions, and they disagree in a way that matters. `validateConfig('saved')` checks the key against the provider's bank list and can report `credentials_valid` — and `listConfigs().connection_status: valid` with it — while `getReadiness().credentials` reports `unreachable` and `health` reports `available: false`. A green key check does **not** mean the account can take money. The panel labels them "key check" and "routing" for exactly that reason. |
 | A failing account makes a *valid* key unroutable | the router refuses a provider once recent failures exceed its threshold, and says so: `recent platform failures exceed the routing threshold and these credentials are unverified`. `validateConfig({source:'saved', update_saved_status:true})` is what the provider asks for to clear that stale history, and it is what the **Test connection** button does — but it only helps if the account can then pass. |
 | An unroutable provider sends other calls to the next provider | with paystack unavailable, `charges.tokenize` stopped returning a 401 and started returning `No active korapay provider configuration for this merchant` — the router had moved on to an unconfigured provider, so the error names the wrong thing. Read it as "no provider could take this", not "korapay is missing". |

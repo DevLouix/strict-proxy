@@ -19,10 +19,10 @@ class _FixedBilling extends BillingController {
       subscription: summary,
       catalog: const BillingCatalog(
         gateway: 'openpay',
-        currency: 'NGN',
+        currency: 'USD',
         tiers: [
-          TierPrice(tier: 'standard', label: 'Standard', amountMinor: 250000, currency: 'NGN'),
-          TierPrice(tier: 'pro', label: 'Pro', amountMinor: 750000, currency: 'NGN'),
+          TierPrice(tier: 'standard', label: 'Standard', amountMinor: 200, currency: 'USD'),
+          TierPrice(tier: 'pro', label: 'Pro', amountMinor: 1000, currency: 'USD'),
         ],
       ),
     );

@@ -67,7 +67,7 @@ function parseStoredAmount(raw: string): number | null {
  */
 export function validatePriceAmount(amountMinor: unknown): number {
   if (typeof amountMinor !== 'number' || !Number.isInteger(amountMinor) || amountMinor <= 0) {
-    throw new BillingError('unknown_tier', 'amountMinor must be a positive integer in minor units (e.g. 250000 = 2500.00)');
+    throw new BillingError('unknown_tier', 'amountMinor must be a positive integer in minor units (e.g. 200 = 2.00)');
   }
   return amountMinor;
 }

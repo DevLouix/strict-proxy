@@ -48,7 +48,7 @@ export function money(amountMinor, currency) {
   if (!Number.isFinite(n)) return '—';
   try {
     const digits = 2;
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'NGN', maximumFractionDigits: digits }).format(n / 10 ** digits);
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'USD', maximumFractionDigits: digits }).format(n / 10 ** digits);
   } catch {
     return `${(n / 100).toFixed(2)} ${currency ?? ''}`.trim();
   }

@@ -15,6 +15,7 @@ import { BillingError, purchasableTiers, validateBillingConfig, priceForTier } f
 import { loadPriceOverrides } from '../services/pricing.js';
 import { isOpenPayConfigured, describeOpenPayError, createOpenPayClient } from '../services/openpay.js';
 import { createTierCheckout, latestCheckoutForUser } from '../services/billing.js';
+import { activateRecurringSubscription } from '../services/recurring.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from '../services/usage.js';
 import { rateLimit } from '../services/rate-limit.js';
 
@@ -48,7 +49,12 @@ export function buildBillingRouter(ctx: Ctx): Router {
     asyncHandler(async (req: Request, res: Response) => {
       const claims = req.auth!;
       const [sub] = await ctx.db
-        .select({ tier: subscriptions.tier, status: subscriptions.status, currentPeriodEnd: subscriptions.currentPeriodEnd })
+        .select({
+          tier: subscriptions.tier,
+          status: subscriptions.status,
+          currentPeriodEnd: subscriptions.currentPeriodEnd,
+          providerSubscriptionId: subscriptions.providerSubscriptionId,
+        })
         .from(subscriptions)
         .where(eq(subscriptions.userId, claims.sub))
         .limit(1);
@@ -62,6 +68,10 @@ export function buildBillingRouter(ctx: Ctx): Router {
         tier,
         status: sub?.status ?? 'active',
         currentPeriodEnd: sub?.currentPeriodEnd ? sub.currentPeriodEnd.toISOString() : null,
+        // True once the saved card is attached to a monthly provider
+        // subscription. The client uses this to enable auto-renew after the
+        // first verified payment without asking the user to pay twice.
+        autoRenew: Boolean(sub?.providerSubscriptionId),
         limits: {
           deviceSeats: definition.deviceSeats,
           maxNodes: definition.maxNodes,
@@ -138,6 +148,35 @@ export function buildBillingRouter(ctx: Ctx): Router {
         const described = describeOpenPayError(err);
         console.error(`[controller] openpay checkout failed (${described.code}):`, err);
         res.status(described.status).json({
+          error: described.message,
+          code: described.code,
+          providerCode: described.providerCode,
+          retryable: described.retryable,
+        });
+      }
+    }),
+  );
+
+  /**
+   * Starts the monthly subscription from the card saved by the first checkout.
+   *
+   * Safe to call repeatedly: an account that is already recurring is reported
+   * as active and nothing is created twice. Non-eligible accounts get a 200
+   * with `activated: false` and a reason the app can display, rather than an
+   * error that looks like a server fault.
+   */
+  router.post(
+    '/api/v1/billing/recurring/activate',
+    requireAuth,
+    asyncHandler(async (req: Request, res: Response) => {
+      try {
+        const result = await activateRecurringSubscription(ctx.db, ctx.cfg, req.auth!.sub);
+        res.json(result);
+      } catch (err) {
+        const described = describeOpenPayError(err);
+        console.error(`[controller] recurring activation failed (${described.code}):`, err);
+        res.status(described.status).json({
+          activated: false,
           error: described.message,
           code: described.code,
           providerCode: described.providerCode,

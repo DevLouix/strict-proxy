@@ -64,7 +64,10 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
                 child: Center(child: Text('Could not load your subscription.')),
               )
             else ...[
-              _PlanCard(subscription: state.subscription!),
+              _PlanCard(
+                subscription: state.subscription!,
+                onEnableAutoRenew: () => ref.read(billingProvider.notifier).enableAutoRenew(),
+              ),
               const SizedBox(height: 16),
               if (state.subscription!.hasQuota) ...[
                 _UsageCard(subscription: state.subscription!),
@@ -261,8 +264,9 @@ class _DangerZone extends StatelessWidget {
 }
 
 class _PlanCard extends StatelessWidget {
-  const _PlanCard({required this.subscription});
+  const _PlanCard({required this.subscription, required this.onEnableAutoRenew});
   final SubscriptionSummary subscription;
+  final Future<void> Function() onEnableAutoRenew;
 
   @override
   Widget build(BuildContext context) {
@@ -292,6 +296,32 @@ class _PlanCard extends StatelessWidget {
                   : 'Renews ${formatDate(subscription.currentPeriodEnd)}',
               style: theme.textTheme.bodySmall,
             ),
+            if (subscription.hasActivePaidPlan) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(
+                    subscription.autoRenew ? Icons.autorenew : Icons.autorenew_outlined,
+                    size: 16,
+                    color: subscription.autoRenew ? Colors.greenAccent : theme.hintColor,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      subscription.autoRenew
+                          ? 'Auto-renew on — billed monthly to your saved card'
+                          : 'One-time payment — auto-renew is not enabled',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  if (!subscription.autoRenew)
+                    TextButton(
+                      onPressed: () => onEnableAutoRenew(),
+                      child: const Text('Enable'),
+                    ),
+                ],
+              ),
+            ],
           ],
         ),
       ),

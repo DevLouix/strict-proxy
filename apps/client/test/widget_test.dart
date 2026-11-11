@@ -36,6 +36,9 @@ class _FakeApi extends ControllerApi {
   Future<UsageReport> usage() async => usageReport ?? const UsageReport(totalBytes: 0, credentials: []);
 
   @override
+  Future<String?> activateRecurring() async => null;
+
+  @override
   Future<CheckoutSession> createCheckout(String tier, {String? successUrl, String? cancelUrl}) async {
     final err = checkoutError;
     if (err != null) throw err;
@@ -43,8 +46,8 @@ class _FakeApi extends ControllerApi {
       reference: 'ref_1',
       checkoutUrl: 'https://pay.example/checkout',
       tier: tier,
-      amountMinor: 750000,
-      currency: 'NGN',
+      amountMinor: 1000,
+      currency: 'USD',
     );
   }
 
@@ -73,10 +76,10 @@ SubscriptionSummary _summary({
 
 const _catalog = BillingCatalog(
   gateway: 'openpay',
-  currency: 'NGN',
+  currency: 'USD',
   tiers: [
-    TierPrice(tier: 'standard', label: 'Standard', amountMinor: 250000, currency: 'NGN'),
-    TierPrice(tier: 'pro', label: 'Pro', amountMinor: 750000, currency: 'NGN'),
+    TierPrice(tier: 'standard', label: 'Standard', amountMinor: 200, currency: 'USD'),
+    TierPrice(tier: 'pro', label: 'Pro', amountMinor: 1000, currency: 'USD'),
   ],
 );
 
@@ -111,7 +114,7 @@ void main() {
   testWidgets('account screen shows a usage bar for capped tiers', (tester) async {
     await tester.pumpWidget(_wrap(_FakeApi(
       summary: _summary(used: 5368709120, remaining: 5368709120),
-      catalog: const BillingCatalog(gateway: 'openpay', currency: 'NGN', tiers: []),
+      catalog: const BillingCatalog(gateway: 'openpay', currency: 'USD', tiers: []),
     )));
     await tester.pumpAndSettle();
 
@@ -123,7 +126,7 @@ void main() {
   testWidgets('account screen warns when the quota is exhausted', (tester) async {
     await tester.pumpWidget(_wrap(_FakeApi(
       summary: _summary(used: 10737418240, remaining: 0),
-      catalog: const BillingCatalog(gateway: 'openpay', currency: 'NGN', tiers: []),
+      catalog: const BillingCatalog(gateway: 'openpay', currency: 'USD', tiers: []),
     )));
     await tester.pumpAndSettle();
 
@@ -141,7 +144,7 @@ void main() {
   testWidgets('account screen disables upgrades when no gateway is configured', (tester) async {
     await tester.pumpWidget(_wrap(_FakeApi(
       summary: _summary(),
-      catalog: const BillingCatalog(gateway: 'unconfigured', currency: 'NGN', tiers: []),
+      catalog: const BillingCatalog(gateway: 'unconfigured', currency: 'USD', tiers: []),
     )));
     await tester.pumpAndSettle();
 
@@ -151,7 +154,7 @@ void main() {
   testWidgets('account screen lists per-node usage', (tester) async {
     await tester.pumpWidget(_wrap(_FakeApi(
       summary: _summary(),
-      catalog: const BillingCatalog(gateway: 'openpay', currency: 'NGN', tiers: []),
+      catalog: const BillingCatalog(gateway: 'openpay', currency: 'USD', tiers: []),
       usageReport: const UsageReport(
         totalBytes: 3000,
         credentials: [

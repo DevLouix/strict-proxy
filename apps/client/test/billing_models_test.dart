@@ -6,22 +6,22 @@ void main() {
     test('parses a normal catalog payload', () {
       final catalog = BillingCatalog.fromJson({
         'gateway': 'openpay',
-        'currency': 'NGN',
+        'currency': 'USD',
         'tiers': [
-          {'tier': 'standard', 'label': 'Standard', 'amountMinor': 250000, 'currency': 'NGN'},
-          {'tier': 'pro', 'label': 'Pro', 'amountMinor': 750000, 'currency': 'NGN'},
+          {'tier': 'standard', 'label': 'Standard', 'amountMinor': 200, 'currency': 'USD'},
+          {'tier': 'pro', 'label': 'Pro', 'amountMinor': 1000, 'currency': 'USD'},
         ],
       });
 
       expect(catalog.gateway, 'openpay');
       expect(catalog.isUnconfigured, isFalse);
       expect(catalog.tiers.length, 2);
-      expect(catalog.tierNamed('pro')!.amountMinor, 750000);
+      expect(catalog.tierNamed('pro')!.amountMinor, 1000);
       expect(catalog.tierNamed('free'), isNull);
     });
 
     test('flags an unconfigured gateway', () {
-      final catalog = BillingCatalog.fromJson({'gateway': 'unconfigured', 'currency': 'NGN', 'tiers': <dynamic>[]});
+      final catalog = BillingCatalog.fromJson({'gateway': 'unconfigured', 'currency': 'USD', 'tiers': <dynamic>[]});
       expect(catalog.isUnconfigured, isTrue);
       expect(catalog.tiers, isEmpty);
     });
@@ -33,8 +33,8 @@ void main() {
     });
 
     test('tier price formats minor units as a major amount', () {
-      expect(const TierPrice(tier: 'pro', label: 'Pro', amountMinor: 750000, currency: 'NGN').formatted, 'NGN 7500');
-      expect(const TierPrice(tier: 'pro', label: 'Pro', amountMinor: 250050, currency: 'NGN').formatted, 'NGN 2500.50');
+      expect(const TierPrice(tier: 'pro', label: 'Pro', amountMinor: 1000, currency: 'USD').formatted, 'USD 10');
+      expect(const TierPrice(tier: 'pro', label: 'Pro', amountMinor: 2050, currency: 'USD').formatted, 'USD 20.50');
     });
   });
 
@@ -53,6 +53,7 @@ void main() {
           'limits': {'deviceSeats': 1, 'maxNodes': 2, 'bandwidthQuotaBytes': quotaBytes},
           'usage': {'bytesUsed': bytesUsed, 'bytesRemaining': bytesRemaining},
           'pendingCheckout': {'reference': 'spx-123'},
+          'autoRenew': true,
         };
 
     test('parses limits and usage', () {
@@ -66,6 +67,7 @@ void main() {
       expect(sub.bytesUsed, 5368709120);
       expect(sub.currentPeriodEnd, isNotNull);
       expect(sub.pendingCheckout, 'spx-123');
+      expect(sub.autoRenew, isTrue);
     });
 
     test('an unlimited tier reports no quota', () {
@@ -107,12 +109,12 @@ void main() {
         'reference': 'op_ref_1',
         'checkoutUrl': 'https://pay.example/abc',
         'tier': 'pro',
-        'amountMinor': 750000,
-        'currency': 'NGN',
+        'amountMinor': 1000,
+        'currency': 'USD',
       });
       expect(session.checkoutUrl, 'https://pay.example/abc');
       expect(session.tier, 'pro');
-      expect(session.amountMinor, 750000);
+      expect(session.amountMinor, 1000);
     });
 
     test('defaults an empty payload rather than throwing', () {

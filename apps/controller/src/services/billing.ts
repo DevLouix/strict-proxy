@@ -65,6 +65,9 @@ export async function createTierCheckout(
     currency: price.currency,
     success_url: params.successUrl,
     cancel_url: params.cancelUrl,
+    // The recurring subscription is started from this saved card once the
+    // payment is verified; without it there is nothing to bill next month.
+    save_card: true,
     ...(params.couponCode ? { coupon_code: params.couponCode } : {}),
     metadata: {
       user_id: params.userId,

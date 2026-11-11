@@ -18,7 +18,7 @@ class TierPrice {
         tier: json['tier'] as String? ?? 'unknown',
         label: json['label'] as String? ?? (json['tier'] as String? ?? 'unknown'),
         amountMinor: _asInt(json['amountMinor']),
-        currency: json['currency'] as String? ?? 'NGN',
+        currency: json['currency'] as String? ?? 'USD',
       );
 
   /// Price as a major-unit string (amounts are minor units, e.g. kobo).
@@ -50,7 +50,7 @@ class BillingCatalog {
         : const <TierPrice>[];
     return BillingCatalog(
       gateway: json['gateway'] as String? ?? 'unknown',
-      currency: json['currency'] as String? ?? 'NGN',
+      currency: json['currency'] as String? ?? 'USD',
       tiers: tiers,
     );
   }
@@ -84,7 +84,7 @@ class CheckoutSession {
         checkoutUrl: json['checkoutUrl'] as String? ?? '',
         tier: json['tier'] as String? ?? 'unknown',
         amountMinor: _asInt(json['amountMinor']),
-        currency: json['currency'] as String? ?? 'NGN',
+        currency: json['currency'] as String? ?? 'USD',
       );
 }
 
@@ -100,6 +100,7 @@ class SubscriptionSummary {
     required this.bytesUsed,
     required this.bytesRemaining,
     required this.pendingCheckout,
+    this.autoRenew = false,
   });
 
   final String tier;
@@ -115,6 +116,9 @@ class SubscriptionSummary {
   /// null means unlimited.
   final int? bytesRemaining;
   final String? pendingCheckout;
+
+  /// True once the saved card is attached to a monthly provider subscription.
+  final bool autoRenew;
 
   bool get isActive => status == 'active';
 
@@ -154,6 +158,7 @@ class SubscriptionSummary {
       bytesUsed: _asInt(usage['bytesUsed']),
       bytesRemaining: remaining,
       pendingCheckout: pending['reference'] as String?,
+      autoRenew: json['autoRenew'] == true,
     );
   }
 }

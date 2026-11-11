@@ -68,6 +68,9 @@ class _RecordingApi extends ControllerApi {
   }
 
   @override
+  Future<String?> activateRecurring() async => null;
+
+  @override
   void dispose() {}
 }
 
@@ -98,7 +101,7 @@ SubscriptionSummary _summary() => SubscriptionSummary(
       pendingCheckout: null,
     );
 
-const _catalog = BillingCatalog(gateway: 'openpay', currency: 'NGN', tiers: []);
+const _catalog = BillingCatalog(gateway: 'openpay', currency: 'USD', tiers: []);
 
 List<Override> _overrides(_RecordingApi api, [_FakeTokenStore? store]) => [
       apiProvider.overrideWithValue(api),

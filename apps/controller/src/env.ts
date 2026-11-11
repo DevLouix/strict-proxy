@@ -81,6 +81,10 @@ export interface ControllerConfig {
    */
   settingsEncryptionKey?: string;
 
+  // -- Entitlement tokens ---------------------------------------------------
+  /** Lifetime of a signed entitlement token presented to Gatekeeper sites. */
+  entitlementTokenTtlSeconds: number;
+
   // -- Billing catalog ------------------------------------------------------
   /** ISO 4217 code for checkout sessions. */
   billingCurrency: string;
@@ -130,9 +134,10 @@ export function loadConfig(): ControllerConfig {
     openpayTimestampToleranceSeconds: optionalInt('OPENPAY_TIMESTAMP_TOLERANCE_SECONDS', 300),
     openpayPlatformName: optionalString('OPENPAY_PLATFORM_NAME', 'StrictProxy'),
 
-    billingCurrency: optionalString('BILLING_CURRENCY', 'NGN'),
-    billingStandardAmountMinor: optionalInt('STANDARD_TIER_AMOUNT_MINOR', 250_000),
-    billingProAmountMinor: optionalInt('PRO_TIER_AMOUNT_MINOR', 750_000),
+    entitlementTokenTtlSeconds: optionalInt('ENTITLEMENT_TOKEN_TTL_SECONDS', 300),
+    billingCurrency: optionalString('BILLING_CURRENCY', 'USD'),
+    billingStandardAmountMinor: optionalInt('STANDARD_TIER_AMOUNT_MINOR', 200),
+    billingProAmountMinor: optionalInt('PRO_TIER_AMOUNT_MINOR', 1_000),
 
     publicAppUrl: optionalString('PUBLIC_APP_URL', 'http://localhost:3000'),
     clientAndroidVersion: optionalString('CLIENT_ANDROID_VERSION', ''),

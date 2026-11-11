@@ -179,7 +179,7 @@ test('provider readiness is reported with the gateway own reasons', async () => 
 
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal(res.body.gateway, 'openpay');
-  assert.equal(res.body.currency, 'NGN');
+  assert.equal(res.body.currency, 'USD');
   assert.equal(res.body.merchantId, MERCHANT);
   assert.equal(res.body.providers.length, 1);
 
@@ -199,7 +199,7 @@ test('provider readiness is reported with the gateway own reasons', async () => 
   assert.equal(res.body.configs[0]!.secretKeyConfigured, true);
 
   // The diagnostic must ask about the configured currency, not guess one.
-  assert.ok(gatewayPaths.some((p) => p.startsWith('/v1/providers/readiness') && p.includes('currency=NGN')), gatewayPaths.join(', '));
+  assert.ok(gatewayPaths.some((p) => p.startsWith('/v1/providers/readiness') && p.includes('currency=USD')), gatewayPaths.join(', '));
 });
 
 test('the connection test reports the provider verdict and asks to save it', async () => {

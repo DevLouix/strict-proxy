@@ -30,6 +30,7 @@ import { publicIpFromRequest } from './services/client-ip.js';
 import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
 import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
+import { mintEntitlementToken } from './services/entitlements.js';
 
 interface Ctx {
   db: Db;
@@ -504,6 +505,16 @@ export function buildRouter(ctx: Ctx): Router {
       }
       const bundle = await buildSignedConfigBundle(ctx.db, ctx.cfg, { userId: claims.sub, tier: sub.tier });
       res.json(bundle);
+    }),
+  );
+
+  // -- entitlement tokens (gatekeeper sites) ---------------------------------
+  router.get(
+    '/api/v1/entitlement',
+    requireAuth,
+    asyncHandler(async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store, must-revalidate');
+      res.json(await mintEntitlementToken(ctx.db, ctx.cfg, req.auth!.sub));
     }),
   );
 

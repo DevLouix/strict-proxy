@@ -209,6 +209,40 @@ export interface PublicIpsResponse {
   ips: string[];
 }
 
+/**
+ * Claims inside a short-lived entitlement token.
+ *
+ * The token proves the plan a signed-in account held when it was minted. It is
+ * signed by the controller's Ed25519 key so a Gatekeeper-protected site can
+ * verify it without calling the controller on every request.
+ */
+export interface EntitlementClaims {
+  version: 1;
+  /** Signing key id, so the verifier knows which configured public key to use. */
+  keyId: string;
+  /** Local user id. */
+  sub: string;
+  email: string;
+  /** Effective tier at mint time; `free` when the paid period has lapsed. */
+  tier: SubscriptionTier;
+  /** `active` only when the entitlement is usable. */
+  status: 'active' | 'inactive';
+  currentPeriodEnd: string | null;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+/** Minted entitlement token returned to the client. */
+export interface EntitlementTokenResponse {
+  /** `sp1.<base64url claims>.<base64url signature>` */
+  token: string;
+  keyId: string;
+  tier: SubscriptionTier;
+  status: 'active' | 'inactive';
+  expiresAt: string;
+  currentPeriodEnd: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Payments (gateway-agnostic; concrete adapter injected later)
 // ---------------------------------------------------------------------------
