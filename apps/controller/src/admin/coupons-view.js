@@ -13,11 +13,73 @@ import { h, mount, toast, money, badge, date } from './dom.js';
 export async function couponsView(api) {
   const host = h('div', {});
   let rows = [];
+  let expandedId = null;
+  let redemptions = null;
+  let redemptionError = null;
 
   async function load() {
     const data = await api.get('/api/v1/admin/coupons');
     rows = data.coupons ?? [];
     draw();
+  }
+
+  async function toggleRedemptions(c) {
+    if (expandedId === c.id) {
+      expandedId = null;
+      redemptions = null;
+      redemptionError = null;
+      draw();
+      return;
+    }
+    expandedId = c.id;
+    redemptions = null;
+    redemptionError = null;
+    draw();
+    const id = c.id;
+    try {
+      const data = await api.get(`/api/v1/admin/coupons/${id}/redemptions`);
+      if (expandedId !== id) return;
+      redemptions = data.redemptions ?? [];
+    } catch (err) {
+      if (expandedId !== id) return;
+      redemptionError = err.message || 'Could not load redemptions';
+    }
+    draw();
+  }
+
+  function redemptionsPanel() {
+    const coupon = rows.find((c) => c.id === expandedId);
+    let body;
+    if (redemptionError) {
+      body = h('div', { class: 'empty' }, redemptionError);
+    } else if (redemptions === null) {
+      body = h('div', { class: 'empty' }, 'Loading redemptions…');
+    } else if (redemptions.length === 0) {
+      body = h('div', { class: 'empty' }, 'No one has used this code yet.');
+    } else {
+      body = h('div', { class: 'table-wrap' },
+        h('table', {},
+          h('thead', {}, h('tr', {},
+            h('th', {}, 'Customer'),
+            h('th', {}, 'Before'),
+            h('th', {}, 'Charged'),
+            h('th', {}, 'Checkout'),
+            h('th', {}, 'When'),
+          )),
+          h('tbody', {}, ...redemptions.map((r) => h('tr', {},
+            h('td', { class: 'small' }, r.email ?? r.userId),
+            h('td', { class: 'small' }, money(r.amountBeforeMinor, r.currency)),
+            h('td', { class: 'small' }, money(r.amountAfterMinor, r.currency)),
+            h('td', { class: 'mono small' }, r.checkoutReference ?? '—'),
+            h('td', { class: 'small muted' }, date(r.createdAt)),
+          ))),
+        ),
+      );
+    }
+    return h('div', { class: 'panel' },
+      h('header', {}, h('h3', {}, `Redemptions for ${coupon ? coupon.code : 'this code'}`)),
+      h('div', { class: 'body' }, body),
+    );
   }
 
   function amountLabel(c) {
@@ -112,6 +174,10 @@ export async function couponsView(api) {
                 h('td', { class: 'actions' },
                   h('button', {
                     class: 'btn sm',
+                    onClick: () => toggleRedemptions(c),
+                  }, expandedId === c.id ? 'Hide uses' : 'Uses'),
+                  h('button', {
+                    class: 'btn sm',
                     onClick: async () => {
                       try {
                         await api.patch(`/api/v1/admin/coupons/${c.id}`, { active: !c.active });
@@ -127,6 +193,7 @@ export async function couponsView(api) {
             ),
         ),
       ),
+      expandedId ? redemptionsPanel() : null,
     );
   }
 

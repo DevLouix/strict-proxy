@@ -1,8 +1,8 @@
 /**
- * Coupon support at checkout.
+ * Local coupon support.
  *
- * Coupons are OpenPay's; we validate before opening a session so a bad code
- * fails as a clear 400 rather than surfacing at payment time.
+ * Codes live in this database; the provider only ever sees the discounted
+ * amount. An unknown code fails as a clear 400 before a session opens.
  */
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,9 +64,7 @@ test('the free tier is refused regardless of coupon', async () => {
   assert.equal(res.body.code, 'TIER_NOT_PURCHASABLE');
 });
 
-test('a coupon-service outage does not block paying customers', async () => {
-  // Coupon validation is best-effort by design: an outage must not stop a
-  // customer paying full price.
+test('an unknown code still goes through the normal checkout path', async () => {
   const u = await user();
   const res = await h.request('POST', '/api/v1/billing/checkout', {
     token: u.token,
@@ -166,6 +164,27 @@ test('disabling a code stops it immediately', async () => {
   const res = await h.request('POST', '/api/v1/billing/coupon/preview', { token: u.token, body: { code: coupon.code } });
   assert.equal(res.status, 400);
   assert.equal(res.body.code, 'COUPON_INVALID');
+});
+
+test('an operator can see who redeemed a code', async () => {
+  const admin = await h.adminToken();
+  const coupon = await createCoupon(admin, { kind: 'percent', percentOff: 10 });
+  const u = await user();
+  const { reserveCoupon } = await import('../../apps/controller/src/services/coupons.js');
+  await reserveCoupon(h.db, { code: coupon.code, userId: u.id, amountBeforeMinor: 200, currency: 'USD' });
+
+  const res = await h.request('GET', `/api/v1/admin/coupons/${coupon.id}/redemptions`, { token: admin });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.redemptions.length, 1);
+  assert.equal(res.body.redemptions[0].email, u.email);
+  assert.equal(res.body.redemptions[0].amountBeforeMinor, 200);
+  assert.equal(res.body.redemptions[0].amountAfterMinor, 180);
+
+  const anonymous = await h.request('GET', `/api/v1/admin/coupons/${coupon.id}/redemptions`, { token: u.token });
+  assert.equal(anonymous.status, 403);
+
+  const missing = await h.request('GET', '/api/v1/admin/coupons/00000000-0000-0000-0000-000000000000/redemptions', { token: admin });
+  assert.equal(missing.status, 404);
 });
 
 test('a discounted checkout records the charged amount and the code', async () => {

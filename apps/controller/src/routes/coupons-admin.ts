@@ -11,7 +11,7 @@ import { desc, eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
 import { asyncHandler, requireJwt } from '../middleware.js';
-import { coupons } from '../db/schema.js';
+import { couponRedemptions, coupons, users } from '../db/schema.js';
 import { normalizeCouponCode } from '../services/coupons.js';
 import { validateCurrency } from '../services/pricing.js';
 import { auditActor, recordAudit } from '../services/audit.js';
@@ -58,6 +58,42 @@ export function buildCouponsAdminRouter(ctx: Ctx): Router {
     asyncHandler(async (_req: Request, res: Response) => {
       const rows = await ctx.db.select().from(coupons).orderBy(desc(coupons.createdAt));
       res.json({ coupons: rows.map(couponJson) });
+    }),
+  );
+
+  router.get(
+    '/api/v1/admin/coupons/:id/redemptions',
+    ...adminOnly,
+    asyncHandler(async (req: Request, res: Response) => {
+      const id = String(req.params.id ?? '');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        res.status(404).json({ error: 'coupon not found', code: 'NOT_FOUND' });
+        return;
+      }
+      const [coupon] = await ctx.db.select({ id: coupons.id }).from(coupons).where(eq(coupons.id, id)).limit(1);
+      if (!coupon) {
+        res.status(404).json({ error: 'coupon not found', code: 'NOT_FOUND' });
+        return;
+      }
+      const rows = await ctx.db
+        .select({
+          id: couponRedemptions.id,
+          userId: couponRedemptions.userId,
+          email: users.email,
+          checkoutReference: couponRedemptions.checkoutReference,
+          amountBeforeMinor: couponRedemptions.amountBeforeMinor,
+          amountAfterMinor: couponRedemptions.amountAfterMinor,
+          currency: couponRedemptions.currency,
+          createdAt: couponRedemptions.createdAt,
+        })
+        .from(couponRedemptions)
+        .innerJoin(users, eq(users.id, couponRedemptions.userId))
+        .where(eq(couponRedemptions.couponId, id))
+        .orderBy(desc(couponRedemptions.createdAt))
+        .limit(200);
+      res.json({
+        redemptions: rows.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })),
+      });
     }),
   );
 

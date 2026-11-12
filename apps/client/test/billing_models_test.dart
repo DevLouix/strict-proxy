@@ -122,9 +122,9 @@ void main() {
       expect(sub.isActive, isFalse);
     });
 
-    test('an active free plan grants access without being a paid plan', () {
-      // The controller serves free accounts a 10 GiB plan, so the gate must
-      // follow "active" rather than "paid"; only auto-renew needs a paid tier.
+    test('an active free plan is not an entitlement', () {
+      // Registration creates an active free row, but the controller refuses
+      // tunnel credentials; only hasActivePaidPlan may gate access.
       final sub = SubscriptionSummary.fromJson(payload(tier: 'free'));
       expect(sub.hasActivePlan, isTrue);
       expect(sub.hasActivePaidPlan, isFalse);

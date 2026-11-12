@@ -8,9 +8,10 @@ a map of gaps, not a review of any one commit.
 ## Summary
 
 The controller is ahead of its interfaces. Several workflows are fully
-implemented — dispute evidence, refunds, operator password reset, receipts,
-coupons — but have no control in the dashboard or the client, so they exist only
-for whoever is willing to curl the API by hand.
+implemented — dispute evidence, refunds, operator password reset, receipts —
+but still have no control in the dashboard or the client, so they exist only for
+whoever is willing to curl the API by hand. Coupons used to be in that list; the
+dashboard and the paywall now own them.
 
 Two classes of gap stand out:
 
@@ -31,6 +32,8 @@ Two classes of gap stand out:
 | Signing out left the tunnel up | The app-level auth listener disconnects the engine whenever the session goes from authenticated to unauthenticated — on explicit logout, account deletion, or expiry. |
 | Nodes could only be drained | **Edit** in the fleet table now changes hostname, region, label, public IP and tunnel port, and records the change in the audit log. |
 | A node secret leak meant re-enrollment | **Rotate secret** issues a new HMAC secret in place, with an optional grace window during which the old one still verifies. The agent now names rotation in its 401 error, and the install script repairs a broken VPS resolver before enrolling. |
+| Coupons existed only for curl users | New **Coupons** tab creates percent or fixed codes with use caps, expiry and per-code redemption history (`GET /api/v1/admin/coupons/:id/redemptions`); the paywall takes a code and shows the server-computed discounted price for every plan. The discount applies to the first payment because the gateway has no subscription-level discount field; renewals bill at the plan price. |
+| Registration looked like a free trial | `free` is a status row, not an entitlement: `/api/v1/network/config` serves credentials only for `standard`/`pro`, and the recurring subscription's trial is the remainder of the paid period, not a flat 30 days. |
 
 ## Admin panel
 
@@ -85,7 +88,7 @@ Two classes of gap stand out:
 
 ### Missing features
 
-- **Coupons.** Checkout accepts `couponCode`; the paywall has no field for it.
+- ~~**Coupons.** Checkout accepts `couponCode`; the paywall has no field for it.~~ — fixed: the paywall has a code field with a server-computed preview; the discount applies to the first payment.
 - **Receipts.** No way to download an invoice from the account screen.
 - **Change password.** `POST /api/v1/auth/password/change` exists; only the
   forgot-password flow is wired.
@@ -113,7 +116,7 @@ Two classes of gap stand out:
 6. **Node editing and in-place HMAC rotation** — done.
 7. **Admin 2FA / IP allowlist / session revocation** — open.
 8. **Client self-service bundle:** device list and revocation, receipts, change
-   password, coupon field, pending-checkout prompt.
+   password, pending-checkout prompt.
 
 ## Verification
 

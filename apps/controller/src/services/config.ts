@@ -37,8 +37,8 @@ export function rankNodesForAssignment<T extends { id: string; loadScore: number
 /**
  * Builds and signs the full config bundle for a user.
  * Only nodes that are currently online (or degraded) are included, ranked by
- * health so the least loaded are assigned first; free tier users are limited
- * to two nodes.
+ * health so the least loaded are assigned first. Callers only reach this for
+ * paid tiers; the tier's node cap is applied before signing.
  */
 export async function buildSignedConfigBundle(
   db: Db,

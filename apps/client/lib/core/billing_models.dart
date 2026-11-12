@@ -142,11 +142,9 @@ class SubscriptionSummary {
   /// something the app can charge for or attach auto-renew to.
   bool get isPaidTier => tier == 'standard' || tier == 'pro';
 
-  /// Any plan that currently grants access, including `free`.
-  ///
-  /// The controller hands free accounts a 10 GiB / 2-node plan and only refuses
-  /// them once the rolling window is exhausted, so gating on [isPaidTier] here
-  /// would paywall every new sign-up while the API still considered it entitled.
+  /// Status only: a free account still has an active subscription row, but it
+  /// grants no tunnel. Access checks must use [hasActivePaidPlan]; this stays
+  /// for screens that describe account state rather than entitlement.
   bool get hasActivePlan => isActive;
 
   /// The paid subset, used where a saved card or a billing period is required

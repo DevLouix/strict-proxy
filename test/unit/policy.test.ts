@@ -84,7 +84,7 @@ test('access limits are monotonic across tiers', () => {
   assert.ok(TIERS.pro.maxNodes > TIERS.standard.maxNodes);
 });
 
-test('only the free tier is bandwidth-capped', () => {
+test('paid tiers are uncapped and the free row keeps a legacy quota', () => {
   assert.equal(typeof TIERS.free.bandwidthQuotaBytes, 'number');
   assert.ok((TIERS.free.bandwidthQuotaBytes ?? 0) > 0);
   assert.equal(TIERS.standard.bandwidthQuotaBytes, null);

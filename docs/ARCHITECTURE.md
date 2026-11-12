@@ -168,8 +168,7 @@ agent from "helpfully" wiring up something that does not belong here.
 | `checkout.create` | `services/billing.ts` | hosted payment page for the first month; saves the card for recurring billing |
 | `subscriptions.create` | `services/recurring.ts` | starts the monthly subscription from the saved card after the first payment clears |
 | `customers.paymentMethods` | `services/recurring.ts` | finds the reusable card saved by checkout |
-| `checkout.create({coupon_code})` | `routes/billing.ts` | discounts, validated before the session opens |
-| `coupons.validate` | `routes/billing.ts` | reject a bad code as a 400, not at payment time |
+| `checkout.create` (discounted amount) | `routes/billing.ts` | applies a local coupon before the session opens; the provider only sees the final amount |
 | `disputes.list` / `get` / `listEvidenceSubmissions` | `routes/disputes.ts` | contest a chargeback instead of losing it |
 | `disputes.submitEvidence` / `markSubmitted` | `routes/disputes.ts` | file the evidence packet |
 | `charges.invoice` | `routes/billing.ts` | renders a receipt for a settled checkout |
@@ -259,7 +258,7 @@ fails a test rather than silently dropping every payment.
 | Abandoned checkouts never reclaimed | `expireStaleCheckouts` wired into the periodic sweep |
 | No receipts | `GET /api/v1/billing/receipt/:reference`, scoped to the caller, renders the provider invoice |
 | No way to contest a chargeback | `routes/disputes.ts`: list, inspect, file evidence, mark hand-submitted |
-| No coupon support | `coupon_code` on checkout, validated up front so a bad code is a 400 |
+| Coupons were the gateway's, so a code could not be created or revoked locally | a local `coupons` table enforces percent/fixed discounts, one redemption per account and an optional cap/expiry; a bad code is a 400 before a session opens, and the discount is capped so a payable checkout never becomes free. It applies to the first payment — the gateway has no subscription discount field, so renewals bill at plan price |
 | Recurring billing absent | `subscription.renewed` extends the period; pause/resume supported; replays idempotent |
 | Invented event names in the mapping | replaced with the provider's authoritative 20, exported as `OPENPAY_EVENTS` |
 | The development adapter used a different event vocabulary than production | it now accepts both, so a locally replayed webhook behaves as the real one does |
