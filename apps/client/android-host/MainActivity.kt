@@ -1,6 +1,7 @@
 package __PACKAGE__
 
 import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -29,6 +30,13 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val UPDATER_CHANNEL = "strict_proxy/updater"
         private const val DEVICE_CHANNEL = "strict_proxy/device"
+
+        // ApplicationExitInfo reason codes. The constants themselves only exist
+        // from API 30, so they are spelled out here.
+        private const val EXIT_LOW_MEMORY = 3
+        private const val EXIT_CRASH = 4
+        private const val EXIT_CRASH_NATIVE = 5
+        private const val EXIT_ANR = 6
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -74,27 +82,38 @@ class MainActivity : FlutterActivity() {
      *
      * A native SIGSEGV never reaches Dart's error handlers: the process is gone
      * before any Dart code can run. Android records the exit reason against the
-     * package, so the next launch can report it through the same crash endpoint
-     * the dashboard already lists. Null means either the platform is too old
-     * (below Android 11) or the last exit was a normal one.
+     * package, so the next launch reports it through the same crash endpoint the
+     * dashboard already lists.
+     *
+     * Read reflectively because `ApplicationExitInfo` and its accessor only exist
+     * from API 30 while this host also compiles for older platforms. Null means
+     * either the platform is too old or the last exit was a normal one.
      */
     private fun lastCrash(): Map<String, Any?>? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return try {
-            val manager = getSystemService(ActivityManager::class.java) ?: return null
-            val info = manager.getHistoricalProcessExitReasons(packageName, 0, 1).firstOrNull() ?: return null
-            val reason = when (info.reason) {
-                ActivityManager.ApplicationExitInfo.REASON_CRASH_NATIVE -> "crash_native"
-                ActivityManager.ApplicationExitInfo.REASON_CRASH -> "crash"
-                ActivityManager.ApplicationExitInfo.REASON_ANR -> "anr"
-                ActivityManager.ApplicationExitInfo.REASON_LOW_MEMORY -> "low_memory"
+            val manager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
+            val reasons = ActivityManager::class.java
+                .getMethod(
+                    "getHistoricalProcessExitReasons",
+                    String::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                )
+                .invoke(manager, packageName, 0, 1) as? List<*> ?: return null
+            val info = reasons.firstOrNull() ?: return null
+            val reason = when (info.javaClass.getMethod("getReason").invoke(info) as? Int) {
+                EXIT_CRASH_NATIVE -> "crash_native"
+                EXIT_CRASH -> "crash"
+                EXIT_ANR -> "anr"
+                EXIT_LOW_MEMORY -> "low_memory"
                 // USER_REQUESTED, EXIT_SELF and friends are ordinary shutdowns.
                 else -> return null
             }
             mapOf(
                 "reason" to reason,
-                "timestamp" to info.timestamp,
-                "description" to info.description,
+                "timestamp" to info.javaClass.getMethod("getTimestamp").invoke(info),
+                "description" to info.javaClass.getMethod("getDescription").invoke(info),
             )
         } catch (_: Throwable) {
             // Reading exit history is diagnostics, never a reason to fail a launch.
