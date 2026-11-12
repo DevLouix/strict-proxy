@@ -1040,7 +1040,7 @@ export async function usageView(api) {
       h('div', { class: 'body' },
         h('p', { class: 'small muted' },
           'Bandwidth is summed from the per-credential windows nodes report, over a rolling 30-day window. ' +
-          'The free tier is capped at 10 GiB; standard and pro are unlimited. Report deduplication is keyed on ' +
+          'Free accounts are not served a tunnel; standard and pro are unlimited. Report deduplication is keyed on ' +
           '(credential, window start, window end), so node retries never double-count.'),
       ),
     ),

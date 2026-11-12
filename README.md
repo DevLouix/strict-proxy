@@ -203,7 +203,7 @@ derived from the currently configured private key; it never mints a second one.
 
 | Tier | Device seats | Max nodes | 30-day bandwidth quota |
 |---|---|---|---|
-| `free` | 1 | 2 | 10 GiB |
+| `free` | — | — | no tunnel access (registration is not a trial) |
 | `standard` | 3 | 10 | unlimited |
 | `pro` | 5 | unlimited | unlimited |
 
