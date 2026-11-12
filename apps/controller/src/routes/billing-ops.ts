@@ -26,11 +26,15 @@ import {
   MERCHANT_SETTING_KEY,
 } from '../services/plans.js';
 import {
+  CURRENCY_CHOICES,
   CURRENCY_SETTING_KEY,
   configuredAmount,
+  currencySymbol,
+  effectivePrice,
   loadBillingCurrency,
   loadPriceOverrides,
   setBillingCurrency,
+  setPriceOverride,
   validateCurrency,
   validatePriceAmount,
 } from '../services/pricing.js';
@@ -67,15 +71,47 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
     return false;
   };
 
+  /**
+   * The pricing an operator can change, and the defaults it overrides.
+   *
+   * Shared by GET and PUT so a save answers with exactly what a reload shows.
+   * Amounts stay in minor units here (200 = 2.00 in a two-decimal currency); the
+   * dashboard formats them, and the symbol comes with the payload so it cannot
+   * disagree with the code being charged.
+   */
+  async function billingSettings() {
+    const currency = await loadBillingCurrency(ctx.db, ctx.cfg);
+    const overrides = await loadPriceOverrides(ctx.db, ctx.cfg, currency);
+    return {
+      currency,
+      defaultCurrency: ctx.cfg.billingCurrency,
+      currencyOverridden: currency !== ctx.cfg.billingCurrency,
+      symbol: currencySymbol(currency),
+      currencies: CURRENCY_CHOICES.map((code) => ({ code, symbol: currencySymbol(code) })),
+      minorUnits: true,
+      interval: 'month',
+      gateway: isOpenPayConfigured(ctx.cfg) ? 'openpay' : 'unconfigured',
+      tiers: purchasableTiers(ctx.cfg, overrides, currency).map(({ tier, price }) => {
+        const configured = priceForTier(ctx.cfg, tier, {}, ctx.cfg.billingCurrency);
+        return {
+          tier,
+          label: price.label,
+          amountMinor: price.amountMinor,
+          configuredAmountMinor: configured.amountMinor,
+          currency: price.currency,
+          overridden: price.amountMinor !== configured.amountMinor,
+        };
+      }),
+    };
+  }
+
   /** The plans the catalog expects, and which ones exist at the provider. */
   router.get(
     '/api/v1/admin/billing/plans',
     ...adminOnly,
     asyncHandler(async (_req: Request, res: Response) => {
-      const [overrides, currency] = await Promise.all([
-        loadPriceOverrides(ctx.db, ctx.cfg),
-        loadBillingCurrency(ctx.db, ctx.cfg),
-      ]);
+      const currency = await loadBillingCurrency(ctx.db, ctx.cfg);
+      const overrides = await loadPriceOverrides(ctx.db, ctx.cfg, currency);
       const tiers = purchasableTiers(ctx.cfg, overrides, currency).map(({ tier, price }) => {
         // The configured default is shown alongside the effective price so an
         // operator can always see what they are overriding, and can tell an
@@ -92,7 +128,24 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
         };
       });
 
-      if (!requireGateway(res)) return;
+      const shared = {
+        currency,
+        defaultCurrency: ctx.cfg.billingCurrency,
+        currencyOverridden: currency !== ctx.cfg.billingCurrency,
+        symbol: currencySymbol(currency),
+        currencies: CURRENCY_CHOICES.map((code) => ({ code, symbol: currencySymbol(code) })),
+        tiers,
+      };
+
+      // Prices belong to the catalogue, not to the gateway: an operator has to be
+      // able to price a tier before a provider key exists, and to see the stored
+      // prices while the gateway is down. Only the provider columns need it, so
+      // an unconfigured deployment answers with empty ones instead of 503 — which
+      // used to blank the whole screen and left nowhere to set an amount.
+      if (!isOpenPayConfigured(ctx.cfg)) {
+        res.json({ ...shared, merchantId: null, providerPlans: [], gateway: 'unconfigured' });
+        return;
+      }
 
       const merchantId = await getSetting(ctx.db, ctx.cfg, MERCHANT_SETTING_KEY).catch(() => null);
       const client = createOpenPayClient(ctx.cfg);
@@ -112,15 +165,7 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
           // rather than looking like a live plan with a stale status.
           usable: isUsablePlan(p as unknown as Record<string, unknown>),
         }));
-        res.json({
-          merchantId,
-          currency,
-          defaultCurrency: ctx.cfg.billingCurrency,
-          currencyOverridden: currency !== ctx.cfg.billingCurrency,
-          tiers,
-          providerPlans,
-          gateway: 'openpay',
-        });
+        res.json({ ...shared, merchantId, providerPlans, gateway: 'openpay' });
       } catch (err) {
         const described = describeOpenPayError(err);
         res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });
@@ -142,28 +187,7 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
     '/api/v1/admin/billing/settings',
     ...adminOnly,
     asyncHandler(async (_req: Request, res: Response) => {
-      const [overrides, currency] = await Promise.all([
-        loadPriceOverrides(ctx.db, ctx.cfg),
-        loadBillingCurrency(ctx.db, ctx.cfg),
-      ]);
-      res.json({
-        currency,
-        defaultCurrency: ctx.cfg.billingCurrency,
-        currencyOverridden: currency !== ctx.cfg.billingCurrency,
-        minorUnits: true,
-        interval: 'month',
-        tiers: purchasableTiers(ctx.cfg, overrides, currency).map(({ tier, price }) => {
-          const configured = priceForTier(ctx.cfg, tier, {}, ctx.cfg.billingCurrency);
-          return {
-            tier,
-            label: price.label,
-            amountMinor: price.amountMinor,
-            configuredAmountMinor: configured.amountMinor,
-            currency: price.currency,
-            overridden: price.amountMinor !== configured.amountMinor,
-          };
-        }),
-      });
+      res.json(await billingSettings());
     }),
   );
 
@@ -183,37 +207,89 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
     '/api/v1/admin/billing/settings',
     ...adminOnly,
     asyncHandler(async (req: Request, res: Response) => {
-      const body = req.body as { currency?: unknown };
-      if (body.currency === undefined) {
-        res.status(400).json({ error: 'currency is required', code: 'VALIDATION' });
+      const body = req.body as { currency?: unknown; amounts?: unknown };
+      if (body.currency === undefined && body.amounts === undefined) {
+        res.status(400).json({ error: 'provide currency and/or amounts', code: 'VALIDATION' });
         return;
       }
 
-      let currency: string;
-      try {
-        currency = validateCurrency(body.currency);
-      } catch (err) {
-        res.status(400).json({ error: (err as Error).message, code: 'VALIDATION' });
-        return;
+      const previousCurrency = await loadBillingCurrency(ctx.db, ctx.cfg);
+      let currency = previousCurrency;
+      if (body.currency !== undefined) {
+        try {
+          currency = validateCurrency(body.currency);
+        } catch (err) {
+          res.status(400).json({ error: (err as Error).message, code: 'VALIDATION' });
+          return;
+        }
       }
 
-      const previous = await loadBillingCurrency(ctx.db, ctx.cfg);
-      await setBillingCurrency(ctx.db, ctx.cfg, currency, req.auth?.sub);
-      await recordAudit(ctx.db, {
-        ...auditActor(req),
-        action: 'billing.currency_changed',
-        targetType: 'billing',
-        targetId: CURRENCY_SETTING_KEY,
-        summary: `Billing currency ${previous} -> ${currency}`,
-        metadata: { previous, currency, defaultCurrency: ctx.cfg.billingCurrency },
-      });
+      // Validate every amount before storing any of them, so a typo in one tier
+      // cannot leave the other tiers half-applied.
+      const requested: Array<{ tier: Parameters<typeof setTierPlanPrice>[3]; amountMinor: number }> = [];
+      if (body.amounts !== undefined) {
+        if (!body.amounts || typeof body.amounts !== 'object') {
+          res.status(400).json({ error: 'amounts must be an object of tier -> minor units', code: 'VALIDATION' });
+          return;
+        }
+        for (const [tier, raw] of Object.entries(body.amounts as Record<string, unknown>)) {
+          if (!isKnownTier(tier)) {
+            res.status(400).json({ error: `unknown tier "${tier}"`, code: 'VALIDATION' });
+            return;
+          }
+          try {
+            requested.push({ tier, amountMinor: validatePriceAmount(raw) });
+          } catch (err) {
+            res.status(400).json({ error: (err as Error).message, code: 'VALIDATION' });
+            return;
+          }
+        }
+      }
+
+      if (currency !== previousCurrency) {
+        await setBillingCurrency(ctx.db, ctx.cfg, currency, req.auth?.sub);
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'billing.currency_changed',
+          targetType: 'billing',
+          targetId: CURRENCY_SETTING_KEY,
+          summary: `Billing currency ${previousCurrency} -> ${currency}`,
+          metadata: { previous: previousCurrency, currency, defaultCurrency: ctx.cfg.billingCurrency },
+        });
+      }
+
+      // No gateway means no plans to reprice yet, but the catalogue still has to
+      // hold the price: it is what checkouts will charge once a key is added.
+      const client = isOpenPayConfigured(ctx.cfg) ? createOpenPayClient(ctx.cfg) : null;
+      const applied: Array<{ tier: string; amountMinor: number; providerUpdated: boolean; needsSync: boolean }> = [];
+      for (const entry of requested) {
+        if (client) {
+          const change = await setTierPlanPrice(ctx.db, ctx.cfg, client, entry.tier, entry.amountMinor, req.auth?.sub, currency);
+          applied.push({ tier: entry.tier, amountMinor: entry.amountMinor, providerUpdated: change.providerUpdated, needsSync: change.needsSync });
+        } else {
+          await setPriceOverride(ctx.db, ctx.cfg, entry.tier, entry.amountMinor, currency, req.auth?.sub);
+          applied.push({ tier: entry.tier, amountMinor: entry.amountMinor, providerUpdated: false, needsSync: true });
+        }
+      }
+
+      if (applied.length > 0) {
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'billing.price_changed',
+          targetType: 'billing',
+          targetId: CURRENCY_SETTING_KEY,
+          summary: `Prices in ${currency}: ${applied.map((a) => `${a.tier}=${a.amountMinor}`).join(', ')}`,
+          metadata: { currency, applied },
+        });
+      }
 
       res.json({
-        currency,
-        previousCurrency: previous,
-        defaultCurrency: ctx.cfg.billingCurrency,
-        note:
-          'New checkouts and newly created plans use this currency. Plans already at the provider keep theirs until they are removed and the plans are re-synced.',
+        ...(await billingSettings()),
+        previousCurrency,
+        applied,
+        note: client
+          ? 'Prices saved. Provider plans were repriced where they exist; a tier without a plan is created on the next sync.'
+          : 'Prices saved. No payment gateway is configured, so the provider plans will be created from these amounts on the first sync.',
       });
     }),
   );
@@ -408,7 +484,7 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
     '/api/v1/admin/billing/plans/price',
     ...adminOnly,
     asyncHandler(async (req: Request, res: Response) => {
-      const body = req.body as { tier?: unknown; amountMinor?: unknown };
+      const body = req.body as { tier?: unknown; amountMinor?: unknown; currency?: unknown };
       const tier = typeof body.tier === 'string' ? body.tier.trim() : '';
       if (!isKnownTier(tier)) {
         res.status(400).json({ error: 'tier must be "standard" or "pro"', code: 'VALIDATION' });
@@ -422,18 +498,45 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
         return;
       }
 
-      if (!requireGateway(res)) return;
-
-      const client = createOpenPayClient(ctx.cfg);
+      // A price is a catalogue value first and a provider value second. A
+      // deployment with no gateway still has to be able to price its tiers, and a
+      // price changed while the gateway is down must not be lost — so the amount
+      // is always stored, and the provider is updated only when there is one.
+      let currency: string;
       try {
-        const change = await setTierPlanPrice(ctx.db, ctx.cfg, client, tier, amountMinor, req.auth?.sub);
+        currency = body.currency === undefined
+          ? await loadBillingCurrency(ctx.db, ctx.cfg)
+          : validateCurrency(body.currency);
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message, code: 'VALIDATION' });
+        return;
+      }
+
+      let change: Awaited<ReturnType<typeof setTierPlanPrice>>;
+      if (isOpenPayConfigured(ctx.cfg)) {
+        const client = createOpenPayClient(ctx.cfg);
+        change = await setTierPlanPrice(ctx.db, ctx.cfg, client, tier, amountMinor, req.auth?.sub, currency);
+      } else {
+        const overrides = await loadPriceOverrides(ctx.db, ctx.cfg, currency);
+        change = {
+          tier,
+          previousAmountMinor: effectivePrice(ctx.cfg, overrides, tier, currency),
+          amountMinor,
+          planId: null,
+          providerUpdated: false,
+          needsSync: true,
+        };
+        await setPriceOverride(ctx.db, ctx.cfg, tier, amountMinor, currency, req.auth?.sub);
+      }
+
+      try {
         await recordAudit(ctx.db, {
           ...auditActor(req),
           action: 'billing.price_changed',
           targetType: 'tier',
           targetId: tier,
-          summary: `Price for ${tier} set to ${amountMinor} (minor units)`,
-          metadata: { tier, amountMinor, providerUpdated: change.providerUpdated, needsSync: change.needsSync },
+          summary: `Price for ${tier} set to ${amountMinor} ${currency} (minor units)`,
+          metadata: { tier, amountMinor, currency, providerUpdated: change.providerUpdated, needsSync: change.needsSync },
         });
         res.json({
           ...change,

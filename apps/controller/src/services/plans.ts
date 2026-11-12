@@ -22,7 +22,13 @@ import type { ControllerConfig } from '../env.js';
 import type { SubscriptionTier } from '@strict-proxy/types';
 import { getSetting, setSetting, deleteSetting } from './settings.js';
 import { purchasableTierNames, priceForTier } from './catalog.js';
-import { loadBillingCurrency, loadPriceOverrides, setPriceOverride, effectivePrice } from './pricing.js';
+import {
+  loadBillingCurrency,
+  loadPriceOverrides,
+  setPriceOverride,
+  effectivePrice,
+  validateCurrency,
+} from './pricing.js';
 import { httpStatusOf } from './openpay.js';
 
 /** Where the provider plan id for a tier is cached. */
@@ -214,7 +220,8 @@ export async function ensureTierPlan(
   // The admin currency, not the configured one: a plan created in the deployment
   // default while the catalogue advertises another currency would bill customers
   // in a currency the price they were shown was not in.
-  const [overrides, currency] = await Promise.all([loadPriceOverrides(db, cfg), loadBillingCurrency(db, cfg)]);
+  const currency = await loadBillingCurrency(db, cfg);
+  const overrides = await loadPriceOverrides(db, cfg, currency);
   const price = priceForTier(cfg, tier, overrides, currency);
   const cachedId = await getSetting(db, cfg, settingKey(tier)).catch(() => null);
 
@@ -363,9 +370,12 @@ export async function setTierPlanPrice(
   tier: SubscriptionTier,
   amountMinor: number,
   updatedBy?: string,
+  /** The currency the amount is expressed in; defaults to the deployment one. */
+  currency: string = cfg.billingCurrency,
 ): Promise<TierPlanPriceChange> {
-  const overrides = await loadPriceOverrides(db, cfg);
-  const previousAmountMinor = effectivePrice(cfg, overrides, tier);
+  const code = validateCurrency(currency);
+  const overrides = await loadPriceOverrides(db, cfg, code);
+  const previousAmountMinor = effectivePrice(cfg, overrides, tier, code);
 
   const cachedId = await getSetting(db, cfg, settingKey(tier)).catch(() => null);
   const existing = await findTierPlan(client, tier, cachedId);
@@ -376,7 +386,12 @@ export async function setTierPlanPrice(
 
   if (existing) {
     planId = existing.id;
-    if (isUsablePlan(existing.plan)) {
+    // An amount is only meaningful in its own currency: repricing a USD plan to
+    // 300000 would charge $3,000.00 instead of the intended NGN 3,000.00, so a
+    // currency change asks for a sync (which creates a plan in the new currency)
+    // rather than rewriting the existing one.
+    const planCurrency = String(existing.plan['currency'] ?? code).toUpperCase();
+    if (isUsablePlan(existing.plan) && planCurrency === code) {
       await client.subscriptions.updatePlan(existing.id, { amount: amountMinor } as never);
       providerUpdated = true;
     } else {
@@ -388,7 +403,7 @@ export async function setTierPlanPrice(
     needsSync = true;
   }
 
-  await setPriceOverride(db, cfg, tier, amountMinor, updatedBy);
+  await setPriceOverride(db, cfg, tier, amountMinor, code, updatedBy);
 
   return { tier, previousAmountMinor, amountMinor, planId, providerUpdated, needsSync };
 }

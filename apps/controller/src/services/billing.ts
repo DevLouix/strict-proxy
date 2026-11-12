@@ -49,8 +49,10 @@ export async function createTierCheckout(
   client?: OpenPayApi,
 ): Promise<BillingCheckoutPublic> {
   // Read the operator's price and currency rather than the configured ones: what
-  // the dashboard advertises is what the customer must be charged.
-  const [overrides, currency] = await Promise.all([loadPriceOverrides(db, cfg), loadBillingCurrency(db, cfg)]);
+  // the dashboard advertises is what the customer must be charged, and the price
+  // is selected for the currency being charged in.
+  const currency = await loadBillingCurrency(db, cfg);
+  const overrides = await loadPriceOverrides(db, cfg, currency);
   const price = priceForTier(cfg, params.tier, overrides, currency);
 
   // Our own idempotent handle. The provider assigns its own `reference` on the

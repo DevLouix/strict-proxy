@@ -33,10 +33,8 @@ export function buildBillingRouter(ctx: Ctx): Router {
     '/api/v1/billing/catalog',
     requireAuth,
     asyncHandler(async (_req: Request, res: Response) => {
-      const [overrides, currency] = await Promise.all([
-        loadPriceOverrides(ctx.db, ctx.cfg),
-        loadBillingCurrency(ctx.db, ctx.cfg),
-      ]);
+      const currency = await loadBillingCurrency(ctx.db, ctx.cfg);
+      const overrides = await loadPriceOverrides(ctx.db, ctx.cfg, currency);
       res.json({
         gateway: isOpenPayConfigured(ctx.cfg) ? 'openpay' : 'unconfigured',
         currency,

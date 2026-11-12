@@ -125,3 +125,71 @@ test('the billing settings are administrator-only', async () => {
   });
   assert.equal(write.status, 403);
 });
+
+test('each currency keeps its own price', async () => {
+  const admin = await h.adminToken();
+  const standard = async () => {
+    const settings = await h.request('GET', '/api/v1/admin/billing/settings', { token: admin });
+    return (settings.body.tiers as Array<{ tier: string; amountMinor: number; currency: string }>)
+      .find((tier) => tier.tier === 'standard')!;
+  };
+
+  await h.request('PUT', '/api/v1/admin/billing/settings', { token: admin, body: { currency: 'USD' } });
+  const saved = await h.request('PUT', '/api/v1/admin/billing/settings', {
+    token: admin,
+    body: { amounts: { standard: 500 } },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.currency, 'USD');
+  assert.equal(saved.body.applied[0].tier, 'standard');
+  assert.equal((await standard()).amountMinor, 500);
+
+  await h.request('PUT', '/api/v1/admin/billing/settings', { token: admin, body: { currency: 'NGN' } });
+  // NGN starts from the deployment default, not from the USD amount: a price is
+  // not a number that can be reinterpreted in another currency.
+  assert.equal((await standard()).amountMinor, h.cfg.billingStandardAmountMinor);
+
+  await h.request('PUT', '/api/v1/admin/billing/settings', {
+    token: admin,
+    body: { amounts: { standard: 300000 } },
+  });
+  assert.equal((await standard()).amountMinor, 300000);
+
+  await h.request('PUT', '/api/v1/admin/billing/settings', { token: admin, body: { currency: 'USD' } });
+  assert.equal((await standard()).amountMinor, 500, 'the USD price survived the round trip');
+});
+
+test('the symbol travels with the currency', async () => {
+  const admin = await h.adminToken();
+  const settings = await h.request('GET', '/api/v1/admin/billing/settings', { token: admin });
+  assert.equal(settings.body.symbol, '$');
+
+  const currencies = settings.body.currencies as Array<{ code: string; symbol: string }>;
+  assert.ok(currencies.length > 1, 'the dashboard needs a list to choose from');
+  assert.equal(currencies.find((c) => c.code === 'NGN')!.symbol, '₦');
+});
+
+test('amounts are validated before anything is stored', async () => {
+  const admin = await h.adminToken();
+  const before = await h.request('GET', '/api/v1/admin/billing/settings', { token: admin });
+  const configured = (before.body.tiers as Array<{ tier: string; configuredAmountMinor: number }>)
+    .find((tier) => tier.tier === 'pro')!.configuredAmountMinor;
+
+  for (const amounts of [{ standard: 0 }, { standard: -1 }, { standard: 1.5 }, { standard: '100' }, { nope: 100 }]) {
+    const res = await h.request('PUT', '/api/v1/admin/billing/settings', { token: admin, body: { amounts } });
+    assert.equal(res.status, 400, `expected ${JSON.stringify(amounts)} to be refused`);
+  }
+
+  // A partially valid payload must not half-apply: `pro` stays at its default.
+  const mixed = await h.request('PUT', '/api/v1/admin/billing/settings', {
+    token: admin,
+    body: { amounts: { standard: 900, pro: -5 } },
+  });
+  assert.equal(mixed.status, 400);
+  const after = await h.request('GET', '/api/v1/admin/billing/settings', { token: admin });
+  assert.equal(
+    (after.body.tiers as Array<{ tier: string; amountMinor: number }>).find((tier) => tier.tier === 'pro')!.amountMinor,
+    configured,
+  );
+});
+

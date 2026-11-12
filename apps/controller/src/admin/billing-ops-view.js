@@ -117,51 +117,102 @@ export async function plansView(api) {
   }
 
   /**
-   * The currency new charges are opened in.
+   * Pricing: the currency, and what each tier costs in it.
    *
-   * Amounts are minor units, so the panel says what 200 means instead of leaving
-   * an operator to guess, and it states the limit of the change: plans already at
-   * the provider keep the currency they were created with.
+   * This is the place an operator sets a plan's amount. Two things are stated
+   * rather than left to be discovered: prices are minor units, and a tier can
+   * hold a different amount in each currency — so switching currency shows that
+   * currency's price instead of reinterpreting the number already there.
+   *
+   * It renders with or without a payment gateway, because pricing is catalogue
+   * data: an unconfigured deployment can still set prices, and the provider is
+   * updated when there is one.
    */
-  function currencyPanel() {
+  function pricingPanel() {
     if (!state) return null;
 
-    const input = h('input', {
-      class: 'mono',
-      maxlength: '3',
-      size: '4',
-      value: state.currency ?? '',
-      title: 'ISO 4217 code, e.g. USD',
-    });
-    const save = h('button', { class: 'btn sm primary' }, 'Save currency');
-    save.addEventListener('click', async () => {
-      const code = String(input.value || '').trim().toUpperCase();
-      if (!/^[A-Z]{3}$/.test(code)) {
-        toast('Enter a 3-letter ISO currency code, e.g. USD', 'err');
-        return;
-      }
-      save.disabled = true;
+    const currencies = state.currencies?.length
+      ? state.currencies
+      : [{ code: state.currency, symbol: state.symbol ?? state.currency }];
+    const select = h('select', {},
+      ...currencies.map((c) => h('option', { value: c.code }, `${c.code} (${c.symbol})`)),
+    );
+    select.value = state.currency;
+
+    const saveCurrency = h('button', { class: 'btn sm primary' }, 'Save currency');
+    saveCurrency.addEventListener('click', async () => {
+      saveCurrency.disabled = true;
       try {
-        const result = await api.put('/api/v1/admin/billing/settings', { currency: code });
+        const result = await api.put('/api/v1/admin/billing/settings', { currency: select.value });
         toast(result.note || `Currency changed to ${result.currency}`);
         await load();
       } catch (err) {
         toast(err.message || 'Currency change failed', 'err');
-        save.disabled = false;
+        saveCurrency.disabled = false;
       }
+    });
+
+    const rows = (state.tiers ?? []).map((t) => {
+      const input = h('input', {
+        type: 'number',
+        min: '0',
+        step: '0.01',
+        class: 'price-input',
+        value: (t.amountMinor / 100).toFixed(2),
+        title: `Amount in ${state.currency}`,
+      });
+      const save = h('button', { class: 'btn sm primary' }, 'Save');
+      save.addEventListener('click', async () => {
+        const major = Number(input.value);
+        if (!Number.isFinite(major) || major <= 0) {
+          toast('Enter an amount greater than zero', 'err');
+          return;
+        }
+        save.disabled = true;
+        try {
+          const minor = Math.round(major * 100);
+          const result = await api.put('/api/v1/admin/billing/settings', { amounts: { [t.tier]: minor } });
+          toast(result.note || `${t.label} set to ${money(minor, result.currency)}`);
+          await load();
+        } catch (err) {
+          toast(err.message || 'Price change failed', 'err');
+          save.disabled = false;
+        }
+      });
+
+      return h('tr', {},
+        h('td', {},
+          t.label,
+          t.overridden
+            ? h('div', { class: 'muted small' }, `default ${money(t.configuredAmountMinor, state.currency)}`)
+            : null,
+        ),
+        h('td', {}, money(t.amountMinor, state.currency)),
+        h('td', {}, h('div', { class: 'row' }, input, save)),
+      );
     });
 
     return h('div', { class: 'panel' },
       h('header', {},
-        h('h3', {}, 'Currency'),
+        h('h3', {}, 'Pricing'),
         h('span', { class: 'muted small' },
-          state.currencyOverridden
-            ? `overriding the deployment default ${state.defaultCurrency}`
-            : `deployment default ${state.defaultCurrency}`),
+          state.gateway === 'unconfigured'
+            ? 'no gateway yet — prices are stored and applied on the first sync'
+            : `charged in ${state.currency} (${state.symbol})`),
       ),
-      h('div', { class: 'row' }, input, save),
+      h('div', { class: 'row' }, select, saveCurrency),
+      h('div', { class: 'table-wrap' },
+        h('table', {},
+          h('thead', {}, h('tr', {},
+            h('th', {}, 'Plan'),
+            h('th', {}, 'Current price'),
+            h('th', {}, `New amount (${state.currency})`),
+          )),
+          h('tbody', {}, ...rows),
+        ),
+      ),
       h('p', { class: 'muted small' },
-        'Prices are in minor units: 200 is 2.00 in a two-decimal currency. New checkouts and newly created plans use this; plans already at the provider keep the currency they were made with.'),
+        `Amounts are minor units: 200 is 2.00 in a two-decimal currency. Each currency keeps its own price. Saving updates the provider plan when one exists; otherwise the price is applied on the next plan sync.`),
     );
   }
 
@@ -205,7 +256,7 @@ export async function plansView(api) {
         ),
         syncBtn,
       ),
-      currencyPanel(),
+      pricingPanel(),
       providerPanel(),
       h('div', { class: 'panel' },
         h('header', {},

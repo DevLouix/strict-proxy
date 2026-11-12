@@ -20,11 +20,9 @@ after(async () => {
 });
 
 const ROUTES = [
-  ['GET', '/api/v1/admin/billing/plans', undefined],
   ['GET', '/api/v1/admin/billing/providers', undefined],
   ['POST', '/api/v1/admin/billing/providers/test', {}],
   ['POST', '/api/v1/admin/billing/plans/sync', {}],
-  ['PUT', '/api/v1/admin/billing/plans/price', { tier: 'standard', amountMinor: 1000 }],
   ['DELETE', '/api/v1/admin/billing/plans/price/standard', undefined],
   ['POST', '/api/v1/admin/billing/plans/delete', { planId: 'x' }],
   ['GET', '/api/v1/admin/billing/subscriptions', undefined],
@@ -49,4 +47,31 @@ test('admin-only is still enforced without a gateway', async () => {
     assert.equal((await h.request(method, path, { body })).status, 401, path);
     assert.equal((await h.request(method, path, { token: tokens.accessToken, body })).status, 403, path);
   }
+});
+
+// Pricing is catalogue data, not gateway data: it has to be settable before a
+// provider key exists, and readable while the provider is down. This is what
+// used to 503, which left the dashboard with nowhere to set an amount.
+test('prices can be read and set without a gateway', async () => {
+  const admin = await h.adminToken();
+
+  const plans = await h.request('GET', '/api/v1/admin/billing/plans', { token: admin });
+  assert.equal(plans.status, 200);
+  assert.equal(plans.body.gateway, 'unconfigured');
+  assert.deepEqual(plans.body.providerPlans, []);
+  assert.ok(plans.body.tiers.length > 0, 'the tiers and their prices are still listed');
+  assert.ok(plans.body.currencies.some((c: { code: string }) => c.code === 'NGN'));
+
+  const put = await h.request('PUT', '/api/v1/admin/billing/plans/price', {
+    token: admin,
+    body: { tier: 'standard', amountMinor: 550 },
+  });
+  assert.equal(put.status, 200);
+  assert.equal(put.body.needsSync, true, 'there is no provider plan to reprice yet');
+  assert.equal(put.body.providerUpdated, false);
+
+  const catalog = await h.request('GET', '/api/v1/billing/catalog', { token: admin });
+  const standard = (catalog.body.tiers as { tier: string; price: { amountMinor: number } }[])
+    .find((t) => t.tier === 'standard');
+  assert.equal(standard!.price.amountMinor, 550, 'the stored price is what checkout will charge');
 });
