@@ -30,10 +30,13 @@ env:
   # (Go, the NDK, the engine SHA) is pinned for the same reason: a release must
   # not change because upstream shipped.
   #
-  # The client imports `package:material_ui/material_ui.dart` (upstream's
-  # replacement for the Material library), so this pin moves as a one-line
-  # bump: 3.50.0 is verified with `flutter analyze` and `flutter test`.
-  FLUTTER_VERSION: '3.50.0'
+  # The client imports `package:material_ui/material_ui.dart`, so the app code
+  # is clean on newer stable too (3.50.0 passes `flutter analyze` and
+  # `flutter test`). The pin stays here because 3.50.0's *release* build fails
+  # inside Android lint itself (JavaDocParser.parseDataItem NoSuchMethodError
+  # while linting url_launcher_android), so no APK is produced. Move it once
+  # that lint/AGP combination is fixed upstream.
+  FLUTTER_VERSION: '3.47.9'
   CLIENT_ENV: production
   # Set the repository variable CLIENT_CONTROLLER_URL once the controller has a
   # real HTTPS address; the placeholder keeps compile-only builds working.
