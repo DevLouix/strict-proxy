@@ -11,11 +11,10 @@ import 'package:strict_proxy_client/main.dart';
 /// Stub API returning canned billing payloads. Only the network methods are
 /// overridden, so the screen exercises its real rendering path.
 class _FakeApi extends ControllerApi {
-  _FakeApi({this.catalog, this.summary, this.usageReport, this.checkoutError});
+  _FakeApi({this.catalog, this.summary, this.checkoutError});
 
   final BillingCatalog? catalog;
   final SubscriptionSummary? summary;
-  final UsageReport? usageReport;
   final ApiException? checkoutError;
 
   @override
@@ -33,7 +32,7 @@ class _FakeApi extends ControllerApi {
   }
 
   @override
-  Future<UsageReport> usage() async => usageReport ?? const UsageReport(totalBytes: 0, credentials: []);
+  Future<UsageReport> usage() async => const UsageReport(totalBytes: 0, credentials: []);
 
   @override
   Future<String?> activateRecurring() async => null;

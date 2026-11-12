@@ -18,6 +18,8 @@ const EXPECTED_TABLES = [
   'client_crash_reports',
   'client_release_artifacts',
   'client_releases',
+  'coupon_redemptions',
+  'coupons',
   'platform_settings',
   'password_reset_tokens',
   'devices',

@@ -139,29 +139,34 @@ test('the least loaded nodes are assigned first', async () => {
   const idle = await h.seedNode({ hostname: 'idle.test', status: 'online', loadScore: 5 });
   const busy = await h.seedNode({ hostname: 'busy.test', status: 'online', loadScore: 95 });
   const mid = await h.seedNode({ hostname: 'mid.test', status: 'online', loadScore: 50 });
+  // Standard is capped at ten; the other nine make the cap bite so the
+  // busiest has to be left out rather than the order of the response.
+  for (let i = 0; i < 9; i++) await h.seedNode({ status: 'online', loadScore: 60 + i });
 
-  // A paid tier has room for all three, so the order is what is under test.
-  const { token } = await activeUser();
+  const { token } = await activeUser('standard');
   const res = await h.request('GET', '/api/v1/network/config', { token });
 
-  const order = res.body.nodes.map((n: any) => n.id);
-  assert.equal(order[0], idle.id, 'the quietest node must be offered first');
-  assert.ok(order.indexOf(mid.id) < order.indexOf(busy.id), 'the 95%-loaded node must not be handed out before quieter ones');
+  const assigned = new Set(res.body.nodes.map((n: any) => n.id));
+  assert.equal(assigned.size, 10);
+  assert.equal(assigned.has(idle.id), true, 'the quietest node must be assigned');
+  assert.equal(assigned.has(mid.id), true);
+  assert.equal(assigned.has(busy.id), false, 'the 95%-loaded node must not be handed out before quieter ones');
 });
 
 test('healthy nodes are preferred over degraded ones at equal load', async () => {
-  const degraded = await h.seedNode({ hostname: 'deg.test', status: 'degraded', loadScore: 10 });
-  const healthy = await h.seedNode({ hostname: 'ok.test', status: 'online', loadScore: 10 });
+  // The cap forces one node out; the degraded one must be the one dropped even
+  // though its load is the lowest.
+  const degraded = await h.seedNode({ hostname: 'deg.test', status: 'degraded', loadScore: 1 });
+  const healthy = await h.seedNode({ hostname: 'ok.test', status: 'online', loadScore: 50 });
+  for (let i = 0; i < 9; i++) await h.seedNode({ status: 'online', loadScore: 10 + i });
 
-  const { token } = await activeUser();
+  const { token } = await activeUser('standard');
   const res = await h.request('GET', '/api/v1/network/config', { token });
-  const order = res.body.nodes.map((n: any) => n.id);
+  const assigned = new Set(res.body.nodes.map((n: any) => n.id));
 
-  assert.equal(order[0], healthy.id);
-  assert.ok(
-    order.indexOf(healthy.id) < order.indexOf(degraded.id),
-    'a degraded node must lose to an equally loaded healthy one',
-  );
+  assert.equal(assigned.size, 10);
+  assert.equal(assigned.has(healthy.id), true);
+  assert.equal(assigned.has(degraded.id), false, 'a degraded node must lose to a healthy one when the tier cap forces a choice');
 });
 
 test('assignment is deterministic for identical load', async () => {

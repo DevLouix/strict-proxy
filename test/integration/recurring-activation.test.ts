@@ -10,7 +10,7 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHarness, type Harness } from '../helpers/harness.js';
 import { activateRecurringSubscription } from '../../apps/controller/src/services/recurring.js';
-import { PLAN_TIER_METADATA_KEY, RECURRING_TRIAL_DAYS } from '../../apps/controller/src/services/plans.js';
+import { PLAN_TIER_METADATA_KEY } from '../../apps/controller/src/services/plans.js';
 
 let h: Harness;
 
@@ -126,13 +126,13 @@ test('a settled checkout is turned into a monthly subscription for the paid tier
   assert.equal(result.tier, 'standard');
   assert.equal(result.providerSubscriptionId, 'sub_1');
 
-  // The plan is monthly with a full period of trial, because the first month
-  // was already paid by the checkout. Without this the provider would charge it
-  // a second time at subscription creation.
+  // The plan is monthly and its trial is exactly the time left in the paid
+  // period (24 days in this fixture), so the provider neither double-charges
+  // the paid month nor hands out free days.
   const plan = stub.plans[0]!;
   assert.equal(plan.interval_unit, 'month');
   assert.equal(plan.interval_count, 1);
-  assert.equal(plan.trial_days, RECURRING_TRIAL_DAYS);
+  assert.equal(plan.trial_days, 24);
   assert.equal(plan.metadata[PLAN_TIER_METADATA_KEY], 'standard');
 
   assert.equal(stub.created.length, 1);
@@ -191,7 +191,7 @@ test('a plan created before monthly billing existed gets the trial before subscr
   assert.equal(result.activated, true);
   assert.equal(stub.updated.length, 1);
   assert.equal(stub.updated[0]!.id, 'plan_legacy');
-  assert.equal(stub.updated[0]!.patch.trial_days, RECURRING_TRIAL_DAYS);
+  assert.equal(stub.updated[0]!.patch.trial_days, 24, 'the trial is the remaining paid time, not a free month');
   assert.equal(stub.created[0]!.plan_id, 'plan_legacy');
 });
 
