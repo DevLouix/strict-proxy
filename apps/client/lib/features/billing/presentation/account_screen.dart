@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/billing_models.dart';
 import '../../../core/checkout_launcher.dart';
+import '../../../core/theme.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../application/billing_controller.dart';
@@ -355,10 +356,10 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = switch (status) {
-      'active' => Colors.greenAccent,
-      'expired' => Colors.orangeAccent,
-      'revoked' => Colors.redAccent,
-      _ => Colors.white24,
+      'active' => StatusColors.connected,
+      'expired' => StatusColors.pending,
+      'revoked' => StatusColors.failed,
+      _ => StatusColors.idle,
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -398,7 +399,7 @@ class _UsageCard extends StatelessWidget {
                       : '${formatBytes(subscription.bytesRemaining ?? 0)} left',
                   style: theme.textTheme.labelMedium?.copyWith(
                     color: exhausted
-                        ? Colors.redAccent
+                        ? StatusColors.failed
                         : theme.colorScheme.primary,
                   ),
                 ),
@@ -411,7 +412,7 @@ class _UsageCard extends StatelessWidget {
                 value: subscription.quotaUsedFraction,
                 minHeight: 8,
                 backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                color: exhausted ? Colors.redAccent : theme.colorScheme.primary,
+                color: exhausted ? StatusColors.failed : theme.colorScheme.primary,
               ),
             ),
             const SizedBox(height: 8),
@@ -424,7 +425,7 @@ class _UsageCard extends StatelessWidget {
               Text(
                 'You have used your monthly data allowance. Upgrade to restore access.',
                 style: theme.textTheme.bodySmall
-                    ?.copyWith(color: Colors.redAccent),
+                    ?.copyWith(color: StatusColors.failed),
               ),
             ],
           ],
@@ -494,10 +495,13 @@ class _UpgradeSection extends StatelessWidget {
   final bool busy;
   final Future<void> Function(String tier) onUpgrade;
 
-  /// Ranks tiers so the cheapest appears first.
+  /// Ranks tiers so the cheapest appears first, with unpriced entries last.
   List<TierPrice> get _ordered {
     final list = [...catalog.tiers]
-      ..sort((a, b) => a.amountMinor.compareTo(b.amountMinor));
+      ..sort((a, b) {
+        if (a.isPriced != b.isPriced) return a.isPriced ? -1 : 1;
+        return a.amountMinor.compareTo(b.amountMinor);
+      });
     return list;
   }
 
@@ -518,7 +522,7 @@ class _UpgradeSection extends StatelessWidget {
               child: ListTile(
                 title: Text(tier.label,
                     style: const TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: Text('Billed monthly · ${tier.formatted}'),
+                subtitle: Text('${tier.formatted} / month'),
                 trailing: FilledButton(
                   onPressed: busy ? null : () => onUpgrade(tier.tier),
                   child: busy

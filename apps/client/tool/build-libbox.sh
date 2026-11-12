@@ -12,6 +12,14 @@ PINNED_REF_FILE="${ROOT_DIR}/libbox.ref"
 ANDROID_OUT="${ROOT_DIR}/packages/libbox_bridge/android/libs"
 IOS_OUT="${ROOT_DIR}/packages/libbox_bridge/ios/Frameworks"
 
+# ABIs to bind for Android.
+#
+# Local builds keep all four so `flutter run` on an emulator still has an engine.
+# The release workflow narrows this to the two ARM ABIs it actually publishes:
+# x86/x86_64 exist only for emulators, and every extra ABI adds a full cgo link
+# to this 15-25 minute build for an APK that is never shipped.
+ANDROID_PLATFORMS="${LIBBOX_ANDROID_PLATFORMS:-android/arm64,android/arm,android/386,android/amd64}"
+
 fail() {
   printf 'error: %s\n' "$1" >&2
   exit 1
@@ -85,7 +93,11 @@ for tool in gomobile gobind; do
 done
 
 pushd "$WORK_DIR" >/dev/null
-go run ./cmd/internal/build_libbox -target android -platform android/arm64,android/arm,android/386,android/amd64
+[[ -n "$ANDROID_PLATFORMS" ]] || fail 'LIBBOX_ANDROID_PLATFORMS is empty'
+[[ "$ANDROID_PLATFORMS" =~ ^android/[a-z0-9_]+(,android/[a-z0-9_]+)*$ ]] \
+  || fail "LIBBOX_ANDROID_PLATFORMS must look like android/arm64,android/arm; got: ${ANDROID_PLATFORMS}"
+echo "Android ABIs: ${ANDROID_PLATFORMS}"
+go run ./cmd/internal/build_libbox -target android -platform "$ANDROID_PLATFORMS"
 mkdir -p "$ANDROID_OUT"
 cp -f libbox.aar "$ANDROID_OUT/libbox.aar"
 "${ROOT_DIR}/tool/unpack-libbox-aar.sh"

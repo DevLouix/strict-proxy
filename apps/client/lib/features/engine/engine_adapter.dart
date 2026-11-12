@@ -103,6 +103,12 @@ abstract class VpnEngine {
   Future<void> disconnect();
   EngineState get state;
   Stream<EngineState> get stateStream;
+
+  /// Human-readable reason for the last failure, when the platform layer sent
+  /// one. [stateStream] only carries the enum, so without this the native reason
+  /// is lost and every failure reads "engine error".
+  String? get lastErrorMessage => null;
+
   void dispose();
 }
 
@@ -120,6 +126,9 @@ class UnsupportedEngine implements VpnEngine {
 
   @override
   Stream<EngineState> get stateStream => const Stream<EngineState>.empty();
+
+  @override
+  String? get lastErrorMessage => null;
 
   @override
   Future<void> initialize() async => throw _unsupported();
@@ -144,6 +153,9 @@ class NoopEngine implements VpnEngine {
 
   @override
   Stream<EngineState> get stateStream => _controller.stream;
+
+  @override
+  String? get lastErrorMessage => null;
 
   @override
   Future<void> initialize() async {}

@@ -18,9 +18,13 @@ class LibboxEngine implements VpnEngine {
   final MethodChannel _channel;
   final _controller = StreamController<EngineState>.broadcast();
   EngineState _state = EngineState.disconnected;
+  String? _lastErrorMessage;
 
   @override
   EngineState get state => _state;
+
+  @override
+  String? get lastErrorMessage => _lastErrorMessage;
 
   @override
   Stream<EngineState> get stateStream => _controller.stream;
@@ -45,8 +49,9 @@ class LibboxEngine implements VpnEngine {
     try {
       await _channel.invokeMethod<void>('start', {'config': singBoxConfigJson});
     } catch (error) {
+      _lastErrorMessage = _describePlatformError(error);
       _setState(EngineState.error);
-      throw StateError('libbox start failed: $error');
+      throw StateError(_lastErrorMessage!);
     }
   }
 
@@ -64,18 +69,39 @@ class LibboxEngine implements VpnEngine {
 
   Future<void> _onMethodCall(MethodCall call) async {
     if (call.method != 'state') return;
-    final value = switch (call.arguments) {
-      String state => state,
-      Map<dynamic, dynamic> payload => payload['state'] as String? ?? 'error',
-      _ => 'error',
-    };
-    _setState(switch (value) {
+    final args = call.arguments;
+    final String value;
+    if (args is Map) {
+      value = args['state'] as String? ?? 'error';
+      // The native service sends the underlying libbox message next to the
+      // state; dropping it is why a failed start only ever said "engine error".
+      final message = args['message'];
+      if (message is String && message.trim().isNotEmpty) {
+        _lastErrorMessage = message.trim();
+      }
+    } else if (args is String) {
+      value = args;
+    } else {
+      value = 'error';
+    }
+    final next = switch (value) {
       'connecting' => EngineState.connecting,
       'connected' => EngineState.connected,
       'disconnecting' => EngineState.disconnecting,
       'disconnected' => EngineState.disconnected,
       _ => EngineState.error,
-    });
+    };
+    if (next == EngineState.connected) _lastErrorMessage = null;
+    _setState(next);
+  }
+
+  static String _describePlatformError(Object error) {
+    if (error is PlatformException) {
+      final message = error.message?.trim();
+      if (message != null && message.isNotEmpty) return message;
+      return error.code;
+    }
+    return error.toString();
   }
 
   void _setState(EngineState value) {

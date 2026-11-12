@@ -21,6 +21,11 @@
 #   OUT_DIR                     artifact directory                  (default build/dist)
 #   SPLIT_ABI                   build one APK per ABI (default 1). Set 0 for a
 #                               single universal APK
+#   TARGET_PLATFORMS            comma-separated Flutter target platforms.
+#                               Unset builds every ABI. The release workflow
+#                               passes android-arm,android-arm64: x86_64 only
+#                               runs in emulators, and each extra ABI costs a
+#                               full AOT compile plus a sign/verify pass.
 #   SKIP_LIBBOX=1               reuse an existing libbox.aar
 #   ANDROID_KEYSTORE_PATH / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS
 #   ANDROID_KEY_PASSWORD        (defaults to the keystore password)
@@ -84,7 +89,15 @@ if [[ "$SPLIT_ABI" == "1" ]]; then
   SPLIT_ARGS+=(--split-per-abi)
 fi
 
-flutter build apk --release "${SPLIT_ARGS[@]}" \
+# An empty TARGET_PLATFORMS leaves Flutter's default ABI set untouched, so a
+# local universal build still covers an emulator.
+TARGET_PLATFORMS="${TARGET_PLATFORMS:-}"
+PLATFORM_ARGS=()
+if [[ -n "$TARGET_PLATFORMS" ]]; then
+  PLATFORM_ARGS+=(--target-platform "$TARGET_PLATFORMS")
+fi
+
+flutter build apk --release "${SPLIT_ARGS[@]}" "${PLATFORM_ARGS[@]}" \
   --build-name "$APP_VERSION" \
   --build-number "$APP_BUILD_NUMBER" \
   --dart-define=STRICT_ENV=production \

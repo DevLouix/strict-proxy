@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/billing_models.dart';
+import '../../../core/theme.dart';
 
 /// Plan and quota at a glance, so the common "why is my connection limited?"
 /// question is answered without opening the account screen.
@@ -43,7 +44,7 @@ class PlanStrip extends StatelessWidget {
             Text(
               sub.isQuotaExhausted ? 'data used' : '${formatBytes(sub.bytesRemaining ?? 0)} left',
               style: theme.textTheme.bodySmall?.copyWith(
-                color: sub.isQuotaExhausted ? Colors.redAccent : theme.hintColor,
+                color: sub.isQuotaExhausted ? StatusColors.failed : theme.hintColor,
               ),
             ),
           ],
@@ -52,7 +53,7 @@ class PlanStrip extends StatelessWidget {
             const SizedBox(width: 8),
             Text(
               sub.status,
-              style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w600, fontSize: 12),
+              style: const TextStyle(color: StatusColors.failed, fontWeight: FontWeight.w600, fontSize: 12),
             ),
           ],
         ],

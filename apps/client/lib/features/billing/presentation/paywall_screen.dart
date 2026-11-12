@@ -66,7 +66,12 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
     final theme = Theme.of(context);
     final plans = <TierPrice>[
       ...?state.catalog?.tiers.where((t) => t.tier == 'standard' || t.tier == 'pro'),
-    ]..sort((a, b) => a.amountMinor.compareTo(b.amountMinor));
+    ]..sort((a, b) {
+        // Unpriced tiers sort last: they cannot be compared on price and must
+        // not open the list with "Price unavailable".
+        if (a.isPriced != b.isPriced) return a.isPriced ? -1 : 1;
+        return a.amountMinor.compareTo(b.amountMinor);
+      });
 
     return Scaffold(
       appBar: AppBar(

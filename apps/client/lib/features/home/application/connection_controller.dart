@@ -97,25 +97,38 @@ class LatencyResult {
 
 class ConnectionNotifier extends StateNotifier<ConnState> {
   ConnectionNotifier(this._ref) : super(const EngineStateIdle()) {
-    final engine = _ref.read(engineProvider);
-    _engineReady = _initializeEngine(engine);
-    engine.stateStream.listen((s) {
-      switch (s) {
-        case EngineState.connecting:
-          if (state is! EngineStateConnected) state = const EngineStateConnecting();
-        case EngineState.connected:
-          if (_selected != null) state = EngineStateConnected(_selected!);
-        case EngineState.disconnecting:
-        case EngineState.disconnected:
-          state = const EngineStateIdle();
-        case EngineState.error:
-          state = const EngineStateError('engine error');
-      }
-    });
+    _engine = _ref.read(engineProvider);
+    _engineReady = _initializeEngine(_engine);
+    _subscription = _engine.stateStream.listen(_onEngineState);
   }
 
+  /// How long an attempt may stay in "connecting" before it is reported as
+  /// failed. The native start covers the OS VPN permission dialog, which a user
+  /// can sit on, so this is deliberately generous — but bounded, because the
+  /// engine could otherwise stay in ``connecting`` forever with no feedback.
+  static const connectTimeout = Duration(seconds: 45);
+
   final Ref _ref;
+  late final VpnEngine _engine;
   late final Future<void> _engineReady;
+  StreamSubscription<EngineState>? _subscription;
+
+  /// Fails an attempt that reports neither `connected` nor an error.
+  Timer? _watchdog;
+
+  /// Monotonic attempt id, so a stale `await` cannot overwrite a newer attempt.
+  int _attempt = 0;
+
+  /// Set when the current attempt failed. The native service emits an error and
+  /// then `disconnected` from `onDestroy`; without this flag that trailing event
+  /// turned a failed connect into "idle" — the state flicker users saw as
+  /// "it just goes back to disconnected".
+  bool _failed = false;
+
+  /// Populated when the engine cannot be initialised, so connect fails with the
+  /// real reason instead of attempting a session the build cannot support.
+  String? _engineError;
+
   ServerNode? _selected;
 
   Future<void> _initializeEngine(VpnEngine engine) async {
@@ -125,7 +138,34 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       // Never rethrow: this future is awaited only when the user connects, so a
       // rethrow here surfaces as an unhandled async error on the home screen,
       // which can take the whole app down instead of showing the failure.
-      state = EngineStateError(error.toString());
+      _engineError = _describeError(error);
+      state = EngineStateError(_engineError!);
+    }
+  }
+
+  void _onEngineState(EngineState event) {
+    switch (event) {
+      case EngineState.connecting:
+        if (state is! EngineStateConnected && state is! EngineStateConnecting) {
+          state = const EngineStateConnecting();
+        }
+      case EngineState.connected:
+        _watchdog?.cancel();
+        _failed = false;
+        final node = _selected;
+        if (node != null) state = EngineStateConnected(node);
+      case EngineState.disconnecting:
+        _watchdog?.cancel();
+        if (!_failed) state = const EngineStateIdle();
+      case EngineState.disconnected:
+        _watchdog?.cancel();
+        if (!_failed) state = const EngineStateIdle();
+      case EngineState.error:
+        _watchdog?.cancel();
+        _failed = true;
+        state = EngineStateError(
+          _engine.lastErrorMessage ?? 'The VPN engine reported an error.',
+        );
     }
   }
 
@@ -134,6 +174,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   Future<void> toggle() async {
     final s = state;
     if (s is EngineStateConnected || s is EngineStateConnecting) {
+      // While connecting this is a cancel, not a disconnect; the UI says so.
       await disconnect();
     } else {
       await connect();
@@ -141,32 +182,75 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   }
 
   Future<void> connect({ServerNode? node}) async {
+    // A tap while an attempt is in flight must not start a second one; the
+    // button reports that tap as a cancel through [toggle].
+    if (state is EngineStateConnecting) return;
+
+    final attempt = ++_attempt;
+    _failed = false;
+    _watchdog?.cancel();
+
     try {
       await _engineReady;
+      if (attempt != _attempt) return;
+      if (_engineError != null) {
+        _fail(_engineError!);
+        return;
+      }
       if (node != null) _selected = node;
       _selected ??= await pickBestNode();
+      if (attempt != _attempt) return;
       if (_selected == null) {
-        state = const EngineStateError('No servers available');
+        _fail('No servers are available right now. Try again shortly.');
         return;
       }
       state = const EngineStateConnecting();
 
+      // Nothing can report progress while the OS VPN permission dialog is up, so
+      // the watchdog covers the whole attempt, not just the tunnel handshake.
+      _watchdog = Timer(connectTimeout, () {
+        if (attempt != _attempt || state is! EngineStateConnecting) return;
+        _fail(
+          'The tunnel did not come up. Allow the VPN request if it is showing, '
+          'then try again.',
+        );
+      });
+
       // Every bundle is verified by the loader before it is used; nothing else
       // is allowed to fetch and trust raw credentials.
       final bundle = await _ref.read(configBundleLoaderProvider).load();
+      if (attempt != _attempt) return;
       final nodeConfig = bundle.rawConfigs[_selected!.id];
       if (nodeConfig is! Map<String, dynamic>) {
-        state = const EngineStateError('Selected server configuration is unavailable');
+        _fail('The selected server configuration is unavailable. Pick another server.');
         return;
       }
-      await _ref.read(engineProvider).connect(jsonEncode(buildSingBoxTunConfig(nodeConfig)));
+      await _engine.connect(jsonEncode(buildSingBoxTunConfig(nodeConfig)));
     } on BundleVerificationException catch (e) {
-      state = EngineStateError(e.reason);
+      _fail(e.reason);
     } on ApiException catch (e) {
-      state = EngineStateError(_describeConnectFailure(e));
+      _fail(_describeConnectFailure(e));
     } catch (e) {
-      state = EngineStateError(e.toString());
+      _fail(_engine.lastErrorMessage ?? _describeError(e));
     }
+  }
+
+  /// Records a failed attempt. Cancels the watchdog and keeps later
+  /// `disconnected` events from wiping the reason off the screen.
+  void _fail(String message) {
+    _watchdog?.cancel();
+    _failed = true;
+    state = EngineStateError(message);
+  }
+
+  /// Turns an engine error into text a person can read.
+  ///
+  /// `StateError('libbox start failed: PlatformException(...)')` and a bare
+  /// exception string are developer text, not a user-facing reason.
+  static String _describeError(Object error) {
+    final text = error is StateError ? error.message : error.toString();
+    final trimmed = text.trim();
+    return trimmed.isEmpty ? 'The tunnel could not be started.' : trimmed;
   }
 
   /// Turns an API failure into something a person can act on.
@@ -202,13 +286,24 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   }
 
   Future<void> disconnect() async {
+    // Invalidate any attempt still in flight before stopping the engine.
+    _attempt++;
+    _watchdog?.cancel();
+    _failed = false;
     try {
       await _engineReady;
-      await _ref.read(engineProvider).disconnect();
+      await _engine.disconnect();
       state = const EngineStateIdle();
     } catch (error) {
-      state = EngineStateError(error.toString());
+      state = EngineStateError(_describeError(error));
     }
+  }
+
+  @override
+  void dispose() {
+    _watchdog?.cancel();
+    _subscription?.cancel();
+    super.dispose();
   }
 
   Future<ServerNode?> pickBestNode() async {

@@ -49,6 +49,12 @@ class StrictProxyApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
       home: const RootGate(),
+      // Without this every `pushNamed` throws "Could not find a generator for
+      // route": the account screen, the server picker and the password-reset
+      // link were all unreachable from the home screen.
+      onGenerateRoute: onGenerateRoute,
+      onUnknownRoute: (settings) =>
+          MaterialPageRoute(builder: (_) => const RootGate()),
     );
   }
 }

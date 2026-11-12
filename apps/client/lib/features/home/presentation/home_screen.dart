@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../../billing/application/billing_controller.dart';
 import '../../updates/update_controller.dart';
@@ -37,6 +38,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final auth = ref.watch(authStateProvider);
     final billing = ref.watch(billingProvider);
     final update = ref.watch(updateProvider);
+    final theme = Theme.of(context);
 
     return Scaffold(
       appBar: AppBar(
@@ -54,10 +56,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
         ],
       ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
+      // Scrollable so the update banner and plan strip cannot push the connect
+      // button off a short screen (a RenderFlex overflow before this).
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
             if (update.hasUpdate) ...[
               _UpdateBanner(
                 version: update.release!.version,
@@ -66,9 +73,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ),
               const SizedBox(height: 20),
             ],
-            GestureDetector(
+            ConnectButton(
+              state: conn,
               onTap: () => ref.read(connectionStateProvider.notifier).toggle(),
-              child: ConnectButton(state: conn),
             ),
             const SizedBox(height: 24),
             Text(
@@ -76,12 +83,41 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 EngineStateIdle() => 'Disconnected',
                 EngineStateConnecting() => 'Connecting…',
                 EngineStateConnected(:final node) => 'Connected · ${node.region}',
-                EngineStateError(:final message) => 'Error: $message',
+                EngineStateError() => 'Not connected',
               },
-              style: Theme.of(context).textTheme.titleMedium,
+              style: theme.textTheme.titleMedium,
+              textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 8),
-            Text(auth.email ?? '', style: Theme.of(context).textTheme.bodySmall),
+            if (conn is EngineStateConnecting) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Tap the button again to cancel',
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                textAlign: TextAlign.center,
+              ),
+            ],
+            // The engine's own reason, not just "engine error": the native side
+            // sends it with the state event and it is the only actionable text
+            // available when a tunnel refuses to start.
+            if (conn is EngineStateError) ...[
+              const SizedBox(height: 6),
+              Text(
+                conn.message,
+                style: theme.textTheme.bodySmall?.copyWith(color: StatusColors.failed),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              TextButton.icon(
+                onPressed: () =>
+                    ref.read(connectionStateProvider.notifier).connect(),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Try again'),
+              ),
+            ],
+            if (auth.email != null) ...[
+              const SizedBox(height: 8),
+              Text(auth.email!, style: theme.textTheme.bodySmall),
+            ],
             const SizedBox(height: 32),
             FilledButton.tonal(
               onPressed: () => Navigator.of(context).pushNamed('/servers'),
@@ -98,7 +134,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 await ref.read(billingProvider.notifier).load();
               },
             ),
-          ],
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -158,28 +196,50 @@ class _UpdateBanner extends StatelessWidget {
 }
 
 /// Big circular connect button — custom visuals, no default accents.
+///
+/// It is a real button (ink, semantics, a label that states what the tap does),
+/// not a bare gesture detector: while connecting the same tap cancels, so the
+/// accessibility label has to say so.
 class ConnectButton extends StatelessWidget {
-  const ConnectButton({super.key, required this.state});
+  const ConnectButton({super.key, required this.state, required this.onTap});
 
   final Object state; // pattern-matched above
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final color = switch (state) {
-      EngineStateConnected() => Colors.greenAccent,
-      EngineStateConnecting() => Colors.orangeAccent,
-      EngineStateError() => Colors.redAccent,
-      _ => Colors.white24,
+      EngineStateConnected() => StatusColors.connected,
+      EngineStateConnecting() => StatusColors.pending,
+      EngineStateError() => StatusColors.failed,
+      _ => StatusColors.idle,
     };
-    return Container(
-      width: 180,
-      height: 180,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        border: Border.all(color: color, width: 4),
+    final label = switch (state) {
+      EngineStateConnected() => 'Disconnect',
+      EngineStateConnecting() => 'Cancel connection attempt',
+      _ => 'Connect',
+    };
+    return Semantics(
+      button: true,
+      label: label,
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Container(
+            width: 180,
+            height: 180,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: color, width: 4),
+            ),
+            alignment: Alignment.center,
+            child: Icon(Icons.power_settings_new, size: 64, color: color),
+          ),
+        ),
       ),
-      alignment: Alignment.center,
-      child: const Icon(Icons.power_settings_new, size: 64),
     );
   }
 }

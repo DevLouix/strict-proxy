@@ -14,15 +14,31 @@ class TierPrice {
   final int amountMinor;
   final String currency;
 
-  factory TierPrice.fromJson(Map<String, dynamic> json) => TierPrice(
-        tier: json['tier'] as String? ?? 'unknown',
-        label: json['label'] as String? ?? (json['tier'] as String? ?? 'unknown'),
-        amountMinor: _asInt(json['amountMinor']),
-        currency: json['currency'] as String? ?? 'USD',
-      );
+  /// Parses one catalog entry.
+  ///
+  /// The controller sends `{tier, price: {amountMinor, currency, label}}`, so
+  /// reading the amount from the top level found nothing and every plan
+  /// advertised "USD 0" — the price the operator set never reached the screen.
+  /// The flat shape is still accepted because fixtures and older payloads use it.
+  factory TierPrice.fromJson(Map<String, dynamic> json) {
+    final nested = json['price'];
+    final price = nested is Map<String, dynamic> ? nested : const <String, dynamic>{};
+    final source = price.isEmpty ? json : price;
+    final tier = json['tier'] as String? ?? 'unknown';
+    return TierPrice(
+      tier: tier,
+      label: source['label'] as String? ?? json['label'] as String? ?? tier,
+      amountMinor: _asInt(source['amountMinor']),
+      currency: source['currency'] as String? ?? json['currency'] as String? ?? 'USD',
+    );
+  }
+
+  /// Whether the catalog sent a usable amount for this tier.
+  bool get isPriced => amountMinor > 0;
 
   /// Price as a major-unit string (amounts are minor units, e.g. kobo).
   String get formatted {
+    if (!isPriced) return 'Price unavailable';
     final value = amountMinor / 100;
     final digits = value == value.roundToDouble() ? 0 : 2;
     return '$currency ${value.toStringAsFixed(digits)}';

@@ -24,6 +24,7 @@ class LinuxSingBoxEngine implements VpnEngine {
   Process? _process;
   File? _configFile;
   EngineState _state = EngineState.disconnected;
+  String? _lastErrorMessage;
 
   @override
   EngineState get state => _state;
@@ -32,13 +33,16 @@ class LinuxSingBoxEngine implements VpnEngine {
   Stream<EngineState> get stateStream => _controller.stream;
 
   @override
+  String? get lastErrorMessage => _lastErrorMessage;
+
+  @override
   Future<void> initialize() async {
     final result = await Process.run(_executable, const ['version']);
     if (result.exitCode != 0) {
+      _lastErrorMessage =
+          'sing-box is unavailable: ${result.stderr.toString().trim()}';
       _setState(EngineState.error);
-      throw StateError(
-        'sing-box is unavailable: ${result.stderr.toString().trim()}',
-      );
+      throw StateError(_lastErrorMessage!);
     }
     _setState(EngineState.disconnected);
   }
@@ -65,8 +69,9 @@ class LinuxSingBoxEngine implements VpnEngine {
       _setState(EngineState.connected);
     } catch (error) {
       await _cleanupConfig();
+      _lastErrorMessage = 'sing-box failed to start: $error';
       _setState(EngineState.error);
-      throw StateError('sing-box failed to start: $error');
+      throw StateError(_lastErrorMessage!);
     }
   }
 
@@ -97,6 +102,9 @@ class LinuxSingBoxEngine implements VpnEngine {
     if (!identical(_process, process)) return;
     _process = null;
     await _cleanupConfig();
+    if (exitCode != 0) {
+      _lastErrorMessage = 'sing-box exited with code $exitCode.';
+    }
     _setState(exitCode == 0 ? EngineState.disconnected : EngineState.error);
   }
 

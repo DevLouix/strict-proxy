@@ -20,6 +20,35 @@ void main() {
       expect(catalog.tierNamed('free'), isNull);
     });
 
+    test('parses the controller shape where the price is nested', () {
+      // The controller sends {tier, price: {...}}; reading amountMinor from the
+      // top level found nothing, so every plan rendered as "USD 0" in the app.
+      final catalog = BillingCatalog.fromJson({
+        'gateway': 'openpay',
+        'currency': 'USD',
+        'tiers': [
+          {'tier': 'standard', 'price': {'amountMinor': 450, 'currency': 'USD', 'label': 'Standard'}},
+        ],
+      });
+
+      final standard = catalog.tierNamed('standard')!;
+      expect(standard.amountMinor, 450);
+      expect(standard.label, 'Standard');
+      expect(standard.formatted, 'USD 4.50');
+      expect(standard.isPriced, isTrue);
+    });
+
+    test('an unpriced tier says so instead of advertising zero', () {
+      final catalog = BillingCatalog.fromJson({
+        'tiers': [
+          {'tier': 'pro', 'label': 'Pro'},
+        ],
+      });
+
+      expect(catalog.tierNamed('pro')!.isPriced, isFalse);
+      expect(catalog.tierNamed('pro')!.formatted, 'Price unavailable');
+    });
+
     test('flags an unconfigured gateway', () {
       final catalog = BillingCatalog.fromJson({'gateway': 'unconfigured', 'currency': 'USD', 'tiers': <dynamic>[]});
       expect(catalog.isUnconfigured, isTrue);

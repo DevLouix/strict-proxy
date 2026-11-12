@@ -144,12 +144,15 @@ change rather than a moving target.
    unzip -l /tmp/c.jar | grep 'io/nekohasekai/libbox/Libbox'
    ```
 
-   All four ABIs must be present and the `Libbox` class must exist.
+   Every ABI in the AAR must carry `libbox.so`, and the `Libbox` class must
+   exist. A local build binds all four; the release workflow binds only the ARM
+   ABIs it publishes (`LIBBOX_ANDROID_PLATFORMS=android/arm64,android/arm`).
 6. Rebuild a release APK and connect once on a real device. A new engine can
    change runtime behaviour even when it compiles.
 7. Commit only `apps/client/libbox.ref`. CI rebuilds the AAR automatically: the
-   cache key is the pinned SHA, so an unrelated change reuses the artifact and a
-   new pin invalidates it.
+   cache key is the pinned SHA plus `tool/build-libbox.sh`, so an unrelated
+   change reuses the artifact, while a new pin or a changed build recipe
+   invalidates it.
 
 `SING_BOX_LIBBOX_REF=<sha>` overrides the pin for a one-off experiment; never merge
 a build that depends on it.

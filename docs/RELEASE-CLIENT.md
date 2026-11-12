@@ -201,11 +201,20 @@ diff, replacing that SHA, and rebuilding — never pointing it at a branch.
 
 ## Run a release
 
-The workflow builds `libbox.aar` for all four Android ABIs (Go 1.25.5 on the
-runner, matching the pinned engine's `go.mod`), compiles **one APK per ABI**
-(`--split-per-abi`), re-signs each with your keystore, verifies the signature and
-the packaged engine, and uploads the artifacts. Expect roughly 15–25 minutes on
-a cold cache because of the native build.
+The workflow builds `libbox.aar` for the two Android ABIs it publishes
+(`android/arm64`, `android/arm`; Go 1.25.5 on the runner, matching the pinned
+engine's `go.mod`), compiles **one APK per ABI** (`--split-per-abi`), re-signs
+each with your keystore, verifies the signature and the packaged engine, and
+uploads the artifacts. Expect roughly 15–25 minutes on a cold cache because of
+the native build.
+
+x86/x86_64 are emulator-only and are neither built nor published, which removes
+a third of the engine binding, packaging and signature work. A local build still
+covers all four by default: set `LIBBOX_ANDROID_PLATFORMS` and
+`TARGET_PLATFORMS` if you need an emulator build.
+
+Each release's notes list the client commits since the previous `client-*` tag,
+so a published build number can be traced to the changes it contains.
 
 ```bash
 gh workflow run client-release \
@@ -244,8 +253,10 @@ export ANDROID_KEY_PASSWORD='...'   # omit if same as keystore password
 ```
 
 The artifacts land in `apps/client/build/dist/`, one per ABI
-(`strict-proxy-0.2.0-20-arm64-v8a.apk`, `…-armeabi-v7a.apk`, `…-x86_64.apk`).
-Set `SPLIT_ABI=0` for a single universal APK. The script ends by asserting each
+(`strict-proxy-0.2.0-20-arm64-v8a.apk`, `…-armeabi-v7a.apk`).
+Set `SPLIT_ABI=0` for a single universal APK. `TARGET_PLATFORMS` narrows the ABI
+set: the release workflow uses `android-arm,android-arm64`, and adding
+`android-x64` builds an emulator APK on demand. The script ends by asserting each
 APK's application id, launcher label, and a packaged `libbox.so` for every ABI it
 contains, so a build with the placeholder id or without the engine fails instead
 of being handed over (`tool/verify-android-apk.sh`; CI runs the same check).

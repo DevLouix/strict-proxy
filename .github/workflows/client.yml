@@ -55,6 +55,16 @@ jobs:
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
 
+      # flutter-action caches the SDK, not the packages: without this every run
+      # re-downloads the dependency graph before the first test starts.
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.yaml') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
       # This job only creates host projects and runs Dart tests/analysis; it
       # does not compile a Linux or Android target. The runner already has the
       # tools Flutter needs, and apt here has repeatedly hung before any build
@@ -87,7 +97,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The sing-box tree, the Go module cache and the finished AAR are keyed to
+      # the pinned commit *and* the engine build recipe, so an unrelated client
+      # change rebuilds neither the clone nor the native library — but a changed
+      # ABI list or build flag can no longer reuse a stale AAR.
+      - name: Restore libbox build cache
+        uses: actions/cache@v4
+        id: libbox-cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            apps/client/.cache/sing-box-libbox
+            apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          key: libbox-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
+
+      # Restore first and trust the file, not the cache-hit flag: a restore can
+      # place the AAR while reporting no hit. Everything below it is skipped on a
+      # warm cache, which used to cost the Go setup and the NDK download before a
+      # single useful step ran.
+      - name: Check for the native engine
+        id: engine
+        run: |
+          if [ -f apps/client/packages/libbox_bridge/android/libs/libbox.aar ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+            echo 'libbox.aar is present; skipping the engine toolchain and build'
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-go@v5
+        if: steps.engine.outputs.present != 'true'
         with:
           # libbox is pinned to sing-box v1.14.4, the same engine the node image
           # bakes in; its go.mod requires Go 1.25.5 and the sagernet/gomobile pin.
@@ -97,8 +136,10 @@ jobs:
       # sing-box 1.14 links libcronet.a, whose objects use TLS-descriptor
       # relocations that the runner's preinstalled NDK 27 lld rejects with
       # "unknown relocation (315)". 28.0.13004108 is the NDK the upstream
-      # Android client builds this engine with.
+      # Android client builds this engine with. This is the slowest setup step
+      # here, so it only runs when the engine actually has to build.
       - name: Install the Android NDK and free runner disk
+        if: steps.engine.outputs.present != 'true'
         run: |
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           # Four-ABI gomobile builds fill the runner's free space (the engine now
@@ -113,20 +154,13 @@ jobs:
           echo "ANDROID_NDK_HOME=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
 
-      # The sing-box tree, the Go module cache and the finished AAR are all keyed
-      # to the pinned commit, so an unrelated client change rebuilds neither the
-      # clone nor the native library.
-      - name: Restore libbox build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            apps/client/.cache/sing-box-libbox
-            apps/client/packages/libbox_bridge/android/libs/libbox.aar
-          key: libbox-${{ hashFiles('apps/client/libbox.ref') }}
-
-      - name: Build libbox.aar for all Android ABIs
-        if: hashFiles('apps/client/packages/libbox_bridge/android/libs/libbox.aar') == ''
+      - name: Build libbox.aar for the published Android ABIs
+        if: steps.engine.outputs.present != 'true'
+        env:
+          # Only the ARM ABIs are published, so binding x86/x86_64 for emulators
+          # would double the cgo work in this build for APKs the release never
+          # ships. A local build still binds all four by default.
+          LIBBOX_ANDROID_PLATFORMS: android/arm64,android/arm
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
           ./apps/client/tool/build-libbox.sh --android-only
@@ -196,7 +230,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history: the release notes diff this build against the previous
+      # client tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: subosito/flutter-action@v2
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
@@ -263,6 +301,26 @@ jobs:
       # The artifact store fills up and then refuses every upload, which used
       # to fail the run after a good build. A release asset is the durable copy
       # anyway, so publish there and skip the artifact entirely.
+      # Each release states what changed, so two builds can be told apart without
+      # diffing the repository. The range starts at the previous client tag, which
+      # is the same build number the in-app updater tracks.
+      - name: Collect changes since the previous client release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git fetch --tags --force --quiet || true
+          prev="$(git tag --list 'client-*' --sort=-creatordate | head -1)"
+          {
+            echo '### Changes in this build'
+            echo
+            if [ -n "$prev" ]; then
+              lines="$(git log --no-merges --pretty='- %s (`%h`)' "$prev"..HEAD -- apps/client .github/workflows/client.yml | head -40)"
+              if [ -n "$lines" ]; then printf '%s\n' "$lines"; else echo "- No client changes since \`$prev\`."; fi
+            else
+              echo '- First published client build.'
+            fi
+          } > "$RUNNER_TEMP/changes.md"
+          cat "$RUNNER_TEMP/changes.md"
+
       - name: Attach the Linux bundle to the release
         if: github.ref == 'refs/heads/main'
         env:
@@ -278,9 +336,11 @@ jobs:
             echo "- controller: \`${URL}\`"
             echo "- version: \`0.1.0\`, build ${GITHUB_RUN_NUMBER}"
             echo "- installs over an earlier build only if it was signed with the same release keystore"
-            echo "- one APK per ABI: pick \`arm64-v8a\` for a modern phone, \`armeabi-v7a\` for an older one"
+            echo "- one APK per ABI: pick \`arm64-v8a\` for a modern phone, \`armeabi-v7a\` for an older one (emulator ABIs are not published)"
             echo
             echo "Install: \`adb install -r strict-proxy-client-android-${GITHUB_SHA}-arm64-v8a.apk\`"
+            echo
+            if [ -f "$RUNNER_TEMP/changes.md" ]; then cat "$RUNNER_TEMP/changes.md"; fi
             echo
             echo "Built by [\`client\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
           } > "$notes"
@@ -316,7 +376,11 @@ jobs:
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
     steps:
+      # Full history: the release notes diff this build against the previous
+      # client tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # The artifact is a signed release build or nothing: an unsigned APK
       # installs but could never be updated with the real key. Fail with the
@@ -379,6 +443,19 @@ jobs:
             /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
+      # Gradle and the pub cache are the second-largest cost after the engine
+      # build, and were re-downloaded from scratch (AGP, Kotlin, R8) every run.
+      - name: Cache Gradle and pub packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.yaml', 'apps/client/tool/configure-android-host.sh') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       # Same key the libbox job caches under, so the engine is reused instead of
       # rebuilt. A cold cache rebuilds it here rather than failing the APK.
       - name: Restore the native engine
@@ -386,7 +463,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
-          key: libbox-${{ hashFiles('apps/client/libbox.ref') }}
+          key: libbox-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
 
       # Trust the file, not the cache-hit flag: a restore can place the AAR
       # while reporting no hit, and rebuilding it then is pure waste.
@@ -418,6 +495,9 @@ jobs:
 
       - name: Rebuild libbox when the engine is absent
         if: steps.engine.outputs.present != 'true'
+        env:
+          # Matches the libbox job, so a cold rebuild produces the same AAR.
+          LIBBOX_ANDROID_PLATFORMS: android/arm64,android/arm
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
           ./apps/client/tool/build-libbox.sh --android-only
@@ -461,6 +541,9 @@ jobs:
           APP_VERSION: '0.1.0'
           APP_BUILD_NUMBER: ${{ github.run_number }}
           SKIP_LIBBOX: '1'
+          # x86_64 is emulator-only and is not published, so building and
+          # signing it was a third of the packaging phase for nothing.
+          TARGET_PLATFORMS: android-arm,android-arm64
         run: ./apps/client/tool/build-release-android.sh
 
       # The build is split per ABI, so there is one APK per architecture; each
@@ -491,6 +574,25 @@ jobs:
               | grep -E 'certificate DN|SHA-256 digest' | head -2
           done
 
+      # Same changelog as the Linux job: the Android job may be the one that
+      # creates the tag, and the notes must be complete either way.
+      - name: Collect changes since the previous client release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git fetch --tags --force --quiet || true
+          prev="$(git tag --list 'client-*' --sort=-creatordate | head -1)"
+          {
+            echo '### Changes in this build'
+            echo
+            if [ -n "$prev" ]; then
+              lines="$(git log --no-merges --pretty='- %s (`%h`)' "$prev"..HEAD -- apps/client .github/workflows/client.yml | head -40)"
+              if [ -n "$lines" ]; then printf '%s\n' "$lines"; else echo "- No client changes since \`$prev\`."; fi
+            else
+              echo '- First published client build.'
+            fi
+          } > "$RUNNER_TEMP/changes.md"
+          cat "$RUNNER_TEMP/changes.md"
+
       - name: Attach the APKs to the release
         if: github.ref == 'refs/heads/main'
         env:
@@ -506,9 +608,11 @@ jobs:
             echo "- controller: \`${URL}\`"
             echo "- version: \`0.1.0\`, build ${GITHUB_RUN_NUMBER}"
             echo "- installs over an earlier build only if it was signed with the same release keystore"
-            echo "- one APK per ABI: pick \`arm64-v8a\` for a modern phone, \`armeabi-v7a\` for an older one"
+            echo "- one APK per ABI: pick \`arm64-v8a\` for a modern phone, \`armeabi-v7a\` for an older one (emulator ABIs are not published)"
             echo
             echo "Install: \`adb install -r strict-proxy-client-android-${GITHUB_SHA}-arm64-v8a.apk\`"
+            echo
+            if [ -f "$RUNNER_TEMP/changes.md" ]; then cat "$RUNNER_TEMP/changes.md"; fi
             echo
             echo "Built by [\`client\`](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
           } > "$notes"
