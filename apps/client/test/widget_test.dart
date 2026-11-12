@@ -118,7 +118,7 @@ void main() {
     )));
     await tester.pumpAndSettle();
 
-    expect(find.text('Bandwidth this window'), findsOneWidget);
+    expect(find.text('Bandwidth last 30 days'), findsOneWidget);
     expect(find.text('5.0 GB of 10.0 GB used'), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
