@@ -24,7 +24,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  FLUTTER_CHANNEL: stable
+  # Pinned, not `stable`. A new Flutter stable release began marking
+  # `package:flutter/material.dart` deprecated in every file, which failed
+  # `flutter analyze` on code no one had touched. Every other build input here
+  # (Go, the NDK, the engine SHA) is pinned for the same reason: a release must
+  # not change because upstream shipped.
+  #
+  # Upgrading is deliberate: bump this, then migrate the `material.dart` imports
+  # the new analyzer points at.
+  FLUTTER_VERSION: '3.47.9'
   CLIENT_ENV: production
   # Set the repository variable CLIENT_CONTROLLER_URL once the controller has a
   # real HTTPS address; the placeholder keeps compile-only builds working.
@@ -52,7 +60,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
       # flutter-action caches the SDK, not the packages: without this every run
@@ -188,7 +196,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
       # iOS could not be verified locally: it needs macOS and Xcode. This closes
@@ -237,7 +245,7 @@ jobs:
           fetch-depth: 0
       - uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       # The runner's mirrorlist prefers azure.archive.ubuntu.com, which has
       # throttled this job to ~15 kB/s and turned a 28 MB install into a
@@ -420,7 +428,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - uses: actions/setup-java@v5
         with:
