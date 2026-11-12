@@ -18,6 +18,8 @@ import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
+import java.net.InetAddress
+import java.net.NetworkInterface
 
 /**
  * Foreground Android VPN service. libbox is deliberately loaded reflectively:
@@ -56,6 +58,22 @@ class LibboxVpnService : VpnService() {
         fun emitState(state: String, message: String? = null) {
             val payload = if (message == null) state else mapOf("state" to state, "message" to message)
             methodChannel?.invokeMethod("state", payload)
+        }
+
+        /**
+         * What a proxy method returns when there is nothing useful to say.
+         *
+         * Primitives must not be null: a `Proxy` returning null for an int or
+         * boolean throws a NullPointerException inside libbox's call, which is
+         * reported as a native crash.
+         */
+        fun defaultValue(method: Method): Any? = when (method.returnType) {
+            Void.TYPE -> null
+            java.lang.Boolean.TYPE -> false
+            java.lang.Integer.TYPE, java.lang.Long.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> 0
+            java.lang.Float.TYPE, java.lang.Double.TYPE -> 0.0
+            java.lang.Character.TYPE -> '\u0000'
+            else -> null
         }
 
         fun start(context: Context, config: String) {
@@ -289,20 +307,98 @@ class LibboxVpnService : VpnService() {
             .build()
     }
 
+    /**
+     * The platform callbacks libbox makes into the VPN service.
+     *
+     * Two of them are load-bearing on Android and were previously answered with
+     * `null`:
+     *
+     *  - `autoDetectInterfaceControl` must protect the socket, or the engine's own
+     *    outbound connection goes back through the tunnel it just created. The
+     *    configuration enables `auto_detect_interface`, so the callback is not
+     *    optional.
+     *  - `getInterfaces` must return an iterator. libbox reads it while resolving
+     *    the default interface immediately after the service starts; a null is
+     *    dereferenced in native code and the process dies — which is what "connects,
+     *    then the app closes instantly" looks like from the outside.
+     */
     private class PlatformHandler(private val service: LibboxVpnService) : InvocationHandler {
         override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? {
-            if (method.name.equals("openTun", ignoreCase = true)) {
-                return service.openTun(args?.firstOrNull())
+            when {
+                method.name.equals("openTun", ignoreCase = true) ->
+                    return service.openTun(args?.firstOrNull())
+                method.name.equals("autoDetectInterfaceControl", ignoreCase = true) -> {
+                    (args?.firstOrNull() as? Number)?.let { service.protect(it.toInt()) }
+                    return null
+                }
+                method.name.equals("getInterfaces", ignoreCase = true) ->
+                    return service.networkInterfaces(method.returnType)
             }
-            if (method.name == "autoDetectInterfaceControl") return null
-            return when (method.returnType) {
-                java.lang.Boolean.TYPE -> false
-                java.lang.Integer.TYPE, java.lang.Long.TYPE, java.lang.Short.TYPE -> 0
-                java.lang.Float.TYPE, java.lang.Double.TYPE -> 0.0
-                else -> null
-            }
+            return defaultValue(method)
         }
     }
+
+    /**
+     * The device's interfaces, shaped like the generated libbox interface.
+     *
+     * Reflective because the type only exists in the AAR, and lazily evaluated
+     * because libbox re-reads the list as networks change. Addresses are reported
+     * with the host prefix: enough for interface selection, which is what this
+     * callback is for.
+     */
+    private fun networkInterfaces(iteratorType: Class<*>): Any {
+        val interfaces = runCatching {
+            NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        }.getOrDefault(emptyList())
+        var index = -1
+        return Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType), InvocationHandler { _, method, _ ->
+            when {
+                method.name.equals("hasNext", ignoreCase = true) -> index + 1 < interfaces.size
+                method.name.equals("next", ignoreCase = true) ->
+                    interfaceProxy(method.returnType, interfaces[++index])
+                else -> defaultValue(method)
+            }
+        })
+    }
+
+    private fun interfaceProxy(type: Class<*>, iface: NetworkInterface): Any =
+        Proxy.newProxyInstance(type.classLoader, arrayOf(type), InvocationHandler { _, method, _ ->
+            when {
+                method.name.equals("getName", ignoreCase = true) -> iface.name
+                method.name.equals("getIndex", ignoreCase = true) -> iface.index
+                method.name.equals("getMTU", ignoreCase = true) -> runCatching { iface.mtu }.getOrDefault(0)
+                method.name.equals("getAddresses", ignoreCase = true) ->
+                    addresses(method.returnType, iface.inetAddresses.toList())
+                // Whether the interface is up. libbox uses this to pick the
+                // underlying network; reporting false for a live interface would
+                // leave it with nothing to bind to.
+                method.name.equals("getFlags", ignoreCase = true) -> runCatching { iface.isUp }.getOrDefault(false)
+                else -> defaultValue(method)
+            }
+        })
+
+    private fun addresses(iteratorType: Class<*>, list: List<InetAddress>): Any {
+        var index = -1
+        return Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType), InvocationHandler { _, method, _ ->
+            when {
+                method.name.equals("hasNext", ignoreCase = true) -> index + 1 < list.size
+                method.name.equals("next", ignoreCase = true) ->
+                    addressProxy(method.returnType, list[++index])
+                else -> defaultValue(method)
+            }
+        })
+    }
+
+    private fun addressProxy(type: Class<*>, address: InetAddress): Any =
+        Proxy.newProxyInstance(type.classLoader, arrayOf(type), InvocationHandler { _, method, _ ->
+            when {
+                method.name.equals("getAddress", ignoreCase = true) -> address.hostAddress
+                method.name.equals("getPrefix", ignoreCase = true) ||
+                    method.name.equals("getPrefixLength", ignoreCase = true) ->
+                    if (address.address.size == 4) 32 else 128
+                else -> defaultValue(method)
+            }
+        })
 
     private fun openTun(options: Any?): Int {
         val builder = Builder().setSession("StrictProxy")
@@ -319,8 +415,12 @@ class LibboxVpnService : VpnService() {
             if (hasNext(v6Routes)) while (hasNext(v6Routes)) addRoute(builder, next(v6Routes)) else builder.addRoute("::", 0)
         }
         tunFd?.close()
-        tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
-        return tunFd!!.fd
+        tunFd = null
+        val descriptor = builder.establish() ?: error("VpnService.Builder.establish returned null")
+        // The descriptor is handed to libbox, which owns it from here on. Keeping
+        // the ParcelFileDescriptor as well and closing it in stopBox() would close
+        // an fd native code is still reading — a double close, and a crash.
+        return descriptor.detachFd()
     }
 
     private fun addPrefixes(builder: Builder, iterator: Any?) {
