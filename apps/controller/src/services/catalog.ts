@@ -21,9 +21,10 @@ export class BillingError extends Error {
 /**
  * Operator-set price overrides, in minor units, keyed by tier.
  *
- * The environment still defines what is purchasable and in which currency;
- * an override only changes the *amount*, so a deployment cannot end up half
- * priced in one currency and half in another.
+ * A stored override changes the *amount*; the currency comes from
+ * `loadBillingCurrency` (admin setting, environment as the default) and is
+ * passed in as one value, so a deployment cannot end up half priced in one
+ * currency and half in another.
  */
 export type PriceOverrides = Partial<Record<SubscriptionTier, number>>;
 
@@ -38,28 +39,35 @@ export type PriceOverrides = Partial<Record<SubscriptionTier, number>>;
 export function priceCatalog(
   cfg: ControllerConfig,
   overrides: PriceOverrides,
+  /** `loadBillingCurrency`: the admin setting, defaulting to the environment. */
+  currency: string = cfg.billingCurrency,
 ): Record<SubscriptionTier, TierPrice | null> {
   return {
     free: null,
     standard: {
       amountMinor: overrides.standard ?? cfg.billingStandardAmountMinor,
-      currency: cfg.billingCurrency,
+      currency,
       label: 'Standard',
     },
     pro: {
       amountMinor: overrides.pro ?? cfg.billingProAmountMinor,
-      currency: cfg.billingCurrency,
+      currency,
       label: 'Pro',
     },
   };
 }
 
 /** Resolves a tier name to its price, rejecting unknown/unbuyable tiers. */
-export function priceForTier(cfg: ControllerConfig, tier: string, overrides: PriceOverrides): TierPrice {
+export function priceForTier(
+  cfg: ControllerConfig,
+  tier: string,
+  overrides: PriceOverrides,
+  currency: string = cfg.billingCurrency,
+): TierPrice {
   if (!isKnownTier(tier)) {
     throw new BillingError('unknown_tier', `unknown tier "${tier}"`);
   }
-  const price = priceCatalog(cfg, overrides)[tier];
+  const price = priceCatalog(cfg, overrides, currency)[tier];
   if (!price) {
     throw new BillingError('tier_not_purchasable', `the "${tier}" tier is not purchasable`);
   }
@@ -70,8 +78,9 @@ export function priceForTier(cfg: ControllerConfig, tier: string, overrides: Pri
 export function purchasableTiers(
   cfg: ControllerConfig,
   overrides: PriceOverrides,
+  currency: string = cfg.billingCurrency,
 ): Array<{ tier: SubscriptionTier; price: TierPrice }> {
-  const catalog = priceCatalog(cfg, overrides);
+  const catalog = priceCatalog(cfg, overrides, currency);
   return (Object.keys(catalog) as SubscriptionTier[])
     .filter((tier) => catalog[tier] !== null)
     .map((tier) => ({ tier, price: catalog[tier]! }))

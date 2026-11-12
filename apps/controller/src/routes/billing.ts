@@ -12,7 +12,7 @@ import { subscriptions, nodeCredentials, billingCheckouts, users } from '../db/s
 import { asyncHandler, requireJwt } from '../middleware.js';
 import { isKnownTier, tierDefinition } from '../services/tiers.js';
 import { BillingError, purchasableTiers, validateBillingConfig, priceForTier } from '../services/catalog.js';
-import { loadPriceOverrides } from '../services/pricing.js';
+import { loadBillingCurrency, loadPriceOverrides } from '../services/pricing.js';
 import { isOpenPayConfigured, describeOpenPayError, createOpenPayClient } from '../services/openpay.js';
 import { createTierCheckout, latestCheckoutForUser } from '../services/billing.js';
 import { activateRecurringSubscription } from '../services/recurring.js';
@@ -33,11 +33,14 @@ export function buildBillingRouter(ctx: Ctx): Router {
     '/api/v1/billing/catalog',
     requireAuth,
     asyncHandler(async (_req: Request, res: Response) => {
-      const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
+      const [overrides, currency] = await Promise.all([
+        loadPriceOverrides(ctx.db, ctx.cfg),
+        loadBillingCurrency(ctx.db, ctx.cfg),
+      ]);
       res.json({
         gateway: isOpenPayConfigured(ctx.cfg) ? 'openpay' : 'unconfigured',
-        currency: ctx.cfg.billingCurrency,
-        tiers: purchasableTiers(ctx.cfg, overrides),
+        currency,
+        tiers: purchasableTiers(ctx.cfg, overrides, currency),
         quotaWindowDays: 30,
       });
     }),

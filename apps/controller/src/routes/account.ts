@@ -187,6 +187,17 @@ export function buildAccountRouter(ctx: Ctx): Router {
         return;
       }
 
+      // An administrator deleting their own account is the same lockout as
+      // demoting themselves: whoever does it loses the dashboard, and there is no
+      // other route back in. Another administrator has to do it.
+      if (claims.role === 'admin') {
+        res.status(409).json({
+          error: 'an administrator cannot delete their own account; ask another administrator',
+          code: 'ROOT_SELF_DELETE',
+        });
+        return;
+      }
+
       await clearPasswordResets(ctx.db, claims.sub);
       const deleted = await deleteAccount(ctx.db, claims.sub);
       if (!deleted) {

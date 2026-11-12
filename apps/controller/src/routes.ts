@@ -338,6 +338,44 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(400).json({ error: 'role must be user or admin', code: 'VALIDATION' });
       return;
     }
+
+    // Acting on your own account is the one case where the dashboard's Demote and
+    // Disable buttons destroy the operator's own way back in: the next request is
+    // refused and only a database edit recovers it. Refuse it here, so the rule
+    // holds even when the request does not come from the dashboard.
+    const isSelf = req.auth?.sub === userId;
+    if (isSelf && body.role === 'user') {
+      res.status(409).json({ error: 'you cannot demote your own account; ask another administrator', code: 'SELF_DEMOTION' });
+      return;
+    }
+    if (isSelf && body.disabled === true) {
+      res.status(409).json({ error: 'you cannot disable your own account', code: 'SELF_DISABLE' });
+      return;
+    }
+
+    // The same lockout from the other side: demoting or disabling the last
+    // administrator leaves a deployment with nobody able to administer it.
+    if (body.role === 'user' || body.disabled === true) {
+      const [target] = await ctx.db
+        .select({ role: users.role, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      if (!target) {
+        res.status(404).json({ error: 'user not found', code: 'NOT_FOUND' });
+        return;
+      }
+      if (target.role === 'admin' && target.disabledAt === null) {
+        const [remaining] = await ctx.db
+          .select({ count: sql<number>`count(*)` })
+          .from(users)
+          .where(and(eq(users.role, 'admin'), sql`${users.disabledAt} IS NULL`));
+        if (Number(remaining?.count ?? 0) <= 1) {
+          res.status(409).json({ error: 'this is the last active administrator; promote another account first', code: 'LAST_ADMIN' });
+          return;
+        }
+      }
+    }
     const [updated] = await ctx.db.update(users).set({
       ...(body.disabled === undefined ? {} : { disabledAt: body.disabled ? new Date() : null }),
       ...(body.role === undefined ? {} : { role: body.role }),

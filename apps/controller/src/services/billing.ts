@@ -18,7 +18,7 @@ import type { ControllerConfig } from '../env.js';
 import type { OpenPayApi } from '@fiatden/openpay';
 import { createOpenPayClient } from './openpay.js';
 import { priceForTier } from './catalog.js';
-import { loadPriceOverrides } from './pricing.js';
+import { loadBillingCurrency, loadPriceOverrides } from './pricing.js';
 
 /** How long an unpaid checkout stays claimable. */
 const CHECKOUT_TTL_MINUTES = 60;
@@ -48,10 +48,10 @@ export async function createTierCheckout(
    */
   client?: OpenPayApi,
 ): Promise<BillingCheckoutPublic> {
-  // Read the operator's price for this tier rather than the configured one: an
-  // override set from the dashboard is what the customer must be charged.
-  const overrides = await loadPriceOverrides(db, cfg);
-  const price = priceForTier(cfg, params.tier, overrides);
+  // Read the operator's price and currency rather than the configured ones: what
+  // the dashboard advertises is what the customer must be charged.
+  const [overrides, currency] = await Promise.all([loadPriceOverrides(db, cfg), loadBillingCurrency(db, cfg)]);
+  const price = priceForTier(cfg, params.tier, overrides, currency);
 
   // Our own idempotent handle. The provider assigns its own `reference` on the
   // session, so both are persisted and either can match an inbound event.

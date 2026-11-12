@@ -25,7 +25,15 @@ import {
   PLAN_TIER_METADATA_KEY,
   MERCHANT_SETTING_KEY,
 } from '../services/plans.js';
-import { loadPriceOverrides, validatePriceAmount, configuredAmount } from '../services/pricing.js';
+import {
+  CURRENCY_SETTING_KEY,
+  configuredAmount,
+  loadBillingCurrency,
+  loadPriceOverrides,
+  setBillingCurrency,
+  validateCurrency,
+  validatePriceAmount,
+} from '../services/pricing.js';
 import { getSetting } from '../services/settings.js';
 import { revokeAllUserCredentials } from '../services/nodes.js';
 import { revokeAllRefreshTokens } from '../services/auth.js';
@@ -64,18 +72,22 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
     '/api/v1/admin/billing/plans',
     ...adminOnly,
     asyncHandler(async (_req: Request, res: Response) => {
-      const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
-      const tiers = purchasableTiers(ctx.cfg, overrides).map(({ tier, price }) => {
+      const [overrides, currency] = await Promise.all([
+        loadPriceOverrides(ctx.db, ctx.cfg),
+        loadBillingCurrency(ctx.db, ctx.cfg),
+      ]);
+      const tiers = purchasableTiers(ctx.cfg, overrides, currency).map(({ tier, price }) => {
         // The configured default is shown alongside the effective price so an
         // operator can always see what they are overriding, and can tell an
         // overridden price apart from the deployment's own.
-        const configured = priceForTier(ctx.cfg, tier, {});
+        const configured = priceForTier(ctx.cfg, tier, {}, ctx.cfg.billingCurrency);
         return {
           tier,
           label: price.label,
           expectedAmountMinor: price.amountMinor,
           currency: price.currency,
           configuredAmountMinor: configured.amountMinor,
+          configuredCurrency: configured.currency,
           overridden: price.amountMinor !== configured.amountMinor,
         };
       });
@@ -100,11 +112,109 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
           // rather than looking like a live plan with a stale status.
           usable: isUsablePlan(p as unknown as Record<string, unknown>),
         }));
-        res.json({ merchantId, tiers, providerPlans, gateway: 'openpay' });
+        res.json({
+          merchantId,
+          currency,
+          defaultCurrency: ctx.cfg.billingCurrency,
+          currencyOverridden: currency !== ctx.cfg.billingCurrency,
+          tiers,
+          providerPlans,
+          gateway: 'openpay',
+        });
       } catch (err) {
         const described = describeOpenPayError(err);
         res.status(described.status).json({ error: described.message, code: described.code, providerCode: described.providerCode });
       }
+    }),
+  );
+
+  /**
+   * The payment settings an operator can change without a redeploy.
+   *
+   * Amounts are in minor units: 200 is 2.00 in a two-decimal currency, which is
+   * why they are reported as integers and never as a formatted string here — the
+   * dashboard formats them for display.
+   *
+   * The environment values are reported as the defaults, so it is always clear
+   * what this deployment would charge if nothing had been overridden.
+   */
+  router.get(
+    '/api/v1/admin/billing/settings',
+    ...adminOnly,
+    asyncHandler(async (_req: Request, res: Response) => {
+      const [overrides, currency] = await Promise.all([
+        loadPriceOverrides(ctx.db, ctx.cfg),
+        loadBillingCurrency(ctx.db, ctx.cfg),
+      ]);
+      res.json({
+        currency,
+        defaultCurrency: ctx.cfg.billingCurrency,
+        currencyOverridden: currency !== ctx.cfg.billingCurrency,
+        minorUnits: true,
+        interval: 'month',
+        tiers: purchasableTiers(ctx.cfg, overrides, currency).map(({ tier, price }) => {
+          const configured = priceForTier(ctx.cfg, tier, {}, ctx.cfg.billingCurrency);
+          return {
+            tier,
+            label: price.label,
+            amountMinor: price.amountMinor,
+            configuredAmountMinor: configured.amountMinor,
+            currency: price.currency,
+            overridden: price.amountMinor !== configured.amountMinor,
+          };
+        }),
+      });
+    }),
+  );
+
+  /**
+   * Changes the currency new charges are opened in.
+   *
+   * Only the currency: amounts have their own endpoint because a price change
+   * also has to reach the provider plan, and half-applying that here would
+   * advertise a price the subscription path does not bill.
+   *
+   * Plans already created at the provider keep the currency they were made with;
+   * a currency change therefore applies to new checkouts and newly created
+   * plans, and the plans screen reports the drift. Silently repricing live
+   * subscriptions is the provider's behaviour to define, not this route's.
+   */
+  router.put(
+    '/api/v1/admin/billing/settings',
+    ...adminOnly,
+    asyncHandler(async (req: Request, res: Response) => {
+      const body = req.body as { currency?: unknown };
+      if (body.currency === undefined) {
+        res.status(400).json({ error: 'currency is required', code: 'VALIDATION' });
+        return;
+      }
+
+      let currency: string;
+      try {
+        currency = validateCurrency(body.currency);
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message, code: 'VALIDATION' });
+        return;
+      }
+
+      const previous = await loadBillingCurrency(ctx.db, ctx.cfg);
+      await setBillingCurrency(ctx.db, ctx.cfg, currency, req.auth?.sub);
+      await recordAudit(ctx.db, {
+        ...auditActor(req),
+        action: 'billing.currency_changed',
+        targetType: 'billing',
+        targetId: CURRENCY_SETTING_KEY,
+        summary: `Billing currency ${previous} -> ${currency}`,
+        metadata: { previous, currency, defaultCurrency: ctx.cfg.billingCurrency },
+      });
+
+      res.json({
+        currency,
+        previousCurrency: previous,
+        defaultCurrency: ctx.cfg.billingCurrency,
+        note:
+          'New checkouts and newly created plans use this currency. Plans already at the provider keep theirs until they are removed and the plans are re-synced.',
+      });
     }),
   );
 
@@ -126,7 +236,12 @@ export function buildBillingOpsRouter(ctx: Ctx): Router {
       try {
         const merchantId = await resolveMerchantId(ctx.db, ctx.cfg, client);
         const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
-        const currency = priceForTier(ctx.cfg, 'standard', overrides).currency;
+        const currency = priceForTier(
+          ctx.cfg,
+          'standard',
+          overrides,
+          await loadBillingCurrency(ctx.db, ctx.cfg),
+        ).currency;
         // Fees are a convenience: a gateway that refuses them must not blank
         // out the readiness information that actually matters.
         const [readiness, health, configs, fees] = await Promise.all([

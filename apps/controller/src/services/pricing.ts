@@ -23,6 +23,15 @@ import { BillingError, priceCatalog, priceForTier, purchasableTierNames, type Pr
 /** Where an override for a tier is stored. */
 export const PRICE_SETTING_PREFIX = 'catalog.price.';
 
+/**
+ * Where the operator-set catalogue currency is stored.
+ *
+ * `BILLING_CURRENCY` stays the deployment default — an existing installation
+ * keeps charging what it charged before — but the value in use is this setting,
+ * so changing currency no longer needs a redeploy.
+ */
+export const CURRENCY_SETTING_KEY = 'catalog.currency';
+
 /** Settings key holding the override for one tier. */
 export function priceOverrideKey(tier: SubscriptionTier): string {
   return `${PRICE_SETTING_PREFIX}${tier}`;
@@ -104,11 +113,59 @@ export function configuredAmount(cfg: ControllerConfig, tier: SubscriptionTier):
   return priceForTier(cfg, tier, {}).amountMinor;
 }
 
+/**
+ * Validates an ISO 4217 code an operator wants to charge in.
+ *
+ * Three uppercase letters, matching what `validateBillingConfig` requires of the
+ * configured default: the provider rejects anything else, and accepting it here
+ * would fail at checkout instead of at the point of change.
+ */
+export function validateCurrency(code: unknown): string {
+  const value = typeof code === 'string' ? code.trim().toUpperCase() : '';
+  if (!/^[A-Z]{3}$/.test(value)) {
+    throw new BillingError('unknown_tier', `currency must be a 3-letter ISO 4217 code (e.g. USD), got "${String(code)}"`);
+  }
+  return value;
+}
+
+/**
+ * The currency prices are charged in: the admin setting, else the environment.
+ *
+ * A stored value that no longer validates is ignored rather than thrown, for the
+ * same reason as a corrupted amount override: a bad row must not stop checkout.
+ */
+export async function loadBillingCurrency(db: Db, cfg: ControllerConfig): Promise<string> {
+  const stored = await getSetting(db, cfg, CURRENCY_SETTING_KEY).catch(() => null);
+  if (!stored) return cfg.billingCurrency;
+  try {
+    return validateCurrency(stored);
+  } catch {
+    return cfg.billingCurrency;
+  }
+}
+
+/** Records the catalogue currency. Returns the validated value that was stored. */
+export async function setBillingCurrency(
+  db: Db,
+  cfg: ControllerConfig,
+  code: unknown,
+  updatedBy?: string,
+): Promise<string> {
+  const currency = validateCurrency(code);
+  await setSetting(db, cfg, { key: CURRENCY_SETTING_KEY, value: currency }, updatedBy);
+  return currency;
+}
+
 /** The effective amount for a tier: the override if set, otherwise the env. */
-export function effectivePrice(cfg: ControllerConfig, overrides: PriceOverrides, tier: SubscriptionTier): number {
+export function effectivePrice(
+  cfg: ControllerConfig,
+  overrides: PriceOverrides,
+  tier: SubscriptionTier,
+  currency: string = cfg.billingCurrency,
+): number {
   const fromOverride = overrides[tier];
   if (fromOverride !== undefined) return fromOverride;
-  const price = priceCatalog(cfg, overrides)[tier];
+  const price = priceCatalog(cfg, overrides, currency)[tier];
   if (!price) throw new BillingError('tier_not_purchasable', `the "${tier}" tier is not purchasable`);
   return price.amountMinor;
 }

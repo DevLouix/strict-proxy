@@ -386,6 +386,15 @@ cents. The defaults are `200` and `1000` with `BILLING_CURRENCY=USD`, which is
 **$2.00** and **$10.00 per month**. They are the deployment defaults; section 8
 changes them without a redeploy.
 
+`BILLING_CURRENCY` works the same way: it is the default, not the only source.
+**Admin → Plans** changes the currency (and each price) at runtime —
+`GET`/`PUT /api/v1/admin/billing/settings` for the currency, and
+`PUT /api/v1/admin/billing/plans/price` for an amount. A currency change applies
+to new checkouts and newly created provider plans; plans that already exist keep
+the currency they were created with. The last active administrator cannot be
+demoted, disabled or deleted from the dashboard, and cannot do it to itself.
+
+
 The first month is paid through hosted checkout. Once its webhook has granted
 the plan, the client activates auto-renew from the saved card; the provider plan
 has a 30-day trial equal to the paid month, so activation does not charge again.

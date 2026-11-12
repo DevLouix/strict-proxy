@@ -116,6 +116,55 @@ export async function plansView(api) {
     );
   }
 
+  /**
+   * The currency new charges are opened in.
+   *
+   * Amounts are minor units, so the panel says what 200 means instead of leaving
+   * an operator to guess, and it states the limit of the change: plans already at
+   * the provider keep the currency they were created with.
+   */
+  function currencyPanel() {
+    if (!state) return null;
+
+    const input = h('input', {
+      class: 'mono',
+      maxlength: '3',
+      size: '4',
+      value: state.currency ?? '',
+      title: 'ISO 4217 code, e.g. USD',
+    });
+    const save = h('button', { class: 'btn sm primary' }, 'Save currency');
+    save.addEventListener('click', async () => {
+      const code = String(input.value || '').trim().toUpperCase();
+      if (!/^[A-Z]{3}$/.test(code)) {
+        toast('Enter a 3-letter ISO currency code, e.g. USD', 'err');
+        return;
+      }
+      save.disabled = true;
+      try {
+        const result = await api.put('/api/v1/admin/billing/settings', { currency: code });
+        toast(result.note || `Currency changed to ${result.currency}`);
+        await load();
+      } catch (err) {
+        toast(err.message || 'Currency change failed', 'err');
+        save.disabled = false;
+      }
+    });
+
+    return h('div', { class: 'panel' },
+      h('header', {},
+        h('h3', {}, 'Currency'),
+        h('span', { class: 'muted small' },
+          state.currencyOverridden
+            ? `overriding the deployment default ${state.defaultCurrency}`
+            : `deployment default ${state.defaultCurrency}`),
+      ),
+      h('div', { class: 'row' }, input, save),
+      h('p', { class: 'muted small' },
+        'Prices are in minor units: 200 is 2.00 in a two-decimal currency. New checkouts and newly created plans use this; plans already at the provider keep the currency they were made with.'),
+    );
+  }
+
   function render() {
     const providerPlans = state?.providerPlans ?? [];
     // A tier's tag can sit on more than one plan when a delete archived one and a
@@ -156,6 +205,7 @@ export async function plansView(api) {
         ),
         syncBtn,
       ),
+      currencyPanel(),
       providerPanel(),
       h('div', { class: 'panel' },
         h('header', {},
