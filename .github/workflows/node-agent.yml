@@ -256,6 +256,75 @@ jobs:
           test "$status" -eq 1
           grep -q 'NODE_ENROLLMENT_TOKEN is required on first node startup' <<<"$output"
 
+      # The agent has no listening server: it stays alive only because its
+      # timers are referenced. When they were unref'd the process exited right
+      # after "agent started", the restart policy turned that into a ~60s crash
+      # loop, and usage collection could never reach a running engine.
+      - name: The agent keeps running after startup
+        run: |
+          set -eu
+          net="node-smoke-${RANDOM}"
+          docker network create "$net" >/dev/null
+          cleanup() {
+            docker rm -f node-smoke-stub node-smoke-agent >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          cat > "$RUNNER_TEMP/stub-controller.mjs" <<'STUB'
+          import { createServer } from 'node:http';
+          const json = (res, body) => {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(body));
+          };
+          createServer((req, res) => {
+            const url = req.url ?? '';
+            const now = new Date().toISOString();
+            if (url.endsWith('/healthz')) return json(res, { ok: true });
+            if (url.endsWith('/api/v1/nodes/enroll')) return json(res, { nodeId: 'smoke-node', hmacSecret: 'smoke-secret', region: 'ci' });
+            if (url.endsWith('/internal/v1/node/bootstrap')) {
+              return json(res, {
+                nodeId: 'smoke-node', hostname: 'ci-node', region: 'ci', publicIp: '203.0.113.10', tunnelPort: 2443,
+                reality: { privateKey: 'smoke-key', shortIds: ['0123456789abcdef'], serverName: 'www.microsoft.com' },
+              });
+            }
+            if (url.endsWith('/internal/v1/node/sync')) return json(res, { credentials: [], controllerTime: now });
+            if (url.endsWith('/internal/v1/node/heartbeat')) return json(res, { ok: true, controllerTime: now });
+            if (url.endsWith('/internal/v1/node/usage')) return json(res, { ok: true, applied: 0 });
+            res.writeHead(404);
+            res.end('{}');
+          }).listen(8099);
+          STUB
+
+          docker run -d --name node-smoke-stub --network "$net" --network-alias controller \
+            -v "$RUNNER_TEMP/stub-controller.mjs:/stub.mjs:ro" --entrypoint node "$IMAGE_REF" /stub.mjs >/dev/null
+
+          docker run -d --name node-smoke-agent --network "$net" \
+            -e CONTROLLER_URL=http://controller:8099 \
+            -e NODE_ENROLLMENT_TOKEN=smoke \
+            -e NODE_HOSTNAME=ci-node \
+            -e NODE_PUBLIC_IP=203.0.113.10 \
+            -e NODE_TUNNEL_PORT=2443 \
+            -e HEARTBEAT_INTERVAL_SECONDS=2 \
+            -e SYNC_INTERVAL_SECONDS=5 \
+            -e USAGE_INTERVAL_SECONDS=5 \
+            "$IMAGE_REF" >/dev/null
+
+          for _ in $(seq 1 20); do
+            docker logs node-smoke-agent 2>&1 | grep -q 'agent started' && break
+            sleep 1
+          done
+          sleep 10
+          docker logs node-smoke-agent
+          docker inspect -f '{{.State.Running}}' node-smoke-agent | grep -qx true \
+            || { echo 'error: the agent exited instead of serving its loop' >&2; exit 1; }
+          docker exec node-smoke-agent node -e "
+            const fs = require('node:fs');
+            const age = Date.now() - fs.statSync('/tmp/agent-healthy').mtimeMs;
+            if (age > 15000) { console.error('health file is stale by', age, 'ms'); process.exit(1); }
+            console.log('health file age', age, 'ms');
+          "
+
       - name: The agent sources and proto are inside the image
         run: |
           docker run --rm --entrypoint node "$IMAGE_REF" -e "

@@ -83,11 +83,17 @@ services:
     volumes:
       - nodeidentity:/var/lib/strict-proxy
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      # `kill -0 1` only proved tini was alive, so a dead agent loop still looked
+      # healthy. The agent touches this file on every heartbeat instead.
+      test:
+        - CMD
+        - node
+        - -e
+        - "const fs=require('fs');try{process.exit(Date.now()-fs.statSync('/tmp/agent-healthy').mtimeMs<180000?0:1)}catch{process.exit(1)}"
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 60s
 
 volumes:
   nodeidentity:

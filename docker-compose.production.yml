@@ -282,7 +282,13 @@ services:
     volumes:
       - nodeidentity:/var/lib/strict-proxy
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      # The agent touches /tmp/agent-healthy on every heartbeat, so a stopped
+      # loop is reported unhealthy instead of looking alive through tini.
+      test:
+        - CMD
+        - node
+        - -e
+        - "const fs=require('fs');try{process.exit(Date.now()-fs.statSync('/tmp/agent-healthy').mtimeMs<180000?0:1)}catch{process.exit(1)}"
       interval: ${NODE_AGENT_HEALTH_INTERVAL:-30s}
       timeout: ${NODE_AGENT_HEALTH_TIMEOUT:-5s}
       retries: ${NODE_AGENT_HEALTH_RETRIES:-3}

@@ -27,6 +27,9 @@ import {
 
 const execFileP = promisify(execFile);
 
+/** Touched on every tick; the container healthcheck compares its mtime. */
+const HEALTH_PATH = process.env.AGENT_HEALTH_PATH?.trim() || '/tmp/agent-healthy';
+
 function log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ...rest: unknown[]): void {
   if (level === 'debug' && process.env.LOG_LEVEL !== 'debug') return;
   console.log(`[${new Date().toISOString()}][${level}] ${msg}`, ...rest);
@@ -78,6 +81,8 @@ class Agent {
   private realityServerName = '';
   private credentials: Credential[] = [];
   private running = true;
+  /** True once the timers are installed, i.e. an exit is not a clean shutdown. */
+  private started = false;
   /** Most recent detection of this node's own public address. */
   private detectedPublicIp: string | null = null;
   private publicIpCheckedAt = 0;
@@ -176,7 +181,6 @@ class Agent {
     this.credentials = state.credentials;
     const fp = fingerprint(this.credentials);
     const applied = await loadAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`);
-    if (applied === fp) return;
 
     const rendered = JSON.stringify(renderSingBoxConfig({
       cfg: this.cfg,
@@ -186,37 +190,107 @@ class Agent {
       users: liveCredentials(this.credentials),
     }), null, 2);
 
-    if (await needsApply(this.cfg.singBoxConfigPath, rendered)) {
-      await writeConfigAtomic(this.cfg.singBoxConfigPath, rendered);
-      if (!(await validateSingBoxConfig(this.cfg.singBoxBinaryPath, this.cfg.singBoxConfigPath))) return;
-      await restartSingBox(this.cfg, this.managedSingBox);
-      log('info', `applied ${liveCredentials(this.credentials).length} credential(s), sing-box restarted`);
+    const configChanged = await needsApply(this.cfg.singBoxConfigPath, rendered);
+    if (applied !== fp || configChanged) {
+      if (configChanged) {
+        await writeConfigAtomic(this.cfg.singBoxConfigPath, rendered);
+        if (!(await validateSingBoxConfig(this.cfg.singBoxBinaryPath, this.cfg.singBoxConfigPath))) return;
+        await restartSingBox(this.cfg, this.managedSingBox);
+        log('info', `applied ${liveCredentials(this.credentials).length} credential(s), sing-box restarted`);
+      }
+      await saveAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`, fp);
     }
-    await saveAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`, fp);
+    await this.ensureEngine();
+  }
+
+  /**
+   * Starts the managed engine when this process has no live child. An applied
+   * fingerprint says the config on disk is current; it says nothing about the
+   * engine, which does not survive a container recreate.
+   */
+  private async ensureEngine(): Promise<void> {
+    if (this.cfg.singBoxRestartMode !== 'managed') return;
+    const child = this.managedSingBox.current;
+    if (child && child.exitCode === null && !child.killed) return;
+    log('info', 'managed sing-box has no live process; starting it');
+    await restartSingBox(this.cfg, this.managedSingBox);
+  }
+
+  /** Records that the loop is turning, for the container healthcheck. */
+  private async markHealthy(): Promise<void> {
+    try {
+      await fs.writeFile(HEALTH_PATH, new Date().toISOString(), 'utf8');
+    } catch (err) {
+      log('debug', 'could not write the health file:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /** One line describing what the agent can see, logged at startup. */
+  async logSelfCheck(): Promise<void> {
+    const child = this.managedSingBox.current;
+    const engine =
+      this.cfg.singBoxRestartMode === 'managed'
+        ? child && child.exitCode === null
+          ? `managed, pid ${child.pid ?? 'unknown'}`
+          : 'managed, no live process'
+        : 'systemd';
+    log(
+      'info',
+      `self-check: sing-box ${await this.singBoxVersion()} (${engine}); stats api ${this.cfg.statsApiListen}; ` +
+        `${liveCredentials(this.credentials).length} live user(s); config ${this.cfg.singBoxConfigPath}`,
+    );
   }
 
   async reportUsageOnce(): Promise<void> {
     try {
       await collectUserUsage(this.cfg, this.client, this.credentials);
     } catch (err) {
-      log('warn', 'usage collection failed; verify sing-box was built with V2Ray API support:', err instanceof Error ? err.message : err);
+      log(
+        'warn',
+        `usage collection failed (stats api ${this.cfg.statsApiListen}): ${err instanceof Error ? err.message : err}. ` +
+          'The engine has to be running and built with V2Ray API support.',
+      );
     }
   }
 
   start(): void {
-    const hb = setInterval(() => void this.heartbeatOnce().catch((err) => log('warn', 'heartbeat failed:', err)), this.cfg.heartbeatIntervalSeconds * 1000);
-    const sync = setInterval(() => void this.syncOnce().catch((err) => log('warn', 'sync failed:', err)), this.cfg.syncIntervalSeconds * 1000);
+    void this.markHealthy();
+    // These timers must stay referenced: the agent has no server, so unref'd
+    // timers let Node exit as soon as startup finishes. The container then
+    // restarts (with Docker's backoff), the engine never stays up, and every
+    // cycle fails usage collection against a closed stats port.
+    const hb = setInterval(() => {
+      void this.heartbeatOnce()
+        .catch((err) => log('warn', 'heartbeat failed:', err instanceof Error ? err.message : err))
+        .finally(() => void this.markHealthy());
+    }, this.cfg.heartbeatIntervalSeconds * 1000);
+    const sync = setInterval(
+      () => void this.syncOnce().catch((err) => log('warn', 'sync failed:', err instanceof Error ? err.message : err)),
+      this.cfg.syncIntervalSeconds * 1000,
+    );
+    // Supervised separately from sync so an unreachable controller cannot stop
+    // the agent from restarting a dead engine.
+    const engine = setInterval(
+      () => void this.ensureEngine().catch((err) => log('warn', 'engine start failed:', err instanceof Error ? err.message : err)),
+      this.cfg.syncIntervalSeconds * 1000,
+    );
     const usage = setInterval(() => void this.reportUsageOnce(), this.cfg.usageIntervalSeconds * 1000);
-    hb.unref(); sync.unref(); usage.unref();
     const stop = () => {
       if (!this.running) return;
       this.running = false;
-      clearInterval(hb); clearInterval(sync); clearInterval(usage);
+      this.started = false;
+      clearInterval(hb); clearInterval(sync); clearInterval(engine); clearInterval(usage);
       this.managedSingBox.current?.kill('SIGTERM');
       process.exit(0);
     };
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
+    process.on('exit', (code) => {
+      if (this.started) {
+        log('warn', `agent exiting (code ${code}) while the loop was running; it must stay alive to heartbeats, sync and report usage`);
+      }
+    });
+    this.started = true;
     log('info', 'agent started');
   }
 }
@@ -238,6 +312,7 @@ async function main(): Promise<void> {
   await agent.syncOnce();
   await agent.heartbeatOnce();
   await agent.reportUsageOnce();
+  await agent.logSelfCheck();
   agent.start();
 }
 
