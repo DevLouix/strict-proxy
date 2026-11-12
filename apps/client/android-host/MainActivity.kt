@@ -1,5 +1,6 @@
 package __PACKAGE__
 
+import android.app.ActivityManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -46,6 +47,7 @@ class MainActivity : FlutterActivity() {
                             "osVersion" to Build.VERSION.RELEASE,
                         ),
                     )
+                    "lastCrash" -> result.success(lastCrash())
                     else -> result.notImplemented()
                 }
             }
@@ -65,6 +67,39 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /**
+     * Why the previous process died, when it was a crash.
+     *
+     * A native SIGSEGV never reaches Dart's error handlers: the process is gone
+     * before any Dart code can run. Android records the exit reason against the
+     * package, so the next launch can report it through the same crash endpoint
+     * the dashboard already lists. Null means either the platform is too old
+     * (below Android 11) or the last exit was a normal one.
+     */
+    private fun lastCrash(): Map<String, Any?>? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            val manager = getSystemService(ActivityManager::class.java) ?: return null
+            val info = manager.getHistoricalProcessExitReasons(packageName, 0, 1).firstOrNull() ?: return null
+            val reason = when (info.reason) {
+                ActivityManager.ApplicationExitInfo.REASON_CRASH_NATIVE -> "crash_native"
+                ActivityManager.ApplicationExitInfo.REASON_CRASH -> "crash"
+                ActivityManager.ApplicationExitInfo.REASON_ANR -> "anr"
+                ActivityManager.ApplicationExitInfo.REASON_LOW_MEMORY -> "low_memory"
+                // USER_REQUESTED, EXIT_SELF and friends are ordinary shutdowns.
+                else -> return null
+            }
+            mapOf(
+                "reason" to reason,
+                "timestamp" to info.timestamp,
+                "description" to info.description,
+            )
+        } catch (_: Throwable) {
+            // Reading exit history is diagnostics, never a reason to fail a launch.
+            null
+        }
     }
 
     /**

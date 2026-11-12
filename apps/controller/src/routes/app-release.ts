@@ -46,6 +46,39 @@ export function buildAppReleaseRouter({ cfg, db }: { cfg: AppReleaseConfig; db?:
       .catch(next);
   });
 
+  /**
+   * Feed health for operators and monitors.
+   *
+   * `/healthz` answers "is the process up"; this answers "can installed apps
+   * actually update", which fails separately — a deployment can be healthy while
+   * serving no build at all. 503 keeps the "is anything offered" answer readable
+   * by the same monitors that poll readiness.
+   */
+  router.get('/api/v1/app/android/status', (_req, res, next) => {
+    void published()
+      .then((release) => {
+        res.setHeader('cache-control', 'no-cache');
+        if (!release) {
+          res.status(503).json({
+            ok: false,
+            published: false,
+            code: 'CLIENT_RELEASE_UNAVAILABLE',
+          });
+          return;
+        }
+        res.json({
+          ok: true,
+          published: true,
+          version: release.version,
+          buildNumber: release.buildNumber,
+          publishedAt: release.publishedAt,
+          source: release.source,
+          abis: release.artifacts.map((artifact) => artifact.abi),
+        });
+      })
+      .catch(next);
+  });
+
   router.get('/api/v1/app/android/download', (req, res, next) => {
     void (async () => {
       const release = await published();

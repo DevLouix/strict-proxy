@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
 import 'app_version.dart';
@@ -28,6 +29,7 @@ class CrashReporter {
 
   static final Set<String> _reported = <String>{};
   static bool _installed = false;
+  static const _deviceChannel = MethodChannel('strict_proxy/device');
 
   /// Routes [FlutterError.onError] through the reporter.
   ///
@@ -52,12 +54,43 @@ class CrashReporter {
     };
   }
 
+  /// Reports the previous process's crash, when Android recorded one.
+  ///
+  /// A native crash inside the VPN engine kills the process before Dart can
+  /// observe it, which is exactly the failure that used to be invisible. The
+  /// host reports the recorded exit on the next launch and the same endpoint
+  /// stores it, so it lands in the dashboard beside Flutter errors.
+  static Future<void> reportPreviousExit() async {
+    try {
+      final info = await _deviceChannel.invokeMapMethod<String, Object?>('lastCrash');
+      if (info == null) return;
+      final timestamp = (info['timestamp'] as num?)?.toInt() ?? 0;
+      if (timestamp <= 0) return;
+      final reason = info['reason'] as String? ?? 'crash';
+      final description = (info['description'] as String?)?.trim() ?? '';
+      await report(
+        'Process exited: $reason${description.isEmpty ? '' : ' — $description'}',
+        null,
+        fatal: true,
+        reportId: 'exit-$timestamp',
+        context: {
+          'handler': 'ApplicationExitInfo',
+          'reason': reason,
+          'exitTimestamp': timestamp,
+        },
+      );
+    } catch (_) {
+      // No host (desktop, tests) or no exit history: nothing to report.
+    }
+  }
+
   /// Best-effort delivery. Never throws.
   static Future<void> report(
     String message,
     StackTrace? stack, {
     bool fatal = false,
     Map<String, Object?>? context,
+    String? reportId,
   }) async {
     try {
       final key = '$message|${stack?.toString().split('\n').take(3).join('|') ?? ''}';
@@ -65,7 +98,9 @@ class CrashReporter {
 
       final device = await DeviceInfo.load();
       final payload = <String, Object?>{
-        'reportId': _reportId(),
+        // A caller that already has a stable id (a recorded process exit) passes
+        // it, so reopening the app does not file the same crash twice.
+        'reportId': reportId ?? _reportId(),
         'platform': Platform.operatingSystem,
         'appVersion': AppVersion.name,
         'buildNumber': AppVersion.buildNumber,

@@ -206,6 +206,14 @@ export async function clientAppsView(api) {
               onClick: () => copyText(`${location.origin}/api/v1/app/android`),
             }, 'Copy update feed URL'),
           ),
+          h('div', { class: 'row' }, 
+            h('code', {}, '/api/v1/app/android/status'),
+            h('button', {
+              class: 'btn sm',
+              onClick: () => copyText(`${location.origin}/api/v1/app/android/status`),
+            }, 'Copy feed status URL'),
+            h('span', { class: 'muted small' }, 'answers 503 when no build is published'),
+          ),
         ),
         h('div', { class: 'table-wrap' },
           releases.length === 0

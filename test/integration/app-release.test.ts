@@ -95,6 +95,43 @@ test('a published build reports its version, size and download path', async () =
   }
 });
 
+test('feed status reports the published build, or 503 when none is published', async () => {
+  const empty = await start(config());
+  try {
+    const res = await fetch(`${empty.base}/api/v1/app/android/status`);
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { ok: boolean; published: boolean; code: string };
+    assert.equal(body.ok, false);
+    assert.equal(body.published, false);
+    assert.equal(body.code, 'CLIENT_RELEASE_UNAVAILABLE');
+  } finally {
+    await empty.close();
+  }
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'client-apk-status-'));
+  const apk = path.join(dir, 'client.apk');
+  await writeFile(apk, APK_BYTES);
+  const s = await start(
+    config({
+      clientAndroidVersion: '0.3.0',
+      clientAndroidBuildNumber: 12,
+      clientAndroidApkPath: apk,
+    }),
+  );
+  try {
+    const res = await fetch(`${s.base}/api/v1/app/android/status`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.ok, true);
+    assert.equal(body.published, true);
+    assert.equal(body.version, '0.3.0');
+    assert.equal(body.buildNumber, 12);
+    assert.deepEqual(body.abis, ['universal']);
+  } finally {
+    await s.close();
+  }
+});
+
 test('a build whose APK is gone is reported as unavailable, not served', async () => {
   const s = await start(
     config({

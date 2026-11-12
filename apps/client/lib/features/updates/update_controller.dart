@@ -171,7 +171,10 @@ class UpdateController extends StateNotifier<UpdateState> {
           .get(Uri.parse('${AppConfig.controllerUrl}/api/v1/app/android'))
           .timeout(AppConfig.requestTimeout);
       if (res.statusCode == 404) {
-        state = const UpdateState();
+        // Nothing published on the controller. A released build still exists, so
+        // fall back to the GitHub release rather than leaving the device on the
+        // build it shipped with.
+        state = await _fromGitHub();
         return;
       }
       if (res.statusCode >= 400) {
@@ -255,6 +258,73 @@ class UpdateController extends StateNotifier<UpdateState> {
       state = state.copyWith(progress: null, error: '$error');
       return 'Update failed: $error';
     }
+  }
+
+  /// The newest GitHub release, used when the controller feed has no build.
+  ///
+  /// Release assets are named `strict-proxy-client-android-<sha>-<abi>.apk` and
+  /// the tag carries the build number (`client-43`): enough to decide "newer"
+  /// and which APK this CPU can run. The controller remains authoritative —
+  /// this only runs when its feed answers 404.
+  Future<UpdateState> _fromGitHub() async {
+    final repo = AppConfig.updateFallbackRepo.trim();
+    if (repo.isEmpty) return const UpdateState();
+    try {
+      final res = await http
+          .get(
+            Uri.parse('https://api.github.com/repos/$repo/releases?per_page=10'),
+            headers: const {'accept': 'application/vnd.github+json'},
+          )
+          .timeout(AppConfig.requestTimeout);
+      if (res.statusCode >= 400) return const UpdateState();
+
+      final releases = jsonDecode(utf8.decode(res.bodyBytes)) as List<dynamic>;
+      final device = await DeviceInfo.load();
+      for (final raw in releases.whereType<Map<String, dynamic>>()) {
+        if (raw['draft'] == true) continue;
+        final tag = raw['tag_name'] as String? ?? '';
+        final build = int.tryParse(RegExp(r'(\d+)$').firstMatch(tag)?.group(1) ?? '') ?? 0;
+        if (build <= 0) continue;
+
+        final artifacts = (raw['assets'] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .map(_githubArtifact)
+            .whereType<AppArtifact>()
+            .toList(growable: false);
+        if (artifacts.isEmpty) continue;
+
+        final name = (raw['name'] as String? ?? '').trim();
+        final release = AppRelease(
+          version: name.isEmpty ? tag : name,
+          buildNumber: build,
+          sizeBytes: artifacts.fold<int>(0, (max, artifact) => artifact.sizeBytes > max ? artifact.sizeBytes : max),
+          notes: (raw['body'] as String? ?? '').trim(),
+          downloadPath: artifacts.length == 1 ? artifacts.first.url : '',
+          artifacts: artifacts,
+        );
+        return UpdateState(
+          release: release,
+          artifact: release.artifactFor(device?.abis ?? const <String>[]),
+        );
+      }
+    } catch (_) {
+      // An unreachable GitHub is the same as "no update known".
+    }
+    return const UpdateState();
+  }
+
+  /// One APK from a GitHub release, or null for assets that are not one.
+  AppArtifact? _githubArtifact(Map<String, dynamic> asset) {
+    final name = asset['name'] as String? ?? '';
+    final url = asset['browser_download_url'] as String? ?? '';
+    if (!name.endsWith('.apk') || url.isEmpty) return null;
+    final abi = RegExp(r'-(arm64-v8a|armeabi-v7a|x86_64|universal)\.apk$').firstMatch(name)?.group(1);
+    if (abi == null) return null;
+    return AppArtifact(
+      abi: abi,
+      sizeBytes: (asset['size'] as num?)?.toInt() ?? 0,
+      url: url,
+    );
   }
 
   /// The app's cache directory, so the APK sits where the installer can read it.

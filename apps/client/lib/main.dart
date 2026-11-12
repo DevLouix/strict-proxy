@@ -17,6 +17,9 @@ void main() {
     () {
       WidgetsFlutterBinding.ensureInitialized();
       CrashReporter.install();
+      // A native crash kills the process before any handler here runs; this
+      // reports the exit Android recorded for the previous launch.
+      unawaited(CrashReporter.reportPreviousExit());
       PlatformDispatcher.instance.onError = (error, stack) {
         unawaited(CrashReporter.report(error.toString(), stack, fatal: true));
         // Handled: the process keeps running where it can.

@@ -37,6 +37,17 @@ class AppConfig {
     defaultValue: 'fdfe:dcba:9876::1/126',
   );
 
+  /// GitHub repository used as the fallback update source.
+  ///
+  /// The controller feed is the normal path. This exists because a build can be
+  /// released (the APK is attached to a GitHub release) while nothing is
+  /// published to the feed — the publish step needs admin credentials the CI
+  /// token cannot create. Empty disables the fallback entirely.
+  static const updateFallbackRepo = String.fromEnvironment(
+    'STRICT_UPDATE_FALLBACK_REPO',
+    defaultValue: 'DevLouix/strict-proxy',
+  );
+
   static bool get isProduction => environment == 'production';
 
   static String get controllerUrl {
