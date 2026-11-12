@@ -21,8 +21,25 @@ interface StatsClient {
   close(): void;
 }
 
+interface StatsServiceConstructor {
+  new (address: string, credentials: grpc.ChannelCredentials): StatsClient;
+  service: Record<string, grpc.MethodDefinition<unknown, unknown>>;
+}
+
 /** gRPC status for "the endpoint is not listening yet". */
 const STATUS_UNAVAILABLE = 14;
+/** gRPC status for "this server does not expose that service or method". */
+const STATUS_UNIMPLEMENTED = 12;
+
+/**
+ * sing-box 1.14 registers the stats service under the v2ray-compatible name,
+ * even though the proto package is `experimental.v2rayapi` (see
+ * experimental/v2rayapi/stats.go, which rewrites the service descriptor).
+ * Older builds used the proto package name, so try the current name first and
+ * fall back rather than shipping a client that can only talk to one of them.
+ */
+const STATS_SERVICE_NAMES = ['v2ray.core.app.stats.command.StatsService', 'experimental.v2rayapi.StatsService'];
+const READINESS_PATTERN = 'strict-proxy-ready';
 
 function grpcStatus(err: unknown): number | null {
   const code = (err as { code?: unknown } | null)?.code;
@@ -61,6 +78,42 @@ function queryStats(stats: StatsClient, patterns: string[], reset: boolean): Pro
 }
 
 /**
+ * Rebuilds the generated client under a different gRPC service name. The
+ * method path is kept verbatim (grpc-js camel-cases the method key, so the
+ * path's last segment - `QueryStats` - is the only reliable source).
+ */
+function withServiceName(Base: StatsServiceConstructor, serviceName: string): StatsServiceConstructor {
+  const definition: Record<string, grpc.MethodDefinition<unknown, unknown>> = {};
+  for (const [method, def] of Object.entries(Base.service)) {
+    definition[method] = { ...def, path: `/${serviceName}/${def.path.split('/').pop() ?? method}` };
+  }
+  return grpc.makeGenericClientConstructor(definition, 'StatsService') as unknown as StatsServiceConstructor;
+}
+
+/**
+ * Opens a stats client against whichever service name the running engine
+ * registered. The readiness probe changes no counters, so trying both names is
+ * free; any other error (port refused, auth, config) is reported immediately.
+ */
+async function connectStatsApi(cfg: AgentConfig, Base: StatsServiceConstructor): Promise<StatsClient> {
+  let unimplemented: unknown;
+  for (const serviceName of STATS_SERVICE_NAMES) {
+    const client = new (withServiceName(Base, serviceName))(cfg.statsApiListen, grpc.credentials.createInsecure());
+    try {
+      await withStatsApiReady(() => queryStats(client, [READINESS_PATTERN], false));
+      return client;
+    } catch (err) {
+      client.close();
+      if (grpcStatus(err) !== STATUS_UNIMPLEMENTED) throw err;
+      unimplemented = err;
+    }
+  }
+  throw unimplemented instanceof Error
+    ? unimplemented
+    : new Error(`no V2Ray stats service on ${cfg.statsApiListen}`);
+}
+
+/**
  * Reads per-user counters from sing-box V2Ray API. The API must be bound to
  * loopback and exposed only through the node agent's local process boundary.
  */
@@ -69,14 +122,9 @@ export async function collectUserUsage(cfg: AgentConfig, client: ControllerClien
   const protoPath = path.resolve(cfg.statsApiProtoPath);
   await fs.access(protoPath);
   const packageDefinition = await protoLoader.load(protoPath, { keepCase: true, longs: Number, enums: String, defaults: true, oneofs: true });
-  const loaded = grpc.loadPackageDefinition(packageDefinition) as unknown as { experimental: { v2rayapi: { StatsService: { new (address: string, credentials: grpc.ChannelCredentials): StatsClient } } } };
-  const StatsService = loaded.experimental.v2rayapi.StatsService;
-  const stats = new StatsService(cfg.statsApiListen, grpc.credentials.createInsecure());
+  const loaded = grpc.loadPackageDefinition(packageDefinition) as unknown as { experimental: { v2rayapi: { StatsService: StatsServiceConstructor } } };
+  const stats = await connectStatsApi(cfg, loaded.experimental.v2rayapi.StatsService);
   try {
-    // Probe first: a readiness query changes no counters, so retrying it costs
-    // nothing, while retrying the real batch after a partial reset would.
-    await withStatsApiReady(() => queryStats(stats, ['strict-proxy-ready'], false));
-
     const usage = await Promise.all(credentials.filter((credential) => !credential.revoked).map(async (credential) => {
       const prefix = `user>>>${credential.userEmail}>>>traffic>>>`;
       const result = await withStatsApiReady(() => queryStats(stats, [`${prefix}uplink`, `${prefix}downlink`], true));

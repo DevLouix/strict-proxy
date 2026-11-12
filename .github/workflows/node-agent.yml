@@ -285,16 +285,45 @@ jobs:
             if (url.endsWith('/internal/v1/node/bootstrap')) {
               return json(res, {
                 nodeId: 'smoke-node', hostname: 'ci-node', region: 'ci', publicIp: '203.0.113.10', tunnelPort: 2443,
-                reality: { privateKey: 'smoke-key', shortIds: ['0123456789abcdef'], serverName: 'www.microsoft.com' },
+                reality: { privateKey: '__REALITY_PRIVATE_KEY__', shortIds: ['0123456789abcdef'], serverName: 'www.microsoft.com' },
               });
             }
-            if (url.endsWith('/internal/v1/node/sync')) return json(res, { credentials: [], controllerTime: now });
+            if (url.endsWith('/internal/v1/node/sync')) {
+              return json(res, {
+                credentials: [{
+                  uuid: '8f0e2a4c-1111-4222-8333-944455556666',
+                  shortId: '0123456789abcdef',
+                  userEmail: 'ci@example.com',
+                  expiresAt: null,
+                  revoked: false,
+                }],
+                controllerTime: now,
+              });
+            }
             if (url.endsWith('/internal/v1/node/heartbeat')) return json(res, { ok: true, controllerTime: now });
-            if (url.endsWith('/internal/v1/node/usage')) return json(res, { ok: true, applied: 0 });
+            if (url.endsWith('/internal/v1/node/usage')) {
+              const chunks = [];
+              req.on('data', (chunk) => chunks.push(chunk));
+              req.on('end', () => {
+                let count = 0;
+                try {
+                  count = JSON.parse(Buffer.concat(chunks).toString() || '{}').usage?.length ?? 0;
+                } catch {}
+                console.log('usage received', count);
+                json(res, { ok: true, applied: count });
+              });
+              return;
+            }
             res.writeHead(404);
             res.end('{}');
           }).listen(8099);
           STUB
+
+          # A placeholder key made sing-box exit, so the engine never ran and the
+          # stats path was never exercised. A generated key lets it start.
+          reality_key="$(docker run --rm --entrypoint /usr/local/bin/sing-box "$IMAGE_REF" generate reality-keypair | sed -n 's/^PrivateKey: //p')"
+          test -n "$reality_key"
+          sed -i "s|__REALITY_PRIVATE_KEY__|$reality_key|" "$RUNNER_TEMP/stub-controller.mjs"
 
           docker run -d --name node-smoke-stub --network "$net" --network-alias controller \
             -v "$RUNNER_TEMP/stub-controller.mjs:/stub.mjs:ro" --entrypoint node "$IMAGE_REF" /stub.mjs >/dev/null
@@ -324,6 +353,16 @@ jobs:
             if (age > 15000) { console.error('health file is stale by', age, 'ms'); process.exit(1); }
             console.log('health file age', age, 'ms');
           "
+
+          # Usage must reach the controller end to end: engine running, stats API
+          # reachable, and the client's gRPC service name matching the engine's.
+          docker logs node-smoke-stub 2>&1 | grep -q 'usage received' \
+            || { echo 'error: the agent never reported usage to the controller' >&2; docker logs node-smoke-agent; exit 1; }
+          if docker logs node-smoke-agent 2>&1 | grep -q 'usage collection failed'; then
+            echo 'error: usage collection failed even though the engine was healthy' >&2
+            docker logs node-smoke-agent
+            exit 1
+          fi
 
       - name: The agent sources and proto are inside the image
         run: |
