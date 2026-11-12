@@ -106,6 +106,10 @@ export const billingCheckouts = pgTable(
     sessionId: text('session_id'),
     tier: text('tier').notNull(),
     amountMinor: integer('amount_minor').notNull(),
+    /** The coupon applied when this checkout was opened, if any. */
+    couponCode: text('coupon_code'),
+    /** Discount taken off the catalog price, in the checkout currency. */
+    discountMinor: integer('discount_minor').notNull().default(0),
     currency: text('currency').notNull(),
     /** 'open' | 'paid' | 'expired' | 'failed' */
     status: text('status').notNull().default('open'),
@@ -379,6 +383,62 @@ export const clientReleaseArtifacts = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex('client_release_artifacts_release_abi_uq').on(t.releaseId, t.abi)],
+);
+
+/**
+ * Discount codes.
+ *
+ * Kept local rather than delegated to the gateway: the amount charged has to be
+ * decided and recorded here, and a code must be enforceable even when the
+ * provider's coupon API is unavailable. A code is either a percentage or a
+ * fixed amount in one currency, can be capped and dated, and every redemption is
+ * tied to a user so the same account cannot reuse it.
+ */
+export const coupons = pgTable(
+  'coupons',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Normalised, upper-case code. Unique so one code means one offer. */
+    code: text('code').notNull(),
+    /** 'percent' | 'amount' */
+    kind: text('kind').notNull(),
+    percentOff: integer('percent_off'),
+    amountOffMinor: integer('amount_off_minor'),
+    /** Currency the fixed amount is expressed in; null for percentage codes. */
+    currency: text('currency'),
+    /** null means unlimited redemptions. */
+    maxRedemptions: integer('max_redemptions'),
+    timesRedeemed: integer('times_redeemed').notNull().default(0),
+    active: boolean('active').notNull().default(true),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    note: text('note'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('coupons_code_uq').on(t.code), index('coupons_active_idx').on(t.active)],
+);
+
+/** One coupon use, unique per account so a code cannot be redeemed twice. */
+export const couponRedemptions = pgTable(
+  'coupon_redemptions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    couponId: uuid('coupon_id')
+      .notNull()
+      .references(() => coupons.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    checkoutReference: text('checkout_reference'),
+    amountBeforeMinor: integer('amount_before_minor').notNull(),
+    amountAfterMinor: integer('amount_after_minor').notNull(),
+    currency: text('currency').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('coupon_redemptions_user_uq').on(t.couponId, t.userId),
+    index('coupon_redemptions_coupon_idx').on(t.couponId),
+  ],
 );
 
 /**

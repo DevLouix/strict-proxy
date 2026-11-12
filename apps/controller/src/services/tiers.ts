@@ -18,6 +18,35 @@ export function isKnownTier(tier: string): tier is SubscriptionTier {
   return tier in TIERS;
 }
 
+/**
+ * Tiers that entitle a customer to the tunnel.
+ *
+ * `free` is a row every account has so limits and status always have something
+ * to read, but it grants no access: registration is not a trial. Everything
+ * that serves credentials (the config bundle, entitlement tokens) checks this
+ * list, not merely `status === 'active'`.
+ */
+export const PAID_TIERS: SubscriptionTier[] = ['standard', 'pro'];
+
+export function isPaidTier(tier: string): tier is SubscriptionTier {
+  return PAID_TIERS.includes(tier as SubscriptionTier);
+}
+
+/**
+ * Days left in an already-paid period, for the provider plan's trial window.
+ *
+ * The first month is paid through a hosted checkout. When recurring billing is
+ * attached afterwards, the provider must not charge that month again — so the
+ * subscription starts with a trial exactly as long as the time the customer has
+ * already paid for. Using a flat 30 days here handed out free days whenever the
+ * card was attached late in the period.
+ */
+export function remainingPaidDays(periodEnd: Date | null, now: Date = new Date()): number {
+  if (!periodEnd) return 0;
+  const ms = periodEnd.getTime() - now.getTime();
+  return ms <= 0 ? 0 : Math.ceil(ms / 86_400_000);
+}
+
 /** Length of a billing period, in days. */
 export const BILLING_PERIOD_DAYS = 30;
 

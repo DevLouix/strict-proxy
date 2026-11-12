@@ -38,14 +38,16 @@ const PLAN_SETTING_PREFIX = 'openpay.plan.';
 export const MERCHANT_SETTING_KEY = 'openpay.merchantId';
 
 /**
- * Trial applied to a tier's provider plan.
+ * Default trial on a newly created provider plan: none.
  *
  * A subscription is started only after the customer's first hosted checkout has
- * been paid and verified, so the first month is already covered. The trial stops
- * the provider from charging that month a second time when the subscription is
- * created; the first recurring charge lands when the paid month ends.
+ * been paid and verified, so the first month is already covered. The provider
+ * must not charge it again, but it also must not hand out free days: at
+ * activation the plan's trial is set to exactly the time left in the paid
+ * period (see `remainingPaidDays`), and it is zero here so a plan that is
+ * created but never activated cannot be used as a free trial.
  */
-export const RECURRING_TRIAL_DAYS = 30;
+export const RECURRING_TRIAL_DAYS = 0;
 
 /** Marker written into plan metadata so a plan can be recognised as ours. */
 export const PLAN_TIER_METADATA_KEY = 'strict_proxy_tier';

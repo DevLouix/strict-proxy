@@ -18,6 +18,17 @@ import { createTierCheckout, latestCheckoutForUser } from '../services/billing.j
 import { activateRecurringSubscription } from '../services/recurring.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from '../services/usage.js';
 import { rateLimit } from '../services/rate-limit.js';
+import {
+  CouponError,
+  discountMinorFor,
+  linkCouponRedemption,
+  normalizeCouponCode,
+  previewCoupon,
+  releaseCoupon,
+  reserveCoupon,
+  type CouponRow,
+} from '../services/coupons.js';
+
 
 interface Ctx {
   db: Db;
@@ -89,6 +100,59 @@ export function buildBillingRouter(ctx: Ctx): Router {
     }),
   );
 
+  /**
+   * Prices a code before the customer pays.
+   *
+   * Returns the discounted amount per purchasable tier, so the app can show
+   * what will actually be charged rather than a discount it has to compute
+   * itself. Validation is the same function checkout uses, so a price shown
+   * here is the price that will be reserved.
+   */
+  router.post(
+    '/api/v1/billing/coupon/preview',
+    requireAuth,
+    rateLimit(ctx.cfg, { bucket: 'billing.coupon', maxAttempts: ctx.cfg.rateLimitMaxAttempts, windowSeconds: ctx.cfg.rateLimitWindowSeconds }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const body = req.body as { code?: unknown };
+      try {
+        const preview = await previewCoupon(ctx.db, String(body.code ?? ''));
+        const currency = await loadBillingCurrency(ctx.db, ctx.cfg);
+        const overrides = await loadPriceOverrides(ctx.db, ctx.cfg, currency);
+        const row: CouponRow = {
+          id: '',
+          code: preview.code,
+          kind: preview.kind,
+          percentOff: preview.percentOff,
+          amountOffMinor: preview.amountOffMinor,
+          currency: preview.currency,
+          maxRedemptions: preview.maxRedemptions,
+          timesRedeemed: preview.timesRedeemed,
+          active: true,
+          expiresAt: preview.expiresAt ? new Date(preview.expiresAt) : null,
+          note: null,
+        };
+        const tiers = purchasableTiers(ctx.cfg, overrides, currency).map(({ tier, price }) => {
+          const discountMinor = discountMinorFor(row, price.amountMinor, price.currency);
+          return {
+            tier,
+            label: price.label,
+            currency: price.currency,
+            amountBeforeMinor: price.amountMinor,
+            discountMinor,
+            amountAfterMinor: price.amountMinor - discountMinor,
+          };
+        });
+        res.json({ ...preview, tiers });
+      } catch (err) {
+        if (err instanceof CouponError) {
+          res.status(400).json({ error: err.message, code: err.code });
+          return;
+        }
+        throw err;
+      }
+    }),
+  );
+
   router.post(
     '/api/v1/billing/checkout',
     requireAuth,
@@ -102,43 +166,67 @@ export function buildBillingRouter(ctx: Ctx): Router {
       }
 
       const body = req.body as { tier?: string; successUrl?: string; cancelUrl?: string; couponCode?: string };
-      const couponCode = typeof body.couponCode === 'string' && body.couponCode.trim().length > 0
-        ? body.couponCode.trim()
-        : undefined;
+      const couponCode = body.couponCode === undefined ? null : normalizeCouponCode(body.couponCode);
+      if (body.couponCode !== undefined && couponCode === null) {
+        res.status(400).json({ error: 'that code is not valid', code: 'COUPON_INVALID' });
+        return;
+      }
 
       try {
         validateBillingConfig(ctx.cfg);
+        const tier = (body.tier ?? 'standard') as SubscriptionTier;
 
-        // Validate the coupon before opening a session so an invalid code fails
-        // with a clear 400 instead of surfacing as a provider error at payment
-        // time. The provider remains the authority on whether it applies.
-        if (couponCode && isOpenPayConfigured(ctx.cfg)) {
-          try {
-            const client = createOpenPayClient(ctx.cfg);
-            const overrides = await loadPriceOverrides(ctx.db, ctx.cfg);
-            const price = priceForTier(ctx.cfg, (body.tier ?? 'standard') as SubscriptionTier, overrides);
-            // `amount` is required and lets the provider apply min_amount rules.
-            const verdict = await client.coupons.validate({ code: couponCode, amount: price.amountMinor });
-            if (verdict?.valid === false) {
-              res.status(400).json({ error: 'coupon is not valid for this purchase', code: 'COUPON_INVALID' });
-              return;
-            }
-          } catch (err) {
-            // A coupon-service outage must not block paying customers.
-            console.error('[controller] coupon validation unavailable, proceeding without the check:', err);
-          }
+        // Reserve before opening a payable session: the amount is discounted
+        // first, so the limit has to be enforced before the provider sees it.
+        let reservation: Awaited<ReturnType<typeof reserveCoupon>> | null = null;
+        if (couponCode) {
+          const currency = await loadBillingCurrency(ctx.db, ctx.cfg);
+          const overrides = await loadPriceOverrides(ctx.db, ctx.cfg, currency);
+          const price = priceForTier(ctx.cfg, tier, overrides, currency);
+          reservation = await reserveCoupon(ctx.db, {
+            code: couponCode,
+            userId: claims.sub,
+            amountBeforeMinor: price.amountMinor,
+            currency: price.currency,
+          });
         }
 
-        const checkout = await createTierCheckout(ctx.db, ctx.cfg, {
-          userId: claims.sub,
-          email: claims.email,
-          tier: (body.tier ?? 'standard') as SubscriptionTier,
-          successUrl: body.successUrl,
-          cancelUrl: body.cancelUrl,
-          couponCode,
-        });
+        let checkout: Awaited<ReturnType<typeof createTierCheckout>>;
+        try {
+          checkout = await createTierCheckout(ctx.db, ctx.cfg, {
+            userId: claims.sub,
+            email: claims.email,
+            tier,
+            successUrl: body.successUrl,
+            cancelUrl: body.cancelUrl,
+            ...(reservation
+              ? {
+                  coupon: {
+                    code: reservation.code,
+                    discountMinor: reservation.discountMinor,
+                    amountMinor: reservation.amountMinor,
+                  },
+                }
+              : {}),
+          });
+        } catch (err) {
+          // No session was created, so the use must not stay consumed.
+          if (reservation) await releaseCoupon(ctx.db, reservation.couponId, claims.sub);
+          throw err;
+        }
+        if (reservation) {
+          await linkCouponRedemption(ctx.db, {
+            couponId: reservation.couponId,
+            userId: claims.sub,
+            checkoutReference: checkout.reference,
+          });
+        }
         res.status(201).json(checkout);
       } catch (err) {
+        if (err instanceof CouponError) {
+          res.status(400).json({ error: err.message, code: err.code });
+          return;
+        }
         if (err instanceof BillingError) {
           const status = err.code === 'unknown_tier' ? 400 : 409;
           res.status(status).json({ error: err.message, code: err.code.toUpperCase() });

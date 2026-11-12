@@ -39,7 +39,7 @@ class _FakeApi extends ControllerApi {
   Future<String?> activateRecurring() async => null;
 
   @override
-  Future<CheckoutSession> createCheckout(String tier, {String? successUrl, String? cancelUrl}) async {
+  Future<CheckoutSession> createCheckout(String tier, {String? successUrl, String? cancelUrl, String? couponCode}) async {
     final err = checkoutError;
     if (err != null) throw err;
     return CheckoutSession(
@@ -118,7 +118,7 @@ void main() {
     )));
     await tester.pumpAndSettle();
 
-    expect(find.text('Bandwidth last 30 days'), findsOneWidget);
+    expect(find.text('Data used'), findsOneWidget);
     expect(find.text('5.0 GB of 10.0 GB used'), findsOneWidget);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
   });
@@ -149,25 +149,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('no payment gateway configured'), findsOneWidget);
-  });
-
-  testWidgets('account screen lists per-node usage', (tester) async {
-    await tester.pumpWidget(_wrap(_FakeApi(
-      summary: _summary(),
-      catalog: const BillingCatalog(gateway: 'openpay', currency: 'USD', tiers: []),
-      usageReport: const UsageReport(
-        totalBytes: 3000,
-        credentials: [
-          CredentialUsage(nodeId: 'node-1', bytesUsed: 2048, revoked: false),
-          CredentialUsage(nodeId: 'node-2', bytesUsed: 952, revoked: true),
-        ],
-      ),
-    )));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Usage by node'), findsOneWidget);
-    expect(find.text('node-1'), findsOneWidget);
-    expect(find.text('node-2'), findsOneWidget);
   });
 
   test('the controller exposes subscription state', () async {

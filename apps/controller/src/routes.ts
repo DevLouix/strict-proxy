@@ -23,7 +23,7 @@ import {
   revokeAccessToken,
   revokeRefreshToken,
 } from './services/auth.js';
-import { tierDefinition, isKnownTier } from './services/tiers.js';
+import { tierDefinition, isPaidTier, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
 import { applyObservedNodeIp, computeLoadScore, createNodeEnrollmentToken, enrollNode, registerNode, revokeAllUserCredentials } from './services/nodes.js';
 import { publicIpFromRequest } from './services/client-ip.js';
@@ -804,8 +804,10 @@ export function buildRouter(ctx: Ctx): Router {
     asyncHandler(async (req, res) => {
       const claims = req.auth!;
       const sub = await getSubscription(ctx.db, claims.sub);
-      if (sub.status !== 'active' || (sub.currentPeriodEnd && sub.currentPeriodEnd < new Date())) {
-        res.status(402).json({ error: 'active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
+      // A free row is not a trial: it exists so status and limits always have a
+      // value, but only a paid tier that is currently active gets credentials.
+      if (!isPaidTier(sub.tier) || sub.status !== 'active' || (sub.currentPeriodEnd && sub.currentPeriodEnd < new Date())) {
+        res.status(402).json({ error: 'active paid subscription required', code: 'SUBSCRIPTION_REQUIRED' });
         return;
       }
       // Enforce the tier's bandwidth quota before handing out working credentials.

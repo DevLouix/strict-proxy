@@ -99,15 +99,10 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
                       : 'This deployment has no payment gateway configured, so upgrades are disabled.',
                 ),
               ],
-              if (state.usage != null &&
-                  state.usage!.credentials.isNotEmpty) ...[
-                const SizedBox(height: 16),
-                _PerNodeUsage(usage: state.usage!),
-              ],
             ],
             const SizedBox(height: 24),
             Text(
-              'Usage is metered per node and counted over a rolling 30-day window.',
+              'Your data allowance resets every 30 days.',
               style:
                   theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
               textAlign: TextAlign.center,
@@ -359,8 +354,8 @@ class _PlanCard extends StatelessWidget {
                   Expanded(
                     child: Text(
                       subscription.autoRenew
-                          ? 'Auto-renew on — billed monthly to your saved card'
-                          : 'One-time payment — auto-renew is not enabled',
+                          ? 'Renews automatically each month'
+                          : 'This plan does not renew automatically',
                       style: theme.textTheme.bodySmall,
                     ),
                   ),
@@ -421,7 +416,7 @@ class _UsageCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Bandwidth last 30 days',
+                Text('Data used',
                     style: theme.textTheme.labelMedium),
                 Text(
                   exhausted
@@ -568,41 +563,6 @@ class _UpgradeSection extends StatelessWidget {
         if (options.isEmpty)
           _Notice(text: 'You are on the highest available plan.'),
       ],
-    );
-  }
-}
-
-class _PerNodeUsage extends StatelessWidget {
-  const _PerNodeUsage({required this.usage});
-  final UsageReport usage;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final sorted = [...usage.credentials]
-      ..sort((a, b) => b.bytesUsed.compareTo(a.bytesUsed));
-
-    return Card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
-            child: Text('Usage by node', style: theme.textTheme.labelMedium),
-          ),
-          for (final c in sorted)
-            ListTile(
-              dense: true,
-              leading: Icon(c.revoked ? Icons.block : Icons.circle,
-                  size: 10,
-                  color: c.revoked ? Colors.redAccent : Colors.greenAccent),
-              title: Text(c.nodeId.isEmpty ? 'Unknown node' : c.nodeId,
-                  style: theme.textTheme.bodySmall),
-              trailing: Text(formatBytes(c.bytesUsed),
-                  style: theme.textTheme.bodySmall),
-            ),
-        ],
-      ),
     );
   }
 }

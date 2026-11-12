@@ -63,6 +63,18 @@ test('the bundle requires authentication and an active subscription', async () =
   assert.equal(revoked.body.code, 'SUBSCRIPTION_REQUIRED');
 });
 
+test('a free account is not a trial: it gets no bundle or credentials', async () => {
+  await h.seedNode({ status: 'online' });
+  const { user, token } = await activeUser('free');
+
+  const res = await h.request('GET', '/api/v1/network/config', { token });
+  assert.equal(res.status, 402);
+  assert.equal(res.body.code, 'SUBSCRIPTION_REQUIRED');
+
+  const rows = await h.query<any>(`SELECT count(*)::int AS n FROM node_credentials WHERE user_id = '${user.id}'`);
+  assert.equal(rows[0].n, 0, 'registration must not provision a tunnel');
+});
+
 test('an expired period end blocks config access', async () => {
   await h.seedNode({ status: 'online' });
   const { user, token } = await activeUser();
@@ -128,38 +140,37 @@ test('the least loaded nodes are assigned first', async () => {
   const busy = await h.seedNode({ hostname: 'busy.test', status: 'online', loadScore: 95 });
   const mid = await h.seedNode({ hostname: 'mid.test', status: 'online', loadScore: 50 });
 
-  // Free tier is capped at two nodes; those two must be the least loaded.
-  const { token } = await activeUser('free');
+  // A paid tier has room for all three, so the order is what is under test.
+  const { token } = await activeUser();
   const res = await h.request('GET', '/api/v1/network/config', { token });
 
-  const assigned = new Set(res.body.nodes.map((n: any) => n.id));
-  assert.equal(assigned.has(idle.id), true);
-  assert.equal(assigned.has(mid.id), true);
-  assert.equal(assigned.has(busy.id), false, 'the 95%-loaded node must not be handed out before quieter ones');
+  const order = res.body.nodes.map((n: any) => n.id);
+  assert.equal(order[0], idle.id, 'the quietest node must be offered first');
+  assert.ok(order.indexOf(mid.id) < order.indexOf(busy.id), 'the 95%-loaded node must not be handed out before quieter ones');
 });
 
 test('healthy nodes are preferred over degraded ones at equal load', async () => {
   const degraded = await h.seedNode({ hostname: 'deg.test', status: 'degraded', loadScore: 10 });
   const healthy = await h.seedNode({ hostname: 'ok.test', status: 'online', loadScore: 10 });
-  // A third node so the free tier's 2-node cap actually forces a choice.
-  await h.seedNode({ hostname: 'spare.test', status: 'online', loadScore: 99 });
 
-  const { token } = await activeUser('free');
+  const { token } = await activeUser();
   const res = await h.request('GET', '/api/v1/network/config', { token });
-  const assigned = new Set(res.body.nodes.map((n: any) => n.id));
-  assert.equal(assigned.size, 2);
+  const order = res.body.nodes.map((n: any) => n.id);
 
-  assert.equal(assigned.has(healthy.id), true);
-  assert.equal(assigned.has(degraded.id), false, 'a degraded node must lose to an equally loaded healthy one');
+  assert.equal(order[0], healthy.id);
+  assert.ok(
+    order.indexOf(healthy.id) < order.indexOf(degraded.id),
+    'a degraded node must lose to an equally loaded healthy one',
+  );
 });
 
 test('assignment is deterministic for identical load', async () => {
   const a = await h.seedNode({ hostname: 'a.test', status: 'online', loadScore: 50 });
   const b = await h.seedNode({ hostname: 'b.test', status: 'online', loadScore: 50 });
 
-  const first = await activeUser('free');
+  const first = await activeUser();
   const res1 = await h.request('GET', '/api/v1/network/config', { token: first.token });
-  const second = await activeUser('free');
+  const second = await activeUser();
   const res2 = await h.request('GET', '/api/v1/network/config', { token: second.token });
 
   assert.deepEqual(
@@ -171,21 +182,21 @@ test('assignment is deterministic for identical load', async () => {
 });
 
 test('tier caps the number of assigned nodes', async () => {
-  for (let i = 0; i < 4; i++) await h.seedNode({ status: 'online', loadScore: i });
+  for (let i = 0; i < 12; i++) await h.seedNode({ status: 'online', loadScore: i });
 
-  const free = await activeUser('free');
-  const freeRes = await h.request('GET', '/api/v1/network/config', { token: free.token });
-  assert.equal(freeRes.body.nodes.length, 2);
+  const standard = await activeUser('standard');
+  const standardRes = await h.request('GET', '/api/v1/network/config', { token: standard.token });
+  assert.equal(standardRes.body.nodes.length, 10, 'standard is capped at ten nodes');
 
   const pro = await activeUser('pro');
   const proRes = await h.request('GET', '/api/v1/network/config', { token: pro.token });
-  assert.equal(proRes.body.nodes.length, 4);
+  assert.equal(proRes.body.nodes.length, 12, 'pro has no practical cap');
 });
 
 test('credentials for unassigned nodes are revoked', async () => {
   await h.seedNode({ hostname: 'one.test', status: 'online', loadScore: 10 });
   await h.seedNode({ hostname: 'two.test', status: 'online', loadScore: 90 });
-  const { user, token } = await activeUser('free');
+  const { user, token } = await activeUser();
 
   await h.request('GET', '/api/v1/network/config', { token });
   // Now drop the busy node out of contention by making it offline.
@@ -204,29 +215,21 @@ test('credentials for unassigned nodes are revoked', async () => {
 // Bandwidth quota (item 2)
 // ---------------------------------------------------------------------------
 
-test('a free-tier user is denied once the rolling window quota is exhausted', async () => {
+test('a free account is refused before any credentials are provisioned', async () => {
   await h.seedNode({ status: 'online' });
   const { user, token } = await activeUser('free');
 
-  const before = await h.request('GET', '/api/v1/network/config', { token });
-  assert.equal(before.status, 200, 'under quota should be served');
+  const res = await h.request('GET', '/api/v1/network/config', { token });
+  assert.equal(res.status, 402);
+  assert.equal(res.body.code, 'SUBSCRIPTION_REQUIRED');
 
-  // Record usage inside the window that exceeds the 10 GiB free-tier quota.
-  const credRows = await h.query<any>(`SELECT id FROM node_credentials WHERE user_id = '${user.id}' LIMIT 1`);
-  await h.query(
-    `INSERT INTO usage_rollups (credential_id, window_start, window_end, bytes_up, bytes_down)
-     VALUES ('${credRows[0].id}', now() - interval '1 hour', now(), 0, ${11 * 1024 * 1024 * 1024})`,
-  );
-
-  const after = await h.request('GET', '/api/v1/network/config', { token });
-  assert.equal(after.status, 402);
-  assert.equal(after.body.code, 'BANDWIDTH_QUOTA_EXCEEDED');
-  assert.equal(after.body.quotaBytes, 10 * 1024 * 1024 * 1024);
+  const credRows = await h.query<any>(`SELECT count(*)::int AS n FROM node_credentials WHERE user_id = '${user.id}'`);
+  assert.equal(credRows[0].n, 0);
 });
 
 test('usage older than the quota window does not count', async () => {
   await h.seedNode({ status: 'online' });
-  const { user, token } = await activeUser('free');
+  const { user, token } = await activeUser('pro');
   await h.request('GET', '/api/v1/network/config', { token });
 
   const credRows = await h.query<any>(`SELECT id FROM node_credentials WHERE user_id = '${user.id}' LIMIT 1`);
@@ -254,20 +257,15 @@ test('uncapped tiers are unaffected by heavy usage', async () => {
   assert.equal(res.status, 200, 'pro has no quota');
 });
 
-test('a quota-exhausted user cannot obtain fresh credentials', async () => {
+test('a repeated refused request never provisions a credential', async () => {
   await h.seedNode({ status: 'online' });
   const { user, token } = await activeUser('free');
-  await h.request('GET', '/api/v1/network/config', { token });
 
-  const credRows = await h.query<any>(`SELECT id FROM node_credentials WHERE user_id = '${user.id}' LIMIT 1`);
-  await h.query(
-    `INSERT INTO usage_rollups (credential_id, window_start, window_end, bytes_up, bytes_down)
-     VALUES ('${credRows[0].id}', now() - interval '1 hour', now(), 0, ${11 * 1024 * 1024 * 1024})`,
-  );
+  await h.request('GET', '/api/v1/network/config', { token });
   await h.request('GET', '/api/v1/network/config', { token });
 
   const rows = await h.query<any>(`SELECT count(*)::int AS n FROM node_credentials WHERE user_id = '${user.id}'`);
-  assert.equal(rows[0].n, 1, 'the quota check must run before any credential is provisioned');
+  assert.equal(rows[0].n, 0, 'a refused account must never get credentials');
 });
 
 // ---------------------------------------------------------------------------

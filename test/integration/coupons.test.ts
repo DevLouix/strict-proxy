@@ -82,3 +82,133 @@ test('the coupon code is trimmed rather than sent with stray whitespace', async 
   const plain = await h.request('POST', '/api/v1/billing/checkout', { token: u.token, body: { tier: 'standard', couponCode: 'WELCOME10' } });
   assert.equal(padded.status, plain.status, 'padding must not change the outcome');
 });
+// ---------------------------------------------------------------------------
+// Local coupons: pricing, limits, and the amount actually charged
+// ---------------------------------------------------------------------------
+
+async function createCoupon(admin: string, body: Record<string, unknown>) {
+  const code = `SAVE${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const res = await h.request('POST', '/api/v1/admin/coupons', { token: admin, body: { code, ...body } });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  return res.body.coupon as { id: string; code: string };
+}
+
+test('an operator can create a coupon and the preview discounts every plan', async () => {
+  const admin = await h.adminToken();
+  const coupon = await createCoupon(admin, { kind: 'percent', percentOff: 10 });
+  const u = await user();
+
+  const res = await h.request('POST', '/api/v1/billing/coupon/preview', { token: u.token, body: { code: coupon.code } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.code, coupon.code);
+  const standard = res.body.tiers.find((t: any) => t.tier === 'standard');
+  assert.equal(standard.amountBeforeMinor, 200);
+  assert.equal(standard.discountMinor, 20);
+  assert.equal(standard.amountAfterMinor, 180);
+});
+
+test('only an administrator can create coupons', async () => {
+  const u = await user();
+  const res = await h.request('POST', '/api/v1/admin/coupons', {
+    token: u.token,
+    body: { code: 'NOPE123', kind: 'percent', percentOff: 10 },
+  });
+  assert.equal(res.status, 403);
+});
+
+test('an invalid code is rejected before a checkout is opened', async () => {
+  const u = await user();
+  const res = await h.request('POST', '/api/v1/billing/coupon/preview', { token: u.token, body: { code: 'DOES-NOT-EXIST' } });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'COUPON_INVALID');
+});
+
+test('one account cannot redeem the same code twice', async () => {
+  const admin = await h.adminToken();
+  const coupon = await createCoupon(admin, { kind: 'percent', percentOff: 10 });
+  const u = await user();
+
+  await h.request('POST', '/api/v1/billing/coupon/preview', { token: u.token, body: { code: coupon.code } });
+  const first = await h.query(`SELECT id FROM coupons WHERE code = '${coupon.code}'`);
+  assert.equal(first.length, 1);
+
+  // Reserve directly so the assertion is about the redemption, not the provider.
+  const { reserveCoupon, CouponError } = await import('../../apps/controller/src/services/coupons.js');
+  await reserveCoupon(h.db, { code: coupon.code, userId: u.id, amountBeforeMinor: 200, currency: 'USD' });
+  await assert.rejects(
+    () => reserveCoupon(h.db, { code: coupon.code, userId: u.id, amountBeforeMinor: 200, currency: 'USD' }),
+    (err: unknown) => err instanceof CouponError && err.code === 'COUPON_ALREADY_USED',
+  );
+});
+
+test('a redemption cap is enforced across accounts', async () => {
+  const admin = await h.adminToken();
+  const coupon = await createCoupon(admin, { kind: 'percent', percentOff: 10, maxRedemptions: 1 });
+  const a = await user();
+  const b = await user();
+  const { reserveCoupon, CouponError } = await import('../../apps/controller/src/services/coupons.js');
+
+  await reserveCoupon(h.db, { code: coupon.code, userId: a.id, amountBeforeMinor: 200, currency: 'USD' });
+  await assert.rejects(
+    () => reserveCoupon(h.db, { code: coupon.code, userId: b.id, amountBeforeMinor: 200, currency: 'USD' }),
+    (err: unknown) => err instanceof CouponError && err.code === 'COUPON_EXHAUSTED',
+  );
+});
+
+test('disabling a code stops it immediately', async () => {
+  const admin = await h.adminToken();
+  const coupon = await createCoupon(admin, { kind: 'percent', percentOff: 10 });
+  const u = await user();
+
+  const off = await h.request('PATCH', `/api/v1/admin/coupons/${coupon.id}`, { token: admin, body: { active: false } });
+  assert.equal(off.status, 200);
+
+  const res = await h.request('POST', '/api/v1/billing/coupon/preview', { token: u.token, body: { code: coupon.code } });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'COUPON_INVALID');
+});
+
+test('a discounted checkout records the charged amount and the code', async () => {
+  const admin = await h.adminToken();
+  const coupon = await createCoupon(admin, { kind: 'percent', percentOff: 10 });
+  const u = await user();
+  const { reserveCoupon } = await import('../../apps/controller/src/services/coupons.js');
+  const { createTierCheckout } = await import('../../apps/controller/src/services/billing.js');
+
+  const reservation = await reserveCoupon(h.db, {
+    code: coupon.code,
+    userId: u.id,
+    amountBeforeMinor: 200,
+    currency: 'USD',
+  });
+  const fakeGateway = {
+    checkout: {
+      create: async (params: { amount: number }) => ({
+        reference: `prov_${Date.now()}`,
+        session_id: `sess_${Date.now()}`,
+        checkout_url: 'https://pay.example/coupon',
+        amount: params.amount,
+      }),
+    },
+  } as any;
+
+  const checkout = await createTierCheckout(
+    h.db,
+    h.cfg,
+    {
+      userId: u.id,
+      email: u.email,
+      tier: 'standard',
+      coupon: { code: reservation.code, discountMinor: reservation.discountMinor, amountMinor: reservation.amountMinor },
+    },
+    fakeGateway,
+  );
+  assert.equal(checkout.amountMinor, 180);
+  assert.equal(checkout.couponCode, coupon.code);
+
+  const rows = await h.query<any>(`SELECT amount_minor, discount_minor, coupon_code FROM billing_checkouts WHERE user_id = '${u.id}'`);
+  assert.equal(rows.length, 1);
+  assert.equal(Number(rows[0].amount_minor), 180);
+  assert.equal(Number(rows[0].discount_minor), 20);
+  assert.equal(rows[0].coupon_code, coupon.code);
+});

@@ -198,7 +198,7 @@ class ControllerApi {
   }
 
   /// Opens a hosted checkout for [tier] and returns the payment session.
-  Future<CheckoutSession> createCheckout(String tier, {String? successUrl, String? cancelUrl}) async {
+  Future<CheckoutSession> createCheckout(String tier, {String? successUrl, String? cancelUrl, String? couponCode}) async {
     final body = await _send(() => _client.post(
           _uri('/api/v1/billing/checkout'),
           headers: _headers(),
@@ -206,9 +206,20 @@ class ControllerApi {
             'tier': tier,
             if (successUrl != null) 'successUrl': successUrl,
             if (cancelUrl != null) 'cancelUrl': cancelUrl,
+            if (couponCode != null && couponCode.isNotEmpty) 'couponCode': couponCode,
           }),
         ));
     return CheckoutSession.fromJson(body);
+  }
+
+  /// Prices a discount code for every purchasable plan before paying.
+  Future<CouponPreview> previewCoupon(String code) async {
+    final body = await _send(() => _client.post(
+          _uri('/api/v1/billing/coupon/preview'),
+          headers: _headers(),
+          body: jsonEncode({'code': code}),
+        ));
+    return CouponPreview.fromJson(body);
   }
 
   /// Starts the monthly subscription from the card saved at checkout.

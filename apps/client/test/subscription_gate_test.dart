@@ -1,7 +1,7 @@
 // The entitlement gate is the only thing between a signed-in account and the
-// server list, so these tests pin the cases that matter: an active free plan
-// keeps the app (the controller meters it), an active paid account reaches it,
-// and a lapsed plan does not fall through.
+// server list, so these tests pin the cases that matter: registration is not a
+// trial, an active paid account reaches the app, and a lapsed plan does not
+// fall through.
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -55,14 +55,15 @@ Widget _gated(SubscriptionSummary summary) => ProviderScope(
     );
 
 void main() {
-  testWidgets('an active free account reaches the app, not the paywall', (tester) async {
+  testWidgets('a free account sees the paywall instead of the app', (tester) async {
     await tester.pumpWidget(_gated(_summary(tier: 'free')));
     await tester.pumpAndSettle();
 
-    // The controller serves free accounts a 10 GiB plan; paywalling them here
-    // left every new sign-up with an app that could never connect.
-    expect(find.text('APP'), findsOneWidget);
-    expect(find.text('Subscription required'), findsNothing);
+    // The controller's free row carries limits but no access; registration is
+    // not a trial, so a new account must buy a plan before reaching the app.
+    expect(find.text('Subscription required'), findsOneWidget);
+    expect(find.text('APP'), findsNothing);
+    expect(find.text('Standard'), findsOneWidget);
   });
 
   testWidgets('an active paid account reaches the app', (tester) async {

@@ -38,8 +38,13 @@ export async function createTierCheckout(
     tier: SubscriptionTier;
     successUrl?: string;
     cancelUrl?: string;
-    /** OpenPay coupon code; validated by the provider at checkout time. */
-    couponCode?: string;
+    /**
+     * A locally reserved coupon. The amount is already discounted, so the
+     * provider is asked for exactly what the customer was shown; the code goes
+     * into metadata for the audit trail, never to the provider's coupon API
+     * (which does not know our codes).
+     */
+    coupon?: { code: string; discountMinor: number; amountMinor: number };
   },
   /**
    * Injectable for tests, the same as `ensureTierPlan` takes its client. The
@@ -54,6 +59,8 @@ export async function createTierCheckout(
   const currency = await loadBillingCurrency(db, cfg);
   const overrides = await loadPriceOverrides(db, cfg, currency);
   const price = priceForTier(cfg, params.tier, overrides, currency);
+  const amountMinor = params.coupon?.amountMinor ?? price.amountMinor;
+  const discountMinor = params.coupon?.discountMinor ?? 0;
 
   // Our own idempotent handle. The provider assigns its own `reference` on the
   // session, so both are persisted and either can match an inbound event.
@@ -62,7 +69,7 @@ export async function createTierCheckout(
 
   const gateway = client ?? createOpenPayClient(cfg);
   const session = await gateway.checkout.create({
-    amount: price.amountMinor,
+    amount: amountMinor,
     email: params.email,
     currency: price.currency,
     success_url: params.successUrl,
@@ -70,13 +77,12 @@ export async function createTierCheckout(
     // The recurring subscription is started from this saved card once the
     // payment is verified; without it there is nothing to bill next month.
     save_card: true,
-    ...(params.couponCode ? { coupon_code: params.couponCode } : {}),
     metadata: {
       user_id: params.userId,
       tier: params.tier,
       reference,
       source: 'strict-proxy',
-      ...(params.couponCode ? { coupon_code: params.couponCode } : {}),
+      ...(params.coupon ? { coupon_code: params.coupon.code, discount_minor: String(discountMinor) } : {}),
     },
     // Keeps a retried request from creating a second payable session.
     idempotency_key: reference,
@@ -88,7 +94,9 @@ export async function createTierCheckout(
     providerReference: session.reference ?? null,
     sessionId: session.session_id,
     tier: params.tier,
-    amountMinor: price.amountMinor,
+    amountMinor,
+    couponCode: params.coupon?.code ?? null,
+    discountMinor,
     currency: price.currency,
     status: 'open',
     expiresAt,
@@ -97,9 +105,9 @@ export async function createTierCheckout(
   return {
     reference: session.reference ?? reference,
     checkoutUrl: session.checkout_url,
-    couponCode: params.couponCode ?? null,
+    couponCode: params.coupon?.code ?? null,
     tier: params.tier,
-    amountMinor: price.amountMinor,
+    amountMinor,
     currency: price.currency,
     expiresAt: expiresAt.toISOString(),
   };

@@ -21,6 +21,14 @@ class PaywallScreen extends ConsumerStatefulWidget {
 }
 
 class _PaywallScreenState extends ConsumerState<PaywallScreen> {
+  final _coupon = TextEditingController();
+
+  @override
+  void dispose() {
+    _coupon.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -37,7 +45,7 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
 
   Future<void> _subscribe(String tier) async {
     final notifier = ref.read(billingProvider.notifier);
-    final url = await notifier.startCheckout(tier);
+    final url = await notifier.startCheckout(tier, couponCode: ref.read(billingProvider).coupon?.code);
     if (!mounted) return;
     if (url == null) {
       final message = ref.read(billingProvider).error ?? 'Could not start checkout.';
@@ -114,6 +122,8 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
               _ErrorNotice(message: state.error!),
             ],
             const SizedBox(height: 24),
+            _couponCard(state),
+            const SizedBox(height: 16),
             if (state.loading && plans.isEmpty)
               const Center(child: Padding(padding: EdgeInsets.all(24), child: CircularProgressIndicator()))
             else if (plans.isEmpty)
@@ -132,7 +142,7 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
                     child: ListTile(
                       contentPadding: const EdgeInsets.fromLTRB(16, 6, 12, 6),
                       title: Text(plan.label, style: const TextStyle(fontWeight: FontWeight.w600)),
-                      subtitle: Text('${plan.formatted} / month'),
+                      subtitle: _planPrice(plan, state.coupon),
                       trailing: FilledButton(
                         onPressed: state.startingCheckout ? null : () => _subscribe(plan.tier),
                         child: state.startingCheckout
@@ -163,6 +173,90 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
         ),
       ),
     );
+  }
+
+/// Consumer-facing pricing: what the plan costs now, and what a valid code
+/// makes it cost. Kept out of the plan list itself so a long code never pushes
+/// the price out of view on a narrow screen.
+  Widget _planPrice(TierPrice plan, CouponPreview? coupon) {
+    final discounted = coupon?.tierNamed(plan.tier);
+    if (discounted == null || discounted.discountMinor <= 0) {
+      return Text('${plan.formatted} / month');
+    }
+    return Row(
+      children: [
+        Text('${discounted.formatted} / month',
+            style: const TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(width: 8),
+        Text(
+          plan.formatted,
+          style: const TextStyle(decoration: TextDecoration.lineThrough, fontSize: 12),
+        ),
+      ],
+    );
+  }
+
+  /// "Have a code?" — validated by the controller, so the prices shown are the
+  /// prices that will be charged, not a client-side guess at the discount.
+  Widget _couponCard(BillingState state) {
+    final theme = Theme.of(context);
+    final applied = state.coupon;
+    if (applied != null) {
+      return Card(
+        child: ListTile(
+          leading: const Icon(Icons.local_offer_outlined),
+          title: Text('${applied.code} applied'),
+          subtitle: const Text('The discount is included in the prices below.'),
+          trailing: TextButton(
+            onPressed: () {
+              ref.read(billingProvider.notifier).clearCoupon();
+              _coupon.clear();
+            },
+            child: const Text('Remove'),
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Have a code?', style: theme.textTheme.labelMedium),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _coupon,
+                    textCapitalization: TextCapitalization.characters,
+                    autocorrect: false,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      hintText: 'Enter a promo code',
+                    ),
+                    onSubmitted: (_) => _applyCoupon(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: state.startingCheckout ? null : _applyCoupon,
+                  child: state.startingCheckout
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Apply'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _applyCoupon() async {
+    await ref.read(billingProvider.notifier).applyCoupon(_coupon.text);
   }
 }
 

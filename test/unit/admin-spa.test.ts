@@ -120,6 +120,7 @@ test('every view registered in navigation has a renderer', async () => {
   const backupSource = await readFile(path.join(ADMIN_DIR, 'backup-view.js'), 'utf8');
   const disputesSource = await readFile(path.join(ADMIN_DIR, 'disputes-view.js'), 'utf8');
   const auditSource = await readFile(path.join(ADMIN_DIR, 'audit-view.js'), 'utf8');
+  const couponsSource = await readFile(path.join(ADMIN_DIR, 'coupons-view.js'), 'utf8');
   const exported = new Set([
     ...declaredExports(viewsSource),
     ...declaredExports(settingsSource),
@@ -128,6 +129,7 @@ test('every view registered in navigation has a renderer', async () => {
     ...declaredExports(backupSource),
     ...declaredExports(disputesSource),
     ...declaredExports(auditSource),
+    ...declaredExports(couponsSource),
   ]);
 
   for (const [, , , renderer] of entries) {
@@ -136,7 +138,7 @@ test('every view registered in navigation has a renderer', async () => {
 
   // The operator tabs must be reachable rather than defined and forgotten:
   // each one exists because the platform could not do something without it.
-  for (const label of ['Settings', 'Plans', 'Subscriptions', 'Client apps', 'Disputes', 'Audit log', 'Backup']) {
+  for (const label of ['Settings', 'Plans', 'Coupons', 'Subscriptions', 'Client apps', 'Disputes', 'Audit log', 'Backup']) {
     assert.ok(entries.some(([, , l]) => l === label), `the ${label} tab is missing from navigation`);
   }
 });

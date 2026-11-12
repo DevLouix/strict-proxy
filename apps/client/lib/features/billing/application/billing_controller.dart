@@ -14,6 +14,7 @@ class BillingState {
     this.usage,
     this.error,
     this.checkout,
+    this.coupon,
   });
 
   final bool loading;
@@ -26,6 +27,9 @@ class BillingState {
   /// Set once a checkout session exists; the UI opens it and then clears it.
   final CheckoutSession? checkout;
 
+  /// A validated discount code and its discounted plan prices.
+  final CouponPreview? coupon;
+
   bool get hasData => subscription != null;
 
   BillingState copyWith({
@@ -36,6 +40,7 @@ class BillingState {
     Object? usage = _unset,
     Object? error = _unset,
     Object? checkout = _unset,
+    Object? coupon = _unset,
   }) =>
       BillingState(
         loading: identical(loading, _unset) ? this.loading : loading as bool,
@@ -45,6 +50,7 @@ class BillingState {
         usage: identical(usage, _unset) ? this.usage : usage as UsageReport?,
         error: identical(error, _unset) ? this.error : error as String?,
         checkout: identical(checkout, _unset) ? this.checkout : checkout as CheckoutSession?,
+        coupon: identical(coupon, _unset) ? this.coupon : coupon as CouponPreview?,
       );
 
   static const _unset = Object();
@@ -96,11 +102,11 @@ class BillingController extends StateNotifier<BillingState> {
   /// Returns the provider's hosted URL, or null when the checkout could not be
   /// opened; the reason is then in `state.error`. Returning an error message as
   /// if it were a URL is how a "pay" button ends up opening nothing.
-  Future<String?> startCheckout(String tier) async {
+  Future<String?> startCheckout(String tier, {String? couponCode}) async {
     if (state.startingCheckout) return null;
     state = state.copyWith(startingCheckout: true, error: null);
     try {
-      final session = await _api.createCheckout(tier);
+      final session = await _api.createCheckout(tier, couponCode: couponCode ?? state.coupon?.code);
       state = state.copyWith(startingCheckout: false, checkout: session);
       return session.checkoutUrl;
     } on ApiException catch (e) {
@@ -114,6 +120,23 @@ class BillingController extends StateNotifier<BillingState> {
 
   /// Clears the pending checkout once the UI has acted on it.
   void consumeCheckout() => state = state.copyWith(checkout: null);
+
+  /// Validates a code and loads the discounted plan prices.
+  Future<void> applyCoupon(String code) async {
+    final trimmed = code.trim();
+    if (trimmed.isEmpty) return;
+    state = state.copyWith(startingCheckout: true, error: null);
+    try {
+      final preview = await _api.previewCoupon(trimmed);
+      state = state.copyWith(startingCheckout: false, coupon: preview);
+    } on ApiException catch (e) {
+      state = state.copyWith(startingCheckout: false, coupon: null, error: e.message);
+    } catch (e) {
+      state = state.copyWith(startingCheckout: false, coupon: null, error: 'That code could not be checked: $e');
+    }
+  }
+
+  void clearCoupon() => state = state.copyWith(coupon: null);
 
   /// Turns the card saved by the first payment into a monthly subscription.
   ///

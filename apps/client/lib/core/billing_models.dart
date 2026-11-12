@@ -215,6 +215,78 @@ class CredentialUsage {
       );
 }
 
+/// One plan's price after a coupon is applied.
+class CouponTierPrice {
+  const CouponTierPrice({
+    required this.tier,
+    required this.label,
+    required this.currency,
+    required this.amountBeforeMinor,
+    required this.discountMinor,
+    required this.amountAfterMinor,
+  });
+
+  final String tier;
+  final String label;
+  final String currency;
+  final int amountBeforeMinor;
+  final int discountMinor;
+  final int amountAfterMinor;
+
+  String get formatted {
+    final value = amountAfterMinor / 100;
+    final digits = value == value.roundToDouble() ? 0 : 2;
+    return '$currency ${value.toStringAsFixed(digits)}';
+  }
+
+  factory CouponTierPrice.fromJson(Map<String, dynamic> json) => CouponTierPrice(
+        tier: json['tier'] as String? ?? '',
+        label: json['label'] as String? ?? '',
+        currency: json['currency'] as String? ?? 'USD',
+        amountBeforeMinor: _asInt(json['amountBeforeMinor']),
+        discountMinor: _asInt(json['discountMinor']),
+        amountAfterMinor: _asInt(json['amountAfterMinor']),
+      );
+}
+
+/// A discount code the controller has validated, with its plan prices.
+class CouponPreview {
+  const CouponPreview({
+    required this.code,
+    required this.kind,
+    required this.percentOff,
+    required this.amountOffMinor,
+    required this.tiers,
+  });
+
+  final String code;
+  final String kind;
+  final int? percentOff;
+  final int? amountOffMinor;
+  final List<CouponTierPrice> tiers;
+
+  CouponTierPrice? tierNamed(String name) {
+    for (final tier in tiers) {
+      if (tier.tier == name) return tier;
+    }
+    return null;
+  }
+
+  factory CouponPreview.fromJson(Map<String, dynamic> json) {
+    final raw = json['tiers'];
+    final tiers = raw is List
+        ? raw.whereType<Map<String, dynamic>>().map(CouponTierPrice.fromJson).toList(growable: false)
+        : const <CouponTierPrice>[];
+    return CouponPreview(
+      code: json['code'] as String? ?? '',
+      kind: json['kind'] as String? ?? 'percent',
+      percentOff: _asNullableInt(json['percentOff']),
+      amountOffMinor: _asNullableInt(json['amountOffMinor']),
+      tiers: tiers,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -6,11 +6,10 @@
  * though: once the first payment is verified, the card saved by checkout is
  * turned into a provider subscription for the same tier.
  *
- * The subscription is started with the plan's trial equal to one billing period
- * (`RECURRING_TRIAL_DAYS`). The first month has already been paid by the
- * checkout, so without the trial the provider would charge it a second time at
- * subscription creation. The trial ends exactly when the paid month does and
- * the first renewal is the normal monthly charge.
+ * The subscription is started with a trial equal to the time left in the paid
+ * period, so the provider neither bills the paid month twice nor gives away
+ * days the customer has not bought. The first renewal is the normal monthly
+ * charge when that period ends.
  *
  * Entitlement is not granted here. It is already granted by the verified
  * checkout webhook; this only attaches the renewal mechanism and stores the
@@ -24,8 +23,8 @@ import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
 import { subscriptions } from '../db/schema.js';
 import { createOpenPayClient, isOpenPayConfigured } from './openpay.js';
-import { ensureTierPlan, RECURRING_TRIAL_DAYS } from './plans.js';
-import { isKnownTier } from './tiers.js';
+import { ensureTierPlan } from './plans.js';
+import { isKnownTier, remainingPaidDays } from './tiers.js';
 
 export type RecurringUnavailableReason =
   | 'gateway_unconfigured'
@@ -117,11 +116,11 @@ export async function activateRecurringSubscription(
     };
   }
 
-  // Plans created before recurring billing existed have no trial. Add one at
-  // activation rather than during sync: this is the moment it matters, and it
-  // only affects new subscriptions, not existing billing.
-  if (plan.trialDays < RECURRING_TRIAL_DAYS) {
-    await api.subscriptions.updatePlan(plan.planId, { trial_days: RECURRING_TRIAL_DAYS } as never);
+  // The plan's trial is the remaining paid time, not a fixed period: setting
+  // 30 days on the fifth day of a paid month added five free days.
+  const trialDays = remainingPaidDays(row.currentPeriodEnd);
+  if (plan.trialDays !== trialDays) {
+    await api.subscriptions.updatePlan(plan.planId, { trial_days: trialDays } as never);
   }
 
   const methods = await api.customers.paymentMethods(row.providerCustomerId);

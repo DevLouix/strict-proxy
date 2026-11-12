@@ -106,10 +106,10 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
                       title: Text('${n.label} · ${n.region}'),
                       subtitle: Text(
                         latency == null
-                            ? 'probing…'
+                            ? 'Checking…'
                             : latency >= 0
-                                ? '$latency ms · load ${n.loadScore}%'
-                                : 'unreachable · load ${n.loadScore}%',
+                                ? '$latency ms · ${n.loadScore >= 80 ? 'Busy' : 'Available'}'
+                                : 'Unavailable right now',
                       ),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () {
