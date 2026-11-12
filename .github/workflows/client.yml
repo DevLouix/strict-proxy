@@ -30,10 +30,10 @@ env:
   # (Go, the NDK, the engine SHA) is pinned for the same reason: a release must
   # not change because upstream shipped.
   #
-  # The client now imports `package:material_ui/material_ui.dart` (upstream's
-  # replacement for the Material library), so moving this pin forward is a
-  # one-line bump that CI verifies — not a waiting migration.
-  FLUTTER_VERSION: '3.47.9'
+  # The client imports `package:material_ui/material_ui.dart` (upstream's
+  # replacement for the Material library), so this pin moves as a one-line
+  # bump: 3.50.0 is verified with `flutter analyze` and `flutter test`.
+  FLUTTER_VERSION: '3.50.0'
   CLIENT_ENV: production
   # Set the repository variable CLIENT_CONTROLLER_URL once the controller has a
   # real HTTPS address; the placeholder keeps compile-only builds working.
