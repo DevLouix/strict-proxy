@@ -160,6 +160,14 @@ export const nodes = pgTable(
     /** Accepted short-ids; per-user short-ids are drawn from this pool. */
     realityShortIds: jsonb('reality_short_ids').$type<string[]>().notNull(),
     engineVersion: text('engine_version').notNull().default('unknown'),
+    /**
+     * Latest self-check the agent reported: is the managed engine running, and
+     * did usage collection reach its stats API. Null until a node reports one,
+     * so an old agent is not shown as broken.
+     */
+    engineHealthy: boolean('engine_healthy'),
+    statsApiHealthy: boolean('stats_api_healthy'),
+    engineHealthCheckedAt: timestamp('engine_health_checked_at', { withTimezone: true }),
     /** HMAC secret for internal node API calls. Issued at registration. */
     hmacSecret: text('hmac_secret').notNull(),
     /**

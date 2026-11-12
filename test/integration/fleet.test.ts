@@ -201,6 +201,29 @@ test('a heartbeat marks the node online and records its load', async () => {
   assert.equal(rowRows[0].engine_version, '1.13.21');
 });
 
+test('a heartbeat records the engine health the agent reports', async () => {
+  const node = await h.seedNode({ status: 'offline' });
+  await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', {
+    cpuPercent: 3,
+    engineHealthy: true,
+    statsApiHealthy: false,
+  });
+
+  const rowRows = await h.query<any>(`SELECT engine_healthy, stats_api_healthy, engine_health_checked_at FROM nodes WHERE id = '${node.id}'`);
+  assert.equal(rowRows[0].engine_healthy, true);
+  assert.equal(rowRows[0].stats_api_healthy, false);
+  assert.ok(rowRows[0].engine_health_checked_at, 'the check time is shown next to the badge');
+});
+
+test('a heartbeat that omits engine health leaves the stored value alone', async () => {
+  const node = await h.seedNode({ status: 'offline' });
+  await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', { engineHealthy: false });
+  await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', { cpuPercent: 5 });
+
+  const rowRows = await h.query<any>(`SELECT engine_healthy FROM nodes WHERE id = '${node.id}'`);
+  assert.equal(rowRows[0].engine_healthy, false, 'a missing field must not clear a reported failure');
+});
+
 test('a heartbeat on a saturated node marks it degraded', async () => {
   const node = await h.seedNode({ status: 'offline' });
   await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', { cpuPercent: 100, memoryPercent: 100 });

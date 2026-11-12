@@ -83,6 +83,9 @@ class Agent {
   private running = true;
   /** True once the timers are installed, i.e. an exit is not a clean shutdown. */
   private started = false;
+  /** Last self-check results, reported to the controller for the fleet view. */
+  private engineHealthy: boolean | null = null;
+  private statsApiHealthy: boolean | null = null;
   /** Most recent detection of this node's own public address. */
   private detectedPublicIp: string | null = null;
   private publicIpCheckedAt = 0;
@@ -139,6 +142,8 @@ class Agent {
     const [cpu, mem, net, osUptime] = await Promise.all([si.currentLoad(), si.mem(), si.networkStats(), si.time()]);
     const bandwidthBytes = net.reduce((acc, n) => acc + (n.rx_sec ?? 0) + (n.tx_sec ?? 0), 0);
     const observedPublicIp = await this.resolvePublicIp();
+    const engine = this.managedSingBox.current;
+    this.engineHealthy = this.cfg.singBoxRestartMode !== 'managed' || Boolean(engine && engine.exitCode === null && !engine.killed);
     await this.client.heartbeat({
       cpuPercent: Number((cpu.currentLoad ?? 0).toFixed(2)),
       memoryPercent: Number((mem.active / Math.max(1, mem.total) * 100).toFixed(2)),
@@ -146,6 +151,8 @@ class Agent {
       uplinkRttMs: await this.measureUplinkRtt(),
       uptimeSeconds: Math.floor(osUptime.uptime),
       engineVersion: await this.singBoxVersion(),
+      engineHealthy: this.engineHealthy,
+      ...(this.statsApiHealthy === null ? {} : { statsApiHealthy: this.statsApiHealthy }),
       ...(observedPublicIp ? { observedPublicIp } : {}),
     });
     log('debug', 'heartbeat sent');
@@ -244,7 +251,9 @@ class Agent {
   async reportUsageOnce(): Promise<void> {
     try {
       await collectUserUsage(this.cfg, this.client, this.credentials);
+      this.statsApiHealthy = true;
     } catch (err) {
+      this.statsApiHealthy = false;
       log(
         'warn',
         `usage collection failed (stats api ${this.cfg.statsApiListen}): ${err instanceof Error ? err.message : err}. ` +

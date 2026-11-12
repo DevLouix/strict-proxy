@@ -620,7 +620,7 @@ export function buildRouter(ctx: Ctx): Router {
   }));
 
   router.get('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (_req, res) => {
-    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
+    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, engineHealthy: nodes.engineHealthy, statsApiHealthy: nodes.statsApiHealthy, engineHealthCheckedAt: nodes.engineHealthCheckedAt, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
     res.json({ nodes: rows });
   }));
 
@@ -879,6 +879,9 @@ export function buildRouter(ctx: Ctx): Router {
         uplinkRttMs?: number;
         uptimeSeconds?: number;
         engineVersion?: string;
+        /** Self-check from the agent: the engine is running, usage collection works. */
+        engineHealthy?: boolean;
+        statsApiHealthy?: boolean;
         /** The address the node sees for itself (from its IP echo service). */
         observedPublicIp?: string;
       };
@@ -896,6 +899,13 @@ export function buildRouter(ctx: Ctx): Router {
           status: node.status === 'draining' ? 'draining' : load > 90 ? 'degraded' : 'online',
           loadScore: load,
           engineVersion: body.engineVersion ?? 'unknown',
+          // Omitted fields keep the previous value so a node that does not
+          // report health is never silently marked unhealthy.
+          ...(typeof body.engineHealthy === 'boolean' ? { engineHealthy: body.engineHealthy } : {}),
+          ...(typeof body.statsApiHealthy === 'boolean' ? { statsApiHealthy: body.statsApiHealthy } : {}),
+          ...(typeof body.engineHealthy === 'boolean' || typeof body.statsApiHealthy === 'boolean'
+            ? { engineHealthCheckedAt: new Date() }
+            : {}),
           lastHeartbeatAt: new Date(),
         })
         .where(eq(nodes.id, nodeId));

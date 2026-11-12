@@ -54,7 +54,18 @@ export class ControllerClient {
     return this.request('GET', '/internal/v1/node/bootstrap');
   }
 
-  heartbeat(report: { cpuPercent: number; memoryPercent: number; bandwidthBytes: number; uplinkRttMs: number; uptimeSeconds: number; engineVersion: string; observedPublicIp?: string }): Promise<{ ok: boolean; controllerTime: string }> {
+  heartbeat(report: {
+    cpuPercent: number;
+    memoryPercent: number;
+    bandwidthBytes: number;
+    uplinkRttMs: number;
+    uptimeSeconds: number;
+    engineVersion: string;
+    /** The agent's own view of its engine; the controller shows it in the fleet. */
+    engineHealthy?: boolean;
+    statsApiHealthy?: boolean;
+    observedPublicIp?: string;
+  }): Promise<{ ok: boolean; controllerTime: string }> {
     return this.request('POST', '/internal/v1/node/heartbeat', report);
   }
 

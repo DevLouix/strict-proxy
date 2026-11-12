@@ -654,7 +654,16 @@ export async function nodesView(api) {
                 h('td', {}, badge(n.status)),
                 h('td', {}, h('span', { class: 'small' }, `${n.loadScore}%`)),
                 h('td', { class: 'small muted', title: date(n.lastHeartbeatAt) }, ago(n.lastHeartbeatAt)),
-                h('td', { class: 'small muted mono' }, n.engineVersion),
+                h('td', {},
+                  h('div', { class: 'small muted mono' }, n.engineVersion),
+                  n.engineHealthy == null
+                    ? h('span', { class: 'badge muted', title: 'The agent has not reported engine health yet' }, 'health unknown')
+                    : !n.engineHealthy
+                      ? h('span', { class: 'badge offline', title: `Engine was not running at the last check (${date(n.engineHealthCheckedAt)})` }, 'engine down')
+                      : n.statsApiHealthy === false
+                        ? h('span', { class: 'badge degraded', title: `Usage collection failed at the last check (${date(n.engineHealthCheckedAt)})` }, 'usage failing')
+                        : h('span', { class: 'badge online', title: `Checked ${date(n.engineHealthCheckedAt)}` }, 'healthy'),
+                ),
                 h('td', { class: 'actions' },
                   h('button', { class: 'btn sm', onClick: () => editNodeDialog(api, n, load) }, 'Edit'),
                   ' ',
