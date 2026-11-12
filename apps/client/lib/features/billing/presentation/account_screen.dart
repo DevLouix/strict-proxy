@@ -335,7 +335,11 @@ class _PlanCard extends StatelessWidget {
             Text(
               subscription.currentPeriodEnd == null
                   ? 'No active billing period'
-                  : 'Renews ${formatDate(subscription.currentPeriodEnd)}',
+                  : subscription.autoRenew
+                      ? 'Renews ${formatDate(subscription.currentPeriodEnd)}'
+                      // A one-time payment does not renew; saying it does made a
+                      // lapsed card look like a scheduled charge.
+                      : 'Access until ${formatDate(subscription.currentPeriodEnd)}',
               style: theme.textTheme.bodySmall,
             ),
             if (subscription.hasActivePaidPlan) ...[
@@ -417,7 +421,7 @@ class _UsageCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Bandwidth this window',
+                Text('Bandwidth last 30 days',
                     style: theme.textTheme.labelMedium),
                 Text(
                   exhausted
@@ -449,7 +453,7 @@ class _UsageCard extends StatelessWidget {
             if (exhausted) ...[
               const SizedBox(height: 10),
               Text(
-                'You have used your monthly data allowance. Upgrade to restore access.',
+                'You have used your 30-day data allowance. Upgrade to restore access.',
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: StatusColors.failed),
               ),
@@ -481,7 +485,7 @@ class _LimitsCard extends StatelessWidget {
                   : '${subscription.maxNodes} nodes'),
           const Divider(height: 1),
           _LimitRow(
-            label: 'Monthly data',
+            label: 'Data per 30 days',
             value: subscription.hasQuota
                 ? formatBytes(subscription.bandwidthQuotaBytes!)
                 : 'Unlimited',

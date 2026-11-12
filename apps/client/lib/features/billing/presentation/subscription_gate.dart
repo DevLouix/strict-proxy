@@ -7,10 +7,12 @@ import 'paywall_screen.dart';
 
 /// Client-side entitlement guard.
 ///
-/// Wraps every surface that exposes servers or the tunnel. While the paid plan
-/// is loading it shows a spinner rather than the app; an unverified or unpaid
-/// account never reaches the child. The controller still enforces access on
-/// `/api/v1/network/config`, so this is the user-facing half of the same rule.
+/// Wraps every surface that exposes servers or the tunnel. While the plan is
+/// loading it shows a spinner rather than the app; an unverified or inactive
+/// account never reaches the child. Free plans are active and stay usable — the
+/// controller meters them instead of refusing them. The controller still
+/// enforces access on `/api/v1/network/config`, so this is the user-facing half
+/// of the same rule.
 class SubscriptionGate extends ConsumerStatefulWidget {
   const SubscriptionGate({super.key, required this.child});
 
@@ -68,7 +70,7 @@ class _SubscriptionGateState extends ConsumerState<SubscriptionGate> with Widget
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    if (subscription.hasActivePaidPlan) return widget.child;
+    if (subscription.hasActivePlan) return widget.child;
     return const PaywallScreen();
   }
 }

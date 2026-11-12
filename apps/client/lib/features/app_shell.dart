@@ -21,8 +21,8 @@ class RootGate extends ConsumerWidget {
       case AuthStatus.unauthenticated:
         return const LoginScreen();
       case AuthStatus.authenticated:
-        // Signing in is not access: the paid plan is checked before the home
-        // screen (and its server picker) is built.
+        // Signing in is not access: an active plan (free included, while its
+        // quota lasts) is checked before the home screen and its server picker.
         return const SubscriptionGate(child: HomeScreen());
     }
   }

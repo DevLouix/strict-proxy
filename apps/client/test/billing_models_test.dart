@@ -122,6 +122,15 @@ void main() {
       expect(sub.isActive, isFalse);
     });
 
+    test('an active free plan grants access without being a paid plan', () {
+      // The controller serves free accounts a 10 GiB plan, so the gate must
+      // follow "active" rather than "paid"; only auto-renew needs a paid tier.
+      final sub = SubscriptionSummary.fromJson(payload(tier: 'free'));
+      expect(sub.hasActivePlan, isTrue);
+      expect(sub.hasActivePaidPlan, isFalse);
+      expect(SubscriptionSummary.fromJson(payload(status: 'expired')).hasActivePlan, isFalse);
+    });
+
     test('survives a completely empty payload', () {
       final sub = SubscriptionSummary.fromJson(const {});
       expect(sub.tier, 'free');

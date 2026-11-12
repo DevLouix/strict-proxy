@@ -138,11 +138,19 @@ class SubscriptionSummary {
 
   bool get isActive => status == 'active';
 
-  /// Tiers that require a payment profile; `free` is a catalog entry, not an
-  /// entitlement to the paid app surface.
+  /// Tiers sold by the catalog. `free` is a real, usable tier, but it is not
+  /// something the app can charge for or attach auto-renew to.
   bool get isPaidTier => tier == 'standard' || tier == 'pro';
 
-  /// The one predicate the app gates on: a paid plan that is currently active.
+  /// Any plan that currently grants access, including `free`.
+  ///
+  /// The controller hands free accounts a 10 GiB / 2-node plan and only refuses
+  /// them once the rolling window is exhausted, so gating on [isPaidTier] here
+  /// would paywall every new sign-up while the API still considered it entitled.
+  bool get hasActivePlan => isActive;
+
+  /// The paid subset, used where a saved card or a billing period is required
+  /// (auto-renew) rather than for ordinary access.
   bool get hasActivePaidPlan => isActive && isPaidTier;
 
   bool get hasQuota => bandwidthQuotaBytes != null;

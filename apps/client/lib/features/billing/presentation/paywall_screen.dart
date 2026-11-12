@@ -6,7 +6,9 @@ import '../../../core/checkout_launcher.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../application/billing_controller.dart';
 
-/// Shown instead of the app when the signed-in account has no active paid plan.
+/// Shown instead of the app when the signed-in account has no active plan
+/// (expired, revoked, or never provisioned). Active free plans are not sent
+/// here: they keep the app and are metered against their quota.
 ///
 /// The controller grants access from provider webhooks, so there is nothing to
 /// "confirm" locally: the screen opens the hosted checkout and re-reads the
@@ -98,7 +100,7 @@ class _PaywallScreenState extends ConsumerState<PaywallScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'The app and its server list unlock after a plan is active. '
+              'The app and its server list unlock while a plan is active. '
               'Signing in alone is not enough.',
               style: theme.textTheme.bodyMedium?.copyWith(color: theme.hintColor),
               textAlign: TextAlign.center,
@@ -171,9 +173,7 @@ class _StatusNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final text = subscription.status == 'active'
-        ? 'Your ${subscription.tier} plan is active but not a paid plan.'
-        : 'Your ${subscription.tier} plan is ${subscription.status}.';
+    final text = 'Your ${subscription.tier} plan is ${subscription.status}.';
     return _Notice(text: text);
   }
 }
