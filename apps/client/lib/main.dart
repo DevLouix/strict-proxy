@@ -21,14 +21,14 @@ void main() {
       // reports the exit Android recorded for the previous launch.
       unawaited(CrashReporter.reportPreviousExit());
       PlatformDispatcher.instance.onError = (error, stack) {
-        unawaited(CrashReporter.report(error.toString(), stack, fatal: true));
+        CrashReporter.report(error.toString(), stack, fatal: true).ignore();
         // Handled: the process keeps running where it can.
         return true;
       };
       runApp(const ProviderScope(child: StrictProxyApp()));
     },
     (error, stack) =>
-        unawaited(CrashReporter.report(error.toString(), stack, fatal: true)),
+        CrashReporter.report(error.toString(), stack, fatal: true).ignore(),
   );
 }
 

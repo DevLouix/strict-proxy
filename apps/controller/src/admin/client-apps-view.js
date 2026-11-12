@@ -305,7 +305,10 @@ export async function clientAppsView(api) {
                   h('span', { class: 'muted small' }, crash.osVersion ?? ''),
                 ),
                 h('td', { class: 'small' },
-                  h('div', {}, crash.message),
+                  h('div', { class: 'row' },
+                    h('div', {}, crash.message),
+                    crash.context?.kind === 'diagnostics' ? badge('diagnostics') : null,
+                  ),
                   crash.stack
                     ? h('details', {},
                         h('summary', { class: 'muted small' }, 'Stack trace'),

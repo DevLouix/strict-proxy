@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/billing_models.dart';
 import '../../../core/checkout_launcher.dart';
+import '../../../core/diagnostics.dart';
 import '../../../core/theme.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../auth/presentation/auth_controller.dart';
+import '../../home/application/connection_controller.dart';
 import '../application/billing_controller.dart';
 
 /// Account and subscription screen: current plan, limits, bandwidth usage and
@@ -19,6 +21,8 @@ class AccountScreen extends ConsumerStatefulWidget {
 }
 
 class _AccountScreenState extends ConsumerState<AccountScreen> {
+  bool _sendingDiagnostics = false;
+
   @override
   void initState() {
     super.initState();
@@ -109,11 +113,33 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
+            _SupportCard(
+              sending: _sendingDiagnostics,
+              onSend: _sendDiagnostics,
+            ),
+            const SizedBox(height: 16),
             _DangerZone(onDelete: _confirmDelete),
           ],
         ),
       ),
     );
+  }
+
+  /// Sends the build, connection state and last recorded exit in one tap, so a
+  /// crash that left no Flutter stack can still be explained by the operator.
+  Future<void> _sendDiagnostics() async {
+    final conn = ref.read(connectionStateProvider);
+    final (engine, message) = switch (conn) {
+      EngineStateConnected() => ('connected', null),
+      EngineStateConnecting() => ('connecting', null),
+      EngineStateError(:final message) => ('error', message),
+      _ => ('disconnected', null),
+    };
+    setState(() => _sendingDiagnostics = true);
+    final failure = await Diagnostics.send(engine: engine, engineMessage: message);
+    if (!mounted) return;
+    setState(() => _sendingDiagnostics = false);
+    _showMessage(failure ?? 'Diagnostics sent. Thank you.');
   }
 
   /// Confirms with the account password, because deletion is irreversible and an
@@ -619,6 +645,54 @@ class _Notice extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(text, style: theme.textTheme.bodySmall),
+    );
+  }
+}
+
+/// One-tap support: sends what the device knows to the controller.
+class _SupportCard extends StatelessWidget {
+  const _SupportCard({required this.sending, required this.onSend});
+
+  final bool sending;
+  final Future<void> Function() onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Text('Support', style: theme.textTheme.labelMedium),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'Send this build, the connection state and the last crash to the operator.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: OutlinedButton.icon(
+                onPressed: sending ? null : () => onSend(),
+                icon: sending
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.support_agent, size: 18),
+                label: Text(sending ? 'Sending\u2026' : 'Send diagnostics'),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

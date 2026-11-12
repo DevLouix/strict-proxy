@@ -42,7 +42,7 @@ class CrashReporter {
     final previous = FlutterError.onError;
     FlutterError.onError = (details) {
       (previous ?? FlutterError.presentError)(details);
-      unawaited(report(
+      report(
         details.exceptionAsString(),
         details.stack,
         context: {
@@ -50,9 +50,27 @@ class CrashReporter {
           'library': details.library,
           'context': details.context?.toDescription(),
         },
-      ));
+      ).ignore();
     };
   }
+
+  /// The exit Android recorded for the previous launch, when it was a crash.
+  static Future<Map<String, Object?>?> lastExit() async {
+    try {
+      final info = await _deviceChannel.invokeMapMethod<String, Object?>('lastCrash');
+      return info == null ? null : Map<String, Object?>.from(info);
+    } catch (_) {
+      // No host (desktop, tests) or no exit history.
+      return null;
+    }
+  }
+
+  /// A user-triggered report, sent through the same endpoint as crashes.
+  static Future<bool> sendDiagnostics(Map<String, Object?> details) => report(
+        'Diagnostics report from ${details['device'] ?? 'this device'}',
+        null,
+        context: {'kind': 'diagnostics', ...details},
+      );
 
   /// Reports the previous process's crash, when Android recorded one.
   ///
@@ -62,7 +80,7 @@ class CrashReporter {
   /// stores it, so it lands in the dashboard beside Flutter errors.
   static Future<void> reportPreviousExit() async {
     try {
-      final info = await _deviceChannel.invokeMapMethod<String, Object?>('lastCrash');
+      final info = await lastExit();
       if (info == null) return;
       final timestamp = (info['timestamp'] as num?)?.toInt() ?? 0;
       if (timestamp <= 0) return;
@@ -85,7 +103,7 @@ class CrashReporter {
   }
 
   /// Best-effort delivery. Never throws.
-  static Future<void> report(
+  static Future<bool> report(
     String message,
     StackTrace? stack, {
     bool fatal = false,
@@ -94,7 +112,7 @@ class CrashReporter {
   }) async {
     try {
       final key = '$message|${stack?.toString().split('\n').take(3).join('|') ?? ''}';
-      if (_reported.length >= _maxReportsPerSession || !_reported.add(key)) return;
+      if (_reported.length >= _maxReportsPerSession || !_reported.add(key)) return false;
 
       final device = await DeviceInfo.load();
       final payload = <String, Object?>{
@@ -116,15 +134,17 @@ class CrashReporter {
         },
       };
 
-      await http
+      final res = await http
           .post(
             Uri.parse('${AppConfig.controllerUrl}/api/v1/client/crashes'),
             headers: const {'content-type': 'application/json'},
             body: jsonEncode(payload),
           )
           .timeout(_timeout);
+      return res.statusCode < 400;
     } catch (_) {
       // A report that cannot be delivered must not affect the app.
+      return false;
     }
   }
 

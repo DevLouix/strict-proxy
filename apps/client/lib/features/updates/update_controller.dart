@@ -106,6 +106,7 @@ class UpdateState {
     this.progress,
     this.error,
     this.handedToInstaller = false,
+    this.source,
   });
 
   final AppRelease? release;
@@ -122,6 +123,9 @@ class UpdateState {
   /// True once Android's package installer was opened for the new build.
   final bool handedToInstaller;
 
+  /// Where the offer came from: `controller` or `github`.
+  final String? source;
+
   bool get hasUpdate => release != null && release!.buildNumber > AppVersion.buildNumber;
 
   UpdateState copyWith({
@@ -131,6 +135,7 @@ class UpdateState {
     Object? progress = _unset,
     Object? error = _unset,
     Object? handedToInstaller = _unset,
+    Object? source = _unset,
   }) =>
       UpdateState(
         release: identical(release, _unset) ? this.release : release as AppRelease?,
@@ -141,6 +146,7 @@ class UpdateState {
         handedToInstaller: identical(handedToInstaller, _unset)
             ? this.handedToInstaller
             : handedToInstaller as bool,
+        source: identical(source, _unset) ? this.source : source as String?,
       );
 
   static const _unset = Object();
@@ -186,6 +192,7 @@ class UpdateController extends StateNotifier<UpdateState> {
       state = UpdateState(
         release: release,
         artifact: release.artifactFor(device?.abis ?? const <String>[]),
+        source: 'controller',
       );
     } catch (_) {
       // A failed update check must never get in the way of connecting: an
@@ -305,6 +312,7 @@ class UpdateController extends StateNotifier<UpdateState> {
         return UpdateState(
           release: release,
           artifact: release.artifactFor(device?.abis ?? const <String>[]),
+          source: 'github',
         );
       }
     } catch (_) {

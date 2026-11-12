@@ -68,6 +68,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             if (update.hasUpdate) ...[
               _UpdateBanner(
                 version: update.release!.version,
+                source: update.source,
                 progress: update.progress,
                 onTap: update.progress == null ? _installUpdate : null,
               ),
@@ -149,9 +150,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 /// says "update", not "install" — the app replaces itself in place and keeps its
 /// data and session.
 class _UpdateBanner extends StatelessWidget {
-  const _UpdateBanner({required this.version, required this.progress, required this.onTap});
+  const _UpdateBanner({
+    required this.version,
+    required this.source,
+    required this.progress,
+    required this.onTap,
+  });
 
   final String version;
+  final String? source;
   final double? progress;
   final VoidCallback? onTap;
 
@@ -170,9 +177,19 @@ class _UpdateBanner extends StatelessWidget {
                 Icon(Icons.system_update_alt, color: theme.colorScheme.primary, size: 20),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    'Update available · v$version',
-                    style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Update available · v$version',
+                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      if (source != null)
+                        Text(
+                          source == 'github' ? 'from GitHub releases' : 'from the update feed',
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                        ),
+                    ],
                   ),
                 ),
                 if (progress == null)

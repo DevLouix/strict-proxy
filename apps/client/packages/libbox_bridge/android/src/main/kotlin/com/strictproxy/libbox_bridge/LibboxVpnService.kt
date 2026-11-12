@@ -44,6 +44,14 @@ class LibboxVpnService : VpnService() {
         private const val NOTIFICATION_ID = 48118
         private var methodChannel: MethodChannel? = null
         private var instance: LibboxVpnService? = null
+
+        /**
+         * `Libbox.setup` may run once per process: the Go side keeps global
+         * state and aborts the process if it is initialised again. Android
+         * recreates the service on every connect, so this flag has to live on
+         * the companion rather than on the instance.
+         */
+        private var enginePrepared = false
         private var runningService: Any? = null
         private var tunFd: ParcelFileDescriptor? = null
 
@@ -89,9 +97,6 @@ class LibboxVpnService : VpnService() {
             context.startService(Intent(context, LibboxVpnService::class.java).setAction(ACTION_STOP))
         }
     }
-
-    /** `Libbox.setup` only has to run once per process. */
-    private var enginePrepared = false
 
     override fun onCreate() {
         super.onCreate()
