@@ -18,10 +18,16 @@ import '../../engine/linux_singbox_engine.dart';
 /// sing-box client configuration with a system TUN inbound.
 Map<String, dynamic> buildSingBoxTunConfig(Map<String, dynamic> endpoint) => {
       'log': {'level': 'warn', 'timestamp': true},
+      // sing-box 1.12 replaced the `address` form with an explicit `type` and
+      // `server`, and 1.14 removed the legacy form entirely. One legacy entry
+      // rejects the whole config before the tunnel starts ("decode config:
+      // dns.servers[0]: legacy DNS server formats ... removed"), which is what
+      // "connection fails" looked like. `strategy` is a top-level option here;
+      // per-server strategy is the deprecated spelling.
       'dns': {
         'servers': [
-          {'tag': 'remote', 'address': 'https://1.1.1.1/dns-query', 'detour': 'proxy'},
-          {'tag': 'local', 'address': 'local'},
+          {'type': 'https', 'tag': 'remote', 'server': '1.1.1.1', 'detour': 'proxy'},
+          {'type': 'local', 'tag': 'local'},
         ],
         'final': 'remote',
         'strategy': 'prefer_ipv4',
@@ -57,7 +63,10 @@ Map<String, dynamic> buildSingBoxTunConfig(Map<String, dynamic> endpoint) => {
           },
         },
         {'type': 'direct', 'tag': 'direct'},
-        {'type': 'block', 'tag': 'block'},
+        // `block` was a legacy special outbound, removed in sing-box 1.12 in
+        // favour of the `reject` rule action. It was never referenced by a route
+        // rule, so dropping it changes no behaviour — but 1.14 refuses to load a
+        // config that declares it.
       ],
       'route': {
         'auto_detect_interface': true,
