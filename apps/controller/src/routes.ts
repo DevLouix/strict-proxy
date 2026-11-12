@@ -621,7 +621,31 @@ export function buildRouter(ctx: Ctx): Router {
 
   router.get('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (_req, res) => {
     const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, engineHealthy: nodes.engineHealthy, statsApiHealthy: nodes.statsApiHealthy, engineHealthCheckedAt: nodes.engineHealthCheckedAt, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
-    res.json({ nodes: rows });
+    // Bandwidth per node, so the fleet view can show whether usage is actually
+    // flowing without opening `docker logs`. Sums are over every rollup the node
+    // ever reported (total) and over the last 24 hours.
+    const usage = await ctx.db
+      .select({
+        nodeId: nodeCredentials.nodeId,
+        totalBytes: sql<string>`coalesce(sum(${usageRollups.bytesUp} + ${usageRollups.bytesDown}), 0)`,
+        last24hBytes: sql<string>`coalesce(sum(case when ${usageRollups.windowStart} >= now() - interval '24 hours' then ${usageRollups.bytesUp} + ${usageRollups.bytesDown} else 0 end), 0)`,
+        lastReportedAt: sql<string | null>`max(${usageRollups.windowEnd})`,
+      })
+      .from(usageRollups)
+      .innerJoin(nodeCredentials, eq(nodeCredentials.id, usageRollups.credentialId))
+      .groupBy(nodeCredentials.nodeId);
+    const usageByNode = new Map(usage.map((u) => [u.nodeId, u]));
+    res.json({
+      nodes: rows.map((node) => {
+        const totals = usageByNode.get(node.id);
+        return {
+          ...node,
+          usageTotalBytes: Number(totals?.totalBytes ?? 0),
+          usage24hBytes: Number(totals?.last24hBytes ?? 0),
+          usageLastReportedAt: totals?.lastReportedAt ?? null,
+        };
+      }),
+    });
   }));
 
   router.post('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (req, res) => {

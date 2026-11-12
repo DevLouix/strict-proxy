@@ -198,7 +198,7 @@ export function stubApi() {
       ],
     },
     nodes: {
-      nodes: [{ id: 'n1', hostname: 'fra-1', region: 'eu-central', label: 'Frankfurt 1', publicIp: '203.0.113.1', tunnelPort: 443, status: 'online', loadScore: 12, lastHeartbeatAt: new Date().toISOString(), engineVersion: '1.13.21' }],
+      nodes: [{ id: 'n1', hostname: 'fra-1', region: 'eu-central', label: 'Frankfurt 1', publicIp: '203.0.113.1', tunnelPort: 443, status: 'online', loadScore: 12, lastHeartbeatAt: new Date().toISOString(), engineVersion: '1.13.21', usage24hBytes: 1024 ** 3, usageTotalBytes: 3 * 1024 ** 3, usageLastReportedAt: new Date().toISOString() }],
     },
     enrollments: {
       enrollments: [

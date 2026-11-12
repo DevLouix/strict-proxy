@@ -230,6 +230,8 @@ test('nodesView renders the fleet hostname and IP', async () => {
   assert.ok(text.includes('fra-1'));
   assert.ok(text.includes('203.0.113.1'));
   assert.ok(text.includes('online'));
+  assert.ok(text.includes('1.0 GB / 24h'), 'the fleet shows recent bandwidth');
+  assert.ok(text.includes('3.0 GB total'), 'and the lifetime counter');
 });
 
 // ---------------------------------------------------------------------------

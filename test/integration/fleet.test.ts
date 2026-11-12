@@ -299,6 +299,34 @@ test('usage rollups are idempotent and drive the per-credential counter', async 
   assert.equal(Number(after2Rows[0].bytes_used), 3000);
 });
 
+test('the admin fleet reports per-node usage counters', async () => {
+  const node = await h.seedNode({ hostname: 'usage-fleet.test' });
+  const idle = await h.seedNode({ hostname: 'usage-idle.test' });
+  const user = await h.seedUser('fleetusage@example.test');
+  await h.setTier(user.id, 'standard');
+  const tokens = await h.login(user.email, user.password, 'device-1');
+  await h.request('GET', '/api/v1/network/config', { token: tokens.accessToken });
+  const credRows = await h.query<any>(`SELECT id FROM node_credentials WHERE node_id = '${node.id}'`);
+  await h.query(
+    `INSERT INTO usage_rollups (credential_id, window_start, window_end, bytes_up, bytes_down) VALUES
+       ('${credRows[0].id}', now() - interval '1 hour', now(), 1000, 2000),
+       ('${credRows[0].id}', now() - interval '3 days', now() - interval '2 days', 4000, 5000)`,
+  );
+
+  const admin = await h.adminToken();
+  const res = await h.request('GET', '/api/v1/admin/nodes', { token: admin });
+  assert.equal(res.status, 200);
+  const reported = res.body.nodes.find((n: any) => n.id === node.id);
+  assert.equal(reported.usageTotalBytes, 12000, 'total sums every window');
+  assert.equal(reported.usage24hBytes, 3000, 'the recent counter only counts the last day');
+  assert.ok(reported.usageLastReportedAt, 'the last report time comes from the newest window end');
+
+  const empty = res.body.nodes.find((n: any) => n.id === idle.id);
+  assert.equal(empty.usageTotalBytes, 0);
+  assert.equal(empty.usage24hBytes, 0);
+  assert.equal(empty.usageLastReportedAt, null, 'a node with no rollups is not shown as reporting');
+});
+
 test('usage for an unknown credential or malformed window is ignored', async () => {
   const node = await h.seedNode();
   const user = await h.seedUser('badusage@example.test');
