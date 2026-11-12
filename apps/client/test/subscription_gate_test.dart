@@ -2,7 +2,7 @@
 // server list, so these tests pin the cases that matter: a free account is
 // paywalled, an active paid account reaches the app, and a lapsed paid plan does
 // not fall through.
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:strict_proxy_client/core/billing_models.dart';

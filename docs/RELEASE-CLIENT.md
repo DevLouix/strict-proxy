@@ -42,6 +42,10 @@ signed. It needs six repository values, set under **Settings → Secrets and
 variables → Actions** (one tab each), or with `gh` as shown below. GitHub never
 shows a secret again after it is saved, so keep the keystore locally.
 
+Two more values are optional: without them the APK is still built, signed and
+attached to a GitHub release, but it is not published to the controller, so
+installed apps are never offered it as an update (the run prints a warning).
+
 | Name | Kind | What it is | Where it comes from |
 |---|---|---|---|
 | `ANDROID_KEYSTORE_BASE64` | secret | the release keystore, base64-encoded | `base64 -w0 upload.jks` |
@@ -50,6 +54,8 @@ shows a secret again after it is saved, so keep the keystore locally.
 | `ANDROID_KEY_PASSWORD` | secret | key password (optional if equal to the keystore one) | the password you chose |
 | `CLIENT_CONTROLLER_URL` | variable | public HTTPS URL compiled into the app | your deployment, e.g. `https://api.example.com` |
 | `CLIENT_SIGNING_PUBLIC_KEY` | variable | base64 of the controller's 32-byte Ed25519 public key (not the APK keystore) | derived from `signing-key.pem` or `SIGNING_PRIVATE_KEY_PEM` |
+| `CLIENT_PUBLISH_ADMIN_EMAIL` | secret, optional | administrator that publishes the build to the in-app update feed | the admin account's email |
+| `CLIENT_PUBLISH_ADMIN_PASSWORD` | secret, optional | that account's password | the password you chose |
 
 The keystore and the public key are produced in
 [Local prerequisites](#local-prerequisites-keystore-and-public-key) below.
@@ -71,6 +77,10 @@ gh secret set ANDROID_KEY_PASSWORD --body '<key password>'
 gh variable set CLIENT_CONTROLLER_URL --body 'https://api.example.com'
 gh variable set CLIENT_SIGNING_PUBLIC_KEY \
   --body "$(openssl pkey -in signing-key.pem -pubout -outform DER | tail -c 32 | base64)"
+
+# 4. Optional: let CI publish each build to installed apps
+gh secret set CLIENT_PUBLISH_ADMIN_EMAIL --body 'admin@example.com'
+gh secret set CLIENT_PUBLISH_ADMIN_PASSWORD --body '<that account password>'
 ```
 
 `gh` must be authenticated as an account with admin access to the repository:
@@ -333,6 +343,12 @@ ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='...' \
 `PUBLISH=0` uploads a draft instead. The script fails if the feed does not end up
 offering the build it just uploaded, so a green run means installed apps can
 actually update.
+
+The `client` workflow does this for you: after attaching the APKs to the GitHub
+release it runs the same script against `dist-android`, using
+`CLIENT_PUBLISH_ADMIN_EMAIL` / `CLIENT_PUBLISH_ADMIN_PASSWORD` and the build
+number from the run. A GitHub release on its own is not reachable by the
+updater — only a published catalog entry is.
 
 #### What the app downloads
 

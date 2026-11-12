@@ -5,7 +5,7 @@
 // user typed (including a token pulled out of a pasted link), and deletion is
 // an authenticated, password-confirmed call that only ends the local session
 // once the server has agreed.
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:strict_proxy_client/core/api_client.dart';

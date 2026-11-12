@@ -30,8 +30,9 @@ env:
   # (Go, the NDK, the engine SHA) is pinned for the same reason: a release must
   # not change because upstream shipped.
   #
-  # Upgrading is deliberate: bump this, then migrate the `material.dart` imports
-  # the new analyzer points at.
+  # The client now imports `package:material_ui/material_ui.dart` (upstream's
+  # replacement for the Material library), so moving this pin forward is a
+  # one-line bump that CI verifies — not a waiting migration.
   FLUTTER_VERSION: '3.47.9'
   CLIENT_ENV: production
   # Set the repository variable CLIENT_CONTROLLER_URL once the controller has a
@@ -642,5 +643,38 @@ jobs:
           [ "$uploaded" = true ] || { echo 'could not attach the APKs to the release' >&2; exit 1; }
           gh release view "$TAG" --json tagName,assets \
             --jq '.tagName + ": " + ([.assets[].name] | join(", "))'
+
+      # A build attached to a GitHub release is not a build installed apps can
+      # reach: the in-app updater reads the controller's published catalog, not
+      # GitHub. This publishes the same verified APKs there, and
+      # tool/publish-android-release.sh re-reads `/api/v1/app/android` afterwards
+      # and compares the served bytes with what was uploaded, so a release nobody
+      # can update to fails here instead of quietly never reaching users.
+      #
+      # It authenticates as an administrator, which only the deployment owner can
+      # provide: without the secrets it warns and leaves the run green, so APK
+      # signing and feed publishing can be enabled independently.
+      - name: Publish the build to the controller's update feed
+        if: github.ref == 'refs/heads/main'
+        env:
+          CONTROLLER_URL: ${{ env.CLIENT_CONTROLLER_URL }}
+          ADMIN_EMAIL: ${{ secrets.CLIENT_PUBLISH_ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.CLIENT_PUBLISH_ADMIN_PASSWORD }}
+          APP_VERSION: '0.1.0'
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -z "$ADMIN_PASSWORD" ]; then
+            echo "::warning::CLIENT_PUBLISH_ADMIN_PASSWORD is not set, so build ${APP_BUILD_NUMBER} was not published to ${CONTROLLER_URL} and installed apps will not be offered it. Set CLIENT_PUBLISH_ADMIN_EMAIL and CLIENT_PUBLISH_ADMIN_PASSWORD to enable this."
+            exit 0
+          fi
+          if [ -z "$ADMIN_EMAIL" ]; then
+            echo 'error: CLIENT_PUBLISH_ADMIN_PASSWORD is set but CLIENT_PUBLISH_ADMIN_EMAIL is not.' >&2
+            exit 1
+          fi
+          # Installed apps show these notes in the update prompt, and the admin
+          # upload route caps them at 2000 characters.
+          NOTES="$(head -c 1900 "$RUNNER_TEMP/changes.md" 2>/dev/null || true)"
+          export NOTES
+          ./apps/client/tool/publish-android-release.sh dist-android
 
 

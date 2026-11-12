@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// Status colours shared by the connect button, the plan strip, the subscription
 /// chip and the server dots.
