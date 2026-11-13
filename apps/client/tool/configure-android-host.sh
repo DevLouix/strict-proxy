@@ -150,6 +150,10 @@ grep -q 'strict_proxy/updater' "${KOTLIN_DIR}/MainActivity.kt" \
   || fail 'the updater channel did not land in MainActivity.kt'
 grep -q 'strict_proxy/device' "${KOTLIN_DIR}/MainActivity.kt" \
   || fail 'the device-info channel did not land in MainActivity.kt'
+# Without this method the app cannot tell a crash during connect from an
+# ordinary shutdown, so it would keep retrying the settings that just aborted.
+grep -q '"lastCrash"' "${KOTLIN_DIR}/MainActivity.kt" \
+  || fail 'the crash-history method did not land in MainActivity.kt'
 [[ -f "${ANDROID_DIR}/app/src/main/res/xml/update_paths.xml" ]] \
   || fail 'the FileProvider path map is missing from res/xml'
 for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do

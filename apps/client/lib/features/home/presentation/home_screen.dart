@@ -268,14 +268,72 @@ class _CompatBanner extends StatelessWidget {
 /// It is a real button (ink, semantics, a label that states what the tap does),
 /// not a bare gesture detector: while connecting the same tap cancels, so the
 /// accessibility label has to say so.
-class ConnectButton extends StatelessWidget {
+///
+/// The visuals follow the state instead of swapping instantly: the disc dips
+/// while the finger is down, the ring colour eases between states, and a halo
+/// breathes outwards while the tunnel is coming up so that a slow engine never
+/// looks like a tap that did nothing. Everything animated is decoration — the
+/// state is also spelled out in the text under the button — and
+/// `MediaQuery.disableAnimations` drops the repeating part, which is exactly what
+/// that setting is for.
+class ConnectButton extends StatefulWidget {
   const ConnectButton({super.key, required this.state, required this.onTap});
 
   final Object state; // pattern-matched above
   final VoidCallback onTap;
 
   @override
+  State<ConnectButton> createState() => _ConnectButtonState();
+}
+
+class _ConnectButtonState extends State<ConnectButton>
+    with SingleTickerProviderStateMixin {
+  static const _diameter = 180.0;
+  static const _pressScale = 0.94;
+
+  /// The halo is the only animation Flutter does not drive itself; the progress
+  /// ring animates on its own.
+  late final AnimationController _halo = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  );
+
+  bool _pressed = false;
+
+  bool get _connecting => widget.state is EngineStateConnecting;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncHalo();
+  }
+
+  @override
+  void didUpdateWidget(ConnectButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if ((oldWidget.state is EngineStateConnecting) != _connecting) _syncHalo();
+  }
+
+  /// Repeating only while connecting: a loop in any other state would repaint
+  /// the screen forever, and never settle in a widget test.
+  void _syncHalo() {
+    if (_connecting) {
+      _halo.repeat();
+    } else {
+      _halo.stop();
+      _halo.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _halo.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final state = widget.state;
     final color = switch (state) {
       EngineStateConnected() => StatusColors.connected,
       EngineStateConnecting() => StatusColors.pending,
@@ -287,24 +345,95 @@ class ConnectButton extends StatelessWidget {
       EngineStateConnecting() => 'Cancel connection attempt',
       _ => 'Connect',
     };
+    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+
     return Semantics(
       button: true,
       label: label,
-      child: Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: Container(
-            width: 180,
-            height: 180,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: color, width: 4),
-            ),
+      child: AnimatedScale(
+        scale: _pressed ? _pressScale : 1,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+        child: SizedBox(
+          // Room for the halo to grow without shifting the column around it.
+          width: _diameter * 1.35,
+          height: _diameter * 1.35,
+          child: Stack(
             alignment: Alignment.center,
-            child: Icon(Icons.power_settings_new, size: 64, color: color),
+            children: [
+              if (_connecting && !reduceMotion)
+                AnimatedBuilder(
+                  animation: _halo,
+                  builder: (context, child) => Transform.scale(
+                    scale: 1 + 0.22 * _halo.value,
+                    child: Opacity(
+                      opacity: (1 - _halo.value).clamp(0.0, 1.0) * 0.4,
+                      child: Container(
+                        width: _diameter,
+                        height: _diameter,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: color, width: 3),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              Material(
+                color: Colors.transparent,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: widget.onTap,
+                  onHighlightChanged: (value) =>
+                      setState(() => _pressed = value),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeOutCubic,
+                    width: _diameter,
+                    height: _diameter,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: color.withValues(alpha: _connecting ? 0.14 : 0.06),
+                      border: Border.all(color: color, width: 4),
+                      boxShadow: [
+                        BoxShadow(
+                          color: color.withValues(alpha: 0.25),
+                          blurRadius: 24,
+                        ),
+                      ],
+                    ),
+                    alignment: Alignment.center,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        if (_connecting)
+                          SizedBox(
+                            width: _diameter - 28,
+                            height: _diameter - 28,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 3,
+                              color: color,
+                              backgroundColor: color.withValues(alpha: 0.15),
+                            ),
+                          ),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 220),
+                          child: Icon(
+                            _connecting
+                                ? Icons.autorenew
+                                : Icons.power_settings_new,
+                            key: ValueKey(_connecting),
+                            size: 64,
+                            color: color,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

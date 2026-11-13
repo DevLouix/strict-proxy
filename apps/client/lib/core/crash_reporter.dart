@@ -86,15 +86,22 @@ class CrashReporter {
       if (timestamp <= 0) return;
       final reason = info['reason'] as String? ?? 'crash';
       final description = (info['description'] as String?)?.trim() ?? '';
+      final process = (info['process'] as String?)?.trim();
+      final trace = (info['trace'] as String?)?.trim();
       await report(
-        'Process exited: $reason${description.isEmpty ? '' : ' — $description'}',
+        'Process ${process ?? 'unknown'} exited: $reason'
+        '${description.isEmpty ? '' : ' — $description'}',
         null,
         fatal: true,
         reportId: 'exit-$timestamp',
         context: {
           'handler': 'ApplicationExitInfo',
           'reason': reason,
+          'process': process,
           'exitTimestamp': timestamp,
+          // The tombstone head names the signal and the aborting frame; without
+          // it a native abort is only ever "the engine crashed".
+          if (trace != null && trace.isNotEmpty) 'trace': trace,
         },
       );
     } catch (_) {

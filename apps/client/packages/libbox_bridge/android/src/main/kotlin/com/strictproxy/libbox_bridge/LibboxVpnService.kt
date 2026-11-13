@@ -145,7 +145,13 @@ class LibboxVpnService : VpnService() {
     }
 
     private fun startBox(config: String) {
-        if (runningService != null) return
+        // A start request while the tunnel is already up has nothing to do, but
+        // it still has to answer: the app waits for a state and would otherwise
+        // mistake the silence for a service that never launched.
+        if (runningService != null) {
+            emitState("connected")
+            return
+        }
         emitState("connecting")
         try {
             val libbox = Class.forName("io.nekohasekai.libbox.Libbox")

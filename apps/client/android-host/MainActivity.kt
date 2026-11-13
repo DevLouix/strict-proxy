@@ -37,6 +37,12 @@ class MainActivity : FlutterActivity() {
         private const val EXIT_CRASH = 4
         private const val EXIT_CRASH_NATIVE = 5
         private const val EXIT_ANR = 6
+
+        /** Exits read back, so one ordinary shutdown does not hide a crash. */
+        private const val EXIT_HISTORY = 8
+
+        /** Tombstone head kept for the report: the signal and the first frames. */
+        private const val TRACE_LIMIT = 2_000
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -85,39 +91,95 @@ class MainActivity : FlutterActivity() {
      * package, so the next launch reports it through the same crash endpoint the
      * dashboard already lists.
      *
-     * Read reflectively because `ApplicationExitInfo` and its accessor only exist
+     * The engine runs in `:vpn`, and a crash there is the failure the app has to
+     * learn from, so it wins over a crash of the UI process. The tombstone head
+     * travels with the report: without it a native abort is only ever "the engine
+     * crashed", with no signal and no aborting frame to act on.
+     *
+     * Read reflectively because `ApplicationExitInfo` and its accessors only exist
      * from API 30 while this host also compiles for older platforms. Null means
-     * either the platform is too old or the last exit was a normal one.
+     * either the platform is too old or the recent exits were ordinary ones.
      */
     private fun lastCrash(): Map<String, Any?>? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return try {
             val manager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
-            val reasons = ActivityManager::class.java
+            val exits = ActivityManager::class.java
                 .getMethod(
                     "getHistoricalProcessExitReasons",
                     String::class.java,
                     Int::class.javaPrimitiveType,
                     Int::class.javaPrimitiveType,
                 )
-                .invoke(manager, packageName, 0, 1) as? List<*> ?: return null
-            val info = reasons.firstOrNull() ?: return null
-            val reason = when (info.javaClass.getMethod("getReason").invoke(info) as? Int) {
-                EXIT_CRASH_NATIVE -> "crash_native"
-                EXIT_CRASH -> "crash"
-                EXIT_ANR -> "anr"
-                EXIT_LOW_MEMORY -> "low_memory"
-                // USER_REQUESTED, EXIT_SELF and friends are ordinary shutdowns.
-                else -> return null
-            }
-            mapOf(
-                "reason" to reason,
-                "timestamp" to info.javaClass.getMethod("getTimestamp").invoke(info),
-                "description" to info.javaClass.getMethod("getDescription").invoke(info),
-            )
+                .invoke(manager, packageName, 0, EXIT_HISTORY) as? List<*> ?: return null
+            // Newest first, as Android returns them.
+            val crashes = exits.mapNotNull { info -> info?.let { exitOf(it) } }
+            (crashes.firstOrNull { it.process.endsWith(":vpn") } ?: crashes.firstOrNull())?.toMap()
         } catch (_: Throwable) {
             // Reading exit history is diagnostics, never a reason to fail a launch.
             null
+        }
+    }
+
+    /** One recorded exit, kept only when it is a crash the app can learn from. */
+    private class Exit(
+        val process: String,
+        val reason: String,
+        val timestamp: Long,
+        val description: String?,
+        val trace: String?,
+    ) {
+        fun toMap(): Map<String, Any?> = mapOf(
+            "reason" to reason,
+            "timestamp" to timestamp,
+            "description" to description,
+            "process" to process,
+            "trace" to trace,
+        )
+    }
+
+    /** [info] as an [Exit], or null when it was an ordinary shutdown. */
+    private fun exitOf(info: Any): Exit? {
+        val process = runCatching {
+            info.javaClass.getMethod("getProcessName").invoke(info) as? String
+        }.getOrNull() ?: packageName
+        val reason = when (info.javaClass.getMethod("getReason").invoke(info) as? Int) {
+            EXIT_CRASH_NATIVE -> "crash_native"
+            EXIT_CRASH -> "crash"
+            EXIT_ANR -> "anr"
+            EXIT_LOW_MEMORY -> "low_memory"
+            // USER_REQUESTED, EXIT_SELF and friends are ordinary shutdowns.
+            else -> return null
+        }
+        return Exit(
+            process = process,
+            reason = reason,
+            timestamp = (info.javaClass.getMethod("getTimestamp").invoke(info) as? Number)?.toLong() ?: 0L,
+            description = runCatching {
+                info.javaClass.getMethod("getDescription").invoke(info) as? String
+            }.getOrNull(),
+            trace = runCatching { traceHead(info) }.getOrNull(),
+        )
+    }
+
+    /**
+     * The first lines of the recorded tombstone or ANR trace.
+     *
+     * Bounded on purpose: this is sent as a crash report, and the signal plus the
+     * aborting frame are in the first few lines.
+     */
+    private fun traceHead(info: Any): String? {
+        val stream = info.javaClass.getMethod("getTraceInputStream").invoke(info) as? java.io.InputStream
+        if (stream == null) return null
+        return stream.use {
+            val buffer = ByteArray(TRACE_LIMIT)
+            var read = 0
+            while (read < buffer.size) {
+                val count = it.read(buffer, read, buffer.size - read)
+                if (count <= 0) break
+                read += count
+            }
+            String(buffer, 0, read, Charsets.UTF_8).trim().ifEmpty { null }
         }
     }
 

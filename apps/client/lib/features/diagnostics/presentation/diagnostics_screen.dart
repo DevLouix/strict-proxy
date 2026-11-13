@@ -146,6 +146,15 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                               style: theme.textTheme.bodyMedium
                                   ?.copyWith(fontWeight: FontWeight.w600),
                             ),
+                            // Which process died: the engine runs in `:vpn`, so
+                            // this is what separates a tunnel crash from the UI
+                            // process being killed.
+                            if ((exit['process'] as String?)?.trim().isNotEmpty ?? false)
+                              Text(
+                                (exit['process'] as String).trim(),
+                                style: theme.textTheme.bodySmall
+                                    ?.copyWith(fontFamily: 'monospace'),
+                              ),
                             const SizedBox(height: 6),
                             Text(
                               _formatTimestamp(exit['timestamp']),
