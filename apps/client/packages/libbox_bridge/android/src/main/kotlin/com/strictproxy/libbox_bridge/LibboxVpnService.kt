@@ -462,8 +462,8 @@ class LibboxVpnService : VpnService() {
         val name = iface.name.lowercase()
         return when {
             name.startsWith("wlan") -> libboxConstant("InterfaceTypeWIFI")
-            name.startsWith("rmnet"), name.startsWith("ccmni"),
-            name.startsWith("pdp"), name.startsWith("wwan") -> libboxConstant("InterfaceTypeCellular")
+            name.startsWith("rmnet") || name.startsWith("ccmni") ||
+                name.startsWith("pdp") || name.startsWith("wwan") -> libboxConstant("InterfaceTypeCellular")
             name.startsWith("eth") -> libboxConstant("InterfaceTypeEthernet")
             else -> libboxConstant("InterfaceTypeOther")
         }
