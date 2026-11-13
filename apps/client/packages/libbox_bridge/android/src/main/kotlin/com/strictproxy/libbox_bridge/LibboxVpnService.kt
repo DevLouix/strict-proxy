@@ -18,7 +18,7 @@ import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
-import java.net.InetAddress
+import java.net.InterfaceAddress
 import java.net.NetworkInterface
 
 /**
@@ -337,73 +337,156 @@ class LibboxVpnService : VpnService() {
                     return null
                 }
                 method.name.equals("getInterfaces", ignoreCase = true) ->
-                    return service.networkInterfaces(method.returnType)
+                    return runCatching { service.networkInterfaces(method.returnType) }
+                        .getOrElse { error ->
+                            // A broken callback here aborts the Go runtime. An empty
+                            // list makes libbox fail the connection cleanly instead.
+                            Log.e(TAG, "interface enumeration failed", error)
+                            service.emptyIterator(method.returnType)
+                        }
             }
             return defaultValue(method)
         }
     }
 
     /**
-     * The device's interfaces, shaped like the generated libbox interface.
+     * The device's interfaces, shaped like the generated libbox iterator.
      *
-     * Reflective because the type only exists in the AAR, and lazily evaluated
-     * because libbox re-reads the list as networks change. Addresses are reported
-     * with the host prefix: enough for interface selection, which is what this
-     * callback is for.
+     * `NetworkInterface` is a Go struct, so its Java binding is a final class,
+     * not an interface. A dynamic proxy cannot stand in for it: Proxy only
+     * implements interfaces, and asking it for a class throws inside the
+     * callback, which aborts the Go runtime and kills the process. The real
+     * generated class is constructed and filled through its setters instead.
+     *
+     * Enumerated per call because libbox re-reads the list as networks change.
      */
     private fun networkInterfaces(iteratorType: Class<*>): Any {
         val interfaces = runCatching {
             NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
         }.getOrDefault(emptyList())
+        // An interface that cannot be represented is skipped: a malformed entry
+        // (null iterator fields) would abort the Go side, while a short list is
+        // just a less precise default-interface choice.
+        val items = interfaces.mapNotNull { iface ->
+            runCatching { libboxNetworkInterface(iface) }
+                .onFailure { Log.w(TAG, "skipping interface ${iface.name}", it) }
+                .getOrNull()
+        }
         var index = -1
         return Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType), InvocationHandler { _, method, _ ->
             when {
-                method.name.equals("hasNext", ignoreCase = true) -> index + 1 < interfaces.size
+                method.name.equals("hasNext", ignoreCase = true) -> index + 1 < items.size
                 method.name.equals("next", ignoreCase = true) ->
-                    interfaceProxy(method.returnType, interfaces[++index])
+                    if (index + 1 < items.size) items[++index] else null
                 else -> defaultValue(method)
             }
         })
     }
 
-    private fun interfaceProxy(type: Class<*>, iface: NetworkInterface): Any =
-        Proxy.newProxyInstance(type.classLoader, arrayOf(type), InvocationHandler { _, method, _ ->
-            when {
-                method.name.equals("getName", ignoreCase = true) -> iface.name
-                method.name.equals("getIndex", ignoreCase = true) -> iface.index
-                method.name.equals("getMTU", ignoreCase = true) -> runCatching { iface.mtu }.getOrDefault(0)
-                method.name.equals("getAddresses", ignoreCase = true) ->
-                    addresses(method.returnType, iface.inetAddresses.toList())
-                // Whether the interface is up. libbox uses this to pick the
-                // underlying network; reporting false for a live interface would
-                // leave it with nothing to bind to.
-                method.name.equals("getFlags", ignoreCase = true) -> runCatching { iface.isUp }.getOrDefault(false)
-                else -> defaultValue(method)
-            }
-        })
+    /** Fills one generated `NetworkInterface` from the Android interface. */
+    private fun libboxNetworkInterface(iface: NetworkInterface): Any {
+        val type = Class.forName("io.nekohasekai.libbox.NetworkInterface")
+        val result = type.getDeclaredConstructor().newInstance()
+        setRequired(result, "setName", iface.name)
+        setRequired(result, "setIndex", iface.index)
+        optionalSetter(result, "setMTU", runCatching { iface.mtu }.getOrDefault(0))
+        optionalSetter(result, "setFlags", interfaceFlags(iface))
+        optionalSetter(result, "setType", interfaceType(iface))
+        optionalSetter(result, "setMetered", false)
 
-    private fun addresses(iteratorType: Class<*>, list: List<InetAddress>): Any {
+        // Addresses, DNS and the gateway are object fields. Leaving one null
+        // makes libbox dereference a null iterator in Go, which is a process
+        // abort, so they are always filled — with an empty iterator when there
+        // is nothing to report.
+        val stringIteratorType = Class.forName("io.nekohasekai.libbox.StringIterator")
+        val addresses = iface.interfaceAddresses.mapNotNull { prefixString(it) }
+        setRequired(result, "setAddresses", stringIterator(stringIteratorType, addresses))
+        result.javaClass.methods.firstOrNull {
+            it.parameterTypes.size == 1 &&
+                (it.name.equals("setDNSServer", ignoreCase = true) || it.name.equals("setDNSServers", ignoreCase = true))
+        }?.let { setter ->
+            setter.invoke(result, stringIterator(setter.parameterTypes[0], emptyList()))
+        }
+        // Newer engines carry a gateway list; older ones have no such field.
+        result.javaClass.methods.firstOrNull {
+            it.parameterTypes.size == 1 && it.name.equals("setGateway", ignoreCase = true)
+        }?.let { setter ->
+            setter.invoke(result, stringIterator(setter.parameterTypes[0], emptyList()))
+        }
+        return result
+    }
+
+    /** A generated libbox string iterator over [values]. */
+    private fun stringIterator(iteratorType: Class<*>, values: List<String>): Any {
         var index = -1
         return Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType), InvocationHandler { _, method, _ ->
             when {
-                method.name.equals("hasNext", ignoreCase = true) -> index + 1 < list.size
-                method.name.equals("next", ignoreCase = true) ->
-                    addressProxy(method.returnType, list[++index])
+                method.name.equals("hasNext", ignoreCase = true) -> index + 1 < values.size
+                method.name.equals("next", ignoreCase = true) -> values.getOrElse(++index) { "" }
+                method.name.equals("len", ignoreCase = true) -> values.size
                 else -> defaultValue(method)
             }
         })
     }
 
-    private fun addressProxy(type: Class<*>, address: InetAddress): Any =
-        Proxy.newProxyInstance(type.classLoader, arrayOf(type), InvocationHandler { _, method, _ ->
-            when {
-                method.name.equals("getAddress", ignoreCase = true) -> address.hostAddress
-                method.name.equals("getPrefix", ignoreCase = true) ||
-                    method.name.equals("getPrefixLength", ignoreCase = true) ->
-                    if (address.address.size == 4) 32 else 128
-                else -> defaultValue(method)
-            }
+    /** An iterator that reports no entries. */
+    private fun emptyIterator(iteratorType: Class<*>): Any =
+        Proxy.newProxyInstance(iteratorType.classLoader, arrayOf(iteratorType), InvocationHandler { _, method, _ ->
+            if (method.name.equals("hasNext", ignoreCase = true)) false else defaultValue(method)
         })
+
+    private fun prefixString(address: InterfaceAddress): String? {
+        val inet = address.address ?: return null
+        // Scoped IPv6 addresses carry a `%wlan0` suffix that a sing-box prefix
+        // parser rejects, so the interface part is dropped.
+        val host = inet.hostAddress?.substringBefore('%') ?: return null
+        val max = if (inet.address.size == 4) 32 else 128
+        val prefix = address.networkPrefixLength.toInt().coerceIn(0, max)
+        return "$host/$prefix"
+    }
+
+    /**
+     * Android's `java.net.NetworkInterface` has no flags getter, so the Go
+     * `net.Flags` bits libbox expects are assembled from the public booleans.
+     */
+    private fun interfaceFlags(iface: NetworkInterface): Int {
+        var flags = 0
+        if (runCatching { iface.isUp }.getOrDefault(false)) flags = flags or 0x1 or 0x40 // UP | RUNNING
+        if (runCatching { iface.isLoopback }.getOrDefault(false)) flags = flags or 0x8
+        if (runCatching { iface.isPointToPoint }.getOrDefault(false)) flags = flags or 0x10
+        if (runCatching { iface.supportsMulticast() }.getOrDefault(false)) flags = flags or 0x1000
+        return flags
+    }
+
+    private fun interfaceType(iface: NetworkInterface): Int {
+        val name = iface.name.lowercase()
+        return when {
+            name.startsWith("wlan") -> libboxConstant("InterfaceTypeWIFI")
+            name.startsWith("rmnet"), name.startsWith("ccmni"),
+            name.startsWith("pdp"), name.startsWith("wwan") -> libboxConstant("InterfaceTypeCellular")
+            name.startsWith("eth") -> libboxConstant("InterfaceTypeEthernet")
+            else -> libboxConstant("InterfaceTypeOther")
+        }
+    }
+
+    private fun libboxConstant(name: String): Int = runCatching {
+        Class.forName("io.nekohasekai.libbox.Libbox").getField(name).getInt(null)
+    }.getOrDefault(0)
+
+    private fun setRequired(target: Any, name: String, value: Any) {
+        val method = target.javaClass.methods.firstOrNull {
+            it.name.equals(name, ignoreCase = true) && it.parameterTypes.size == 1
+        } ?: error("libbox ${target.javaClass.simpleName} has no $name")
+        method.invoke(target, value)
+    }
+
+    private fun optionalSetter(target: Any, name: String, value: Any) {
+        runCatching {
+            target.javaClass.methods.firstOrNull {
+                it.name.equals(name, ignoreCase = true) && it.parameterTypes.size == 1
+            }?.invoke(target, value)
+        }
+    }
 
     private fun openTun(options: Any?): Int {
         val builder = Builder().setSession("StrictProxy")
@@ -411,8 +494,24 @@ class LibboxVpnService : VpnService() {
         if (mtu > 0) builder.setMtu(mtu)
         addPrefixes(builder, readIterator(options, "getInet4Address"))
         addPrefixes(builder, readIterator(options, "getInet6Address"))
-        val dns = readIterator(options, "getDnsServerAddress")
-        while (hasNext(dns)) builder.addDnsServer(nextString(dns))
+        // Newer engines hand DNS over in a StringBox, older ones an iterator;
+        // accepting both keeps DNS intact across an engine bump.
+        val dnsBox = runCatching {
+            options?.javaClass?.methods?.firstOrNull {
+                it.parameterTypes.isEmpty() &&
+                    (it.name.equals("getDNSServerAddress", ignoreCase = true) ||
+                        it.name.equals("getDnsServerAddress", ignoreCase = true))
+            }?.invoke(options)
+        }.getOrNull()
+        val dnsValue = runCatching {
+            dnsBox?.javaClass?.getMethod("getValue")?.invoke(dnsBox) as? String
+        }.getOrNull()
+        if (!dnsValue.isNullOrBlank()) builder.addDnsServer(dnsValue.substringBefore('%'))
+        val dnsIterator = readIterator(options, "getDNSServerAddress", "getDnsServerAddress")
+        while (hasNext(dnsIterator)) {
+            val dns = nextString(dnsIterator).substringBefore('%')
+            if (dns.isNotBlank()) builder.addDnsServer(dns)
+        }
         if (readBoolean(options, "getAutoRoute", "autoRoute")) {
             val v4Routes = readIterator(options, "getInet4RouteAddress", "getInet4RouteRange")
             val v6Routes = readIterator(options, "getInet6RouteAddress", "getInet6RouteRange")
@@ -444,7 +543,9 @@ class LibboxVpnService : VpnService() {
 
     private fun readIterator(target: Any?, vararg names: String): Any? {
         for (name in names) runCatching {
-            val method = target?.javaClass?.methods?.firstOrNull { it.name == name && it.parameterTypes.isEmpty() }
+            val method = target?.javaClass?.methods?.firstOrNull {
+                it.name.equals(name, ignoreCase = true) && it.parameterTypes.isEmpty()
+            }
             if (method != null) return method.invoke(target)
         }
         return null
