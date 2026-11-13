@@ -8,11 +8,12 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
@@ -42,8 +43,15 @@ class LibboxVpnService : VpnService() {
         private const val EXTRA_CONFIG = "config"
         private const val CHANNEL_ID = "strict_proxy_vpn"
         private const val NOTIFICATION_ID = 48118
-        private var methodChannel: MethodChannel? = null
-        private var instance: LibboxVpnService? = null
+        private const val HEARTBEAT_MS = 10_000L
+
+        /**
+         * State changes, broadcast to the app process because this service runs
+         * in `:vpn` and cannot reach the Flutter channel directly.
+         */
+        const val ACTION_STATE = "com.strictproxy.libbox.STATE"
+        const val EXTRA_STATE = "state"
+        const val EXTRA_MESSAGE = "message"
 
         /**
          * `Libbox.setup` may run once per process: the Go side keeps global
@@ -55,18 +63,10 @@ class LibboxVpnService : VpnService() {
         private var runningService: Any? = null
         private var tunFd: ParcelFileDescriptor? = null
 
-        fun attachChannel(channel: MethodChannel) { methodChannel = channel }
-        fun detachChannel() { methodChannel = null }
-
         fun isLibboxAvailable(): Boolean = try {
             Class.forName("io.nekohasekai.libbox.Libbox")
             true
         } catch (_: Throwable) { false }
-
-        fun emitState(state: String, message: String? = null) {
-            val payload = if (message == null) state else mapOf("state" to state, "message" to message)
-            methodChannel?.invokeMethod("state", payload)
-        }
 
         /**
          * What a proxy method returns when there is nothing useful to say.
@@ -92,15 +92,34 @@ class LibboxVpnService : VpnService() {
             else context.startService(intent)
         }
 
-        fun stop(currentActivity: android.app.Activity?) {
-            val context = currentActivity?.applicationContext ?: instance ?: return
+        fun stop(context: Context) {
             context.startService(Intent(context, LibboxVpnService::class.java).setAction(ACTION_STOP))
         }
     }
 
+    private val heartbeat = object : Runnable {
+        override fun run() {
+            emitState("heartbeat")
+            handler.postDelayed(this, HEARTBEAT_MS)
+        }
+    }
+    private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * Announces a state change to the app process. A missing channel here is
+     * normal, not a failure: this class lives in `:vpn` while the Flutter
+     * engine lives in the main one.
+     */
+    fun emitState(state: String, message: String? = null) {
+        val intent = Intent(ACTION_STATE)
+            .setPackage(packageName)
+            .putExtra(EXTRA_STATE, state)
+        if (message != null) intent.putExtra(EXTRA_MESSAGE, message)
+        sendBroadcast(intent)
+    }
+
     override fun onCreate() {
         super.onCreate()
-        instance = this
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification())
     }
@@ -122,7 +141,6 @@ class LibboxVpnService : VpnService() {
 
     override fun onDestroy() {
         stopBox()
-        instance = null
         super.onDestroy()
     }
 
@@ -133,6 +151,10 @@ class LibboxVpnService : VpnService() {
             val libbox = Class.forName("io.nekohasekai.libbox.Libbox")
             runningService = startCommandServer(libbox, config) ?: startLegacyService(libbox, config)
             emitState("connected")
+            // The app process treats silence as process death, so a live tunnel
+            // has to keep saying so.
+            handler.removeCallbacks(heartbeat)
+            handler.postDelayed(heartbeat, HEARTBEAT_MS)
         } catch (error: Throwable) {
             stopBox()
             val cause = generateSequence(error) { it.cause }.last()
@@ -252,6 +274,7 @@ class LibboxVpnService : VpnService() {
             runningService = null
             tunFd?.close()
             tunFd = null
+            handler.removeCallbacks(heartbeat)
             emitState("disconnected")
             stopSelf()
         }
@@ -267,7 +290,7 @@ class LibboxVpnService : VpnService() {
     private inner class CommandHandler : InvocationHandler {
         override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? {
             when {
-                method.name.equals("serviceStop", ignoreCase = true) -> LibboxVpnService.emitState("disconnected")
+                method.name.equals("serviceStop", ignoreCase = true) -> emitState("disconnected")
                 method.name.equals("serviceReload", ignoreCase = true) -> Unit
                 method.name.equals("writeDebugMessage", ignoreCase = true) ->
                     Log.d(TAG, args?.firstOrNull()?.toString() ?: "")

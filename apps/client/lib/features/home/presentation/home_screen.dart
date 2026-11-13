@@ -6,6 +6,7 @@ import '../../auth/presentation/auth_controller.dart';
 import '../../billing/application/billing_controller.dart';
 import '../../updates/update_controller.dart';
 import 'plan_strip.dart';
+import '../application/connect_recovery.dart';
 import '../application/connection_controller.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -38,6 +39,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final auth = ref.watch(authStateProvider);
     final billing = ref.watch(billingProvider);
     final update = ref.watch(updateProvider);
+    final compat = ref.watch(compatModeProvider);
     final theme = Theme.of(context);
 
     return Scaffold(
@@ -71,6 +73,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 source: update.source,
                 progress: update.progress,
                 onTap: update.progress == null ? _installUpdate : null,
+              ),
+              const SizedBox(height: 20),
+            ],
+            if (compat) ...[
+              _CompatBanner(
+                onDismiss: () =>
+                    ref.read(connectionStateProvider.notifier).clearCompatMode(),
               ),
               const SizedBox(height: 20),
             ],
@@ -205,6 +214,48 @@ class _UpdateBanner extends StatelessWidget {
                 child: LinearProgressIndicator(value: progress, minHeight: 6),
               ),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Explains the fallback: a crash during connect is the one signal the app
+/// trusts to change the datapath, and the user should know it happened.
+class _CompatBanner extends StatelessWidget {
+  const _CompatBanner({required this.onDismiss});
+
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 24),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Compatibility mode',
+              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'StrictProxy crashed while connecting on this device, so it is '
+              'using safer tunnel settings.',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: onDismiss,
+                child: const Text('Use normal settings'),
+              ),
+            ),
           ],
         ),
       ),

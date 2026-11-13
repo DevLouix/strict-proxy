@@ -3,9 +3,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <application>
+        <!-- Its own process: a native abort in the engine must take down the
+             tunnel, not the Flutter UI that can report and retry it. State
+             crosses back over package-scoped broadcasts (see the bridge). -->
         <service
             android:name=".LibboxVpnService"
             android:exported="false"
+            android:process=":vpn"
             android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>

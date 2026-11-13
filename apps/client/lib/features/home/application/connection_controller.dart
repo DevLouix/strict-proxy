@@ -13,10 +13,20 @@ import '../../engine/config_bundle_loader.dart';
 import '../../engine/engine_adapter.dart';
 import '../../engine/libbox_engine.dart';
 import '../../engine/linux_singbox_engine.dart';
+import 'connect_recovery.dart';
 
 /// Converts the controller's compact VLESS+REALITY descriptor into a complete
 /// sing-box client configuration with a system TUN inbound.
-Map<String, dynamic> buildSingBoxTunConfig(Map<String, dynamic> endpoint) => {
+///
+/// [compat] switches to the conservative datapath used after the engine has
+/// crashed on this device: the userspace (gVisor) stack instead of the Android
+/// system stack, no `strict_route` (which OEM VPN implementations mishandle),
+/// and a smaller MTU so oversized packets cannot abort the session.
+Map<String, dynamic> buildSingBoxTunConfig(
+  Map<String, dynamic> endpoint, {
+  bool compat = false,
+}) =>
+    {
       'log': {'level': 'warn', 'timestamp': true},
       // sing-box 1.12 replaced the `address` form with an explicit `type` and
       // `server`, and 1.14 removed the legacy form entirely. One legacy entry
@@ -39,8 +49,9 @@ Map<String, dynamic> buildSingBoxTunConfig(Map<String, dynamic> endpoint) => {
           'interface_name': 'strictproxy0',
           'address': [AppConfig.tunIpv4Address, AppConfig.tunIpv6Address],
           'auto_route': true,
-          'strict_route': true,
-          'stack': 'mixed',
+          'strict_route': !compat,
+          'stack': compat ? 'gvisor' : 'mixed',
+          if (compat) 'mtu': 1400,
         },
       ],
       'outbounds': [
@@ -105,10 +116,13 @@ class LatencyResult {
 }
 
 class ConnectionNotifier extends StateNotifier<ConnState> {
-  ConnectionNotifier(this._ref) : super(const EngineStateIdle()) {
+  ConnectionNotifier(this._ref, {ConnectRecovery? recovery})
+      : _recovery = recovery ?? ConnectRecovery(),
+        super(const EngineStateIdle()) {
     _engine = _ref.read(engineProvider);
     _engineReady = _initializeEngine(_engine);
     _subscription = _engine.stateStream.listen(_onEngineState);
+    _recoveryReady = _recoverFromCrash();
   }
 
   /// How long an attempt may stay in "connecting" before it is reported as
@@ -120,7 +134,39 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   final Ref _ref;
   late final VpnEngine _engine;
   late final Future<void> _engineReady;
+  final ConnectRecovery _recovery;
+  late final Future<void> _recoveryReady;
   StreamSubscription<EngineState>? _subscription;
+
+  /// Applies the fallback the previous launch earned: a crash during connect
+  /// means the current settings are unsafe on this device.
+  Future<void> _recoverFromCrash() async {
+    try {
+      if (await _recovery.resolveAfterUncleanExit()) {
+        _ref.read(compatModeProvider.notifier).state = true;
+      }
+    } catch (_) {
+      // Recovery is best effort; nothing here may stop the app from starting.
+    }
+  }
+
+  /// Leaves the conservative settings, at the user's request.
+  Future<void> clearCompatMode() async {
+    await _recovery.clearCompat();
+    _ref.read(compatModeProvider.notifier).state = false;
+  }
+
+  /// Switches to the safe settings when the engine process died from a crash,
+  /// so a retry is not the same attempt that just failed.
+  Future<void> _learnFromEngineDeath() async {
+    try {
+      if (await _recovery.noteEngineCrash()) {
+        _ref.read(compatModeProvider.notifier).state = true;
+      }
+    } catch (_) {
+      // Diagnosis is best effort; the error state is already on screen.
+    }
+  }
 
   /// Fails an attempt that reports neither `connected` nor an error.
   Timer? _watchdog;
@@ -161,6 +207,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       case EngineState.connected:
         _watchdog?.cancel();
         _failed = false;
+        unawaited(_recovery.endAttempt());
         final node = _selected;
         if (node != null) state = EngineStateConnected(node);
       case EngineState.disconnecting:
@@ -172,9 +219,13 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       case EngineState.error:
         _watchdog?.cancel();
         _failed = true;
+        final wasConnected = state is EngineStateConnected;
         state = EngineStateError(
           _engine.lastErrorMessage ?? 'The VPN engine reported an error.',
         );
+        // The engine runs in its own process now, so losing it while the tunnel
+        // was up is survivable — and worth learning from before the next try.
+        if (wasConnected) unawaited(_learnFromEngineDeath());
     }
   }
 
@@ -215,6 +266,11 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       }
       state = const EngineStateConnecting();
 
+      // Marked before the engine starts: if the process dies here, this marker
+      // is the only record that a start was in flight.
+      await _recoveryReady;
+      await _recovery.beginAttempt();
+
       // Nothing can report progress while the OS VPN permission dialog is up, so
       // the watchdog covers the whole attempt, not just the tunnel handshake.
       _watchdog = Timer(connectTimeout, () {
@@ -234,7 +290,10 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _fail('The selected server configuration is unavailable. Pick another server.');
         return;
       }
-      await _engine.connect(jsonEncode(buildSingBoxTunConfig(nodeConfig)));
+      await _engine.connect(jsonEncode(buildSingBoxTunConfig(
+        nodeConfig,
+        compat: _ref.read(compatModeProvider),
+      )));
     } on BundleVerificationException catch (e) {
       _fail(e.reason);
     } on ApiException catch (e) {
@@ -249,6 +308,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   void _fail(String message) {
     _watchdog?.cancel();
     _failed = true;
+    unawaited(_recovery.endAttempt());
     state = EngineStateError(message);
   }
 
@@ -299,6 +359,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     _attempt++;
     _watchdog?.cancel();
     _failed = false;
+    unawaited(_recovery.endAttempt());
     try {
       await _engineReady;
       await _engine.disconnect();

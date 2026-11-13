@@ -67,4 +67,27 @@ void main() {
     expect(outbound['server'], '203.0.113.7');
     expect(outbound['server_port'], 443);
   });
+
+  // The fallback after a crash during connect: the userspace stack and no
+  // strict_route are the two settings Android OEM builds most often abort on.
+  test('compat mode uses the conservative datapath', () {
+    final inbound =
+        (buildSingBoxTunConfig(endpoint(), compat: true)['inbounds'] as List).first
+            as Map<String, dynamic>;
+
+    expect(inbound['stack'], 'gvisor');
+    expect(inbound['strict_route'], isFalse);
+    expect(inbound['mtu'], 1400);
+    expect(inbound['auto_route'], isTrue, reason: 'the tunnel still has to capture traffic');
+    expect(inbound['address'], hasLength(2), reason: 'IPv6 must stay in the tunnel, not leak');
+  });
+
+  test('the normal datapath keeps the system stack', () {
+    final inbound =
+        (buildSingBoxTunConfig(endpoint())['inbounds'] as List).first as Map<String, dynamic>;
+
+    expect(inbound['stack'], 'mixed');
+    expect(inbound['strict_route'], isTrue);
+    expect(inbound.containsKey('mtu'), isFalse);
+  });
 }

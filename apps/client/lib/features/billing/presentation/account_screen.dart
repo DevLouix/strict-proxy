@@ -7,6 +7,7 @@ import '../../../core/diagnostics.dart';
 import '../../../core/theme.dart';
 import '../../../core/widgets/password_field.dart';
 import '../../auth/presentation/auth_controller.dart';
+import '../../diagnostics/presentation/diagnostics_screen.dart';
 import '../../home/application/connection_controller.dart';
 import '../application/billing_controller.dart';
 
@@ -111,6 +112,11 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
             _SupportCard(
               sending: _sendingDiagnostics,
               onSend: _sendDiagnostics,
+              onOpenDiagnostics: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const DiagnosticsScreen(),
+                ),
+              ),
             ),
             const SizedBox(height: 16),
             _DangerZone(onDelete: _confirmDelete),
@@ -615,10 +621,15 @@ class _Notice extends StatelessWidget {
 
 /// One-tap support: sends what the device knows to the controller.
 class _SupportCard extends StatelessWidget {
-  const _SupportCard({required this.sending, required this.onSend});
+  const _SupportCard({
+    required this.sending,
+    required this.onSend,
+    required this.onOpenDiagnostics,
+  });
 
   final bool sending;
   final Future<void> Function() onSend;
+  final VoidCallback onOpenDiagnostics;
 
   @override
   Widget build(BuildContext context) {
@@ -652,6 +663,19 @@ class _SupportCard extends StatelessWidget {
                       )
                     : const Icon(Icons.support_agent, size: 18),
                 label: Text(sending ? 'Sending\u2026' : 'Send diagnostics'),
+              ),
+            ),
+          ),
+          // Readable without adb: the last recorded engine exit and the tunnel
+          // settings it led to.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: onOpenDiagnostics,
+                icon: const Icon(Icons.troubleshoot, size: 18),
+                label: const Text('View diagnostics'),
               ),
             ),
           ),
