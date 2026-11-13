@@ -369,6 +369,7 @@ class _ConnectButtonState extends State<ConnectButton>
                     child: Opacity(
                       opacity: (1 - _halo.value).clamp(0.0, 1.0) * 0.4,
                       child: Container(
+                        key: const ValueKey('connect-halo'),
                         width: _diameter,
                         height: _diameter,
                         decoration: BoxDecoration(

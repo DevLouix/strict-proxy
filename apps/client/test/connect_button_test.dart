@@ -51,13 +51,19 @@ void main() {
     expect(find.byIcon(Icons.power_settings_new), findsOneWidget);
   });
 
-  testWidgets('a disabled-animations device keeps the button usable',
+  testWidgets('a disabled-animations device drops the repeating halo',
       (tester) async {
     await tester.pumpWidget(
       wrap(const EngineStateConnecting(), disableAnimations: true),
     );
-    // No halo, so the tree settles even while connecting.
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const ValueKey('connect-halo')), findsNothing);
     expect(find.byType(ConnectButton), findsOneWidget);
+
+    // The same state without the preference does build the halo, so the check
+    // above is about the setting and not about the halo never existing.
+    await tester.pumpWidget(wrap(const EngineStateConnecting()));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const ValueKey('connect-halo')), findsOneWidget);
   });
 }
