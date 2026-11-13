@@ -58,18 +58,16 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
     private var lastState = "disconnected"
     private var lastHeardAt = 0L
 
-    /** True between a start request and the service's first state broadcast. */
-    private var awaitingService = false
-
     /**
-     * True once this app process heard anything from the service.
+     * What this app process has asked of `:vpn`, and what it heard back.
      *
-     * Disconnecting must not wake `:vpn` just to tell it to stop: starting a
-     * process that is not running is a fresh launch, and once Android has marked
-     * the engine process bad every launch is refused — which is how a disconnect
-     * turned into a second failure with a stale "connecting" on screen.
+     * Both of its rules came from a real failure: a start Android silently
+     * refused looked exactly like a slow tunnel, and a disconnect cold-started
+     * `:vpn` just to tell it to stop — a launch of the process the system had
+     * already marked bad. The rules live in [ServiceLatch] so they can be tested
+     * on the JVM.
      */
-    private var heardFromService = false
+    private val latch = ServiceLatch()
     private val liveness = Handler(Looper.getMainLooper())
     private val livenessCheck = object : Runnable {
         override fun run() {
@@ -98,8 +96,7 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
      */
     private val startAckTimeout = object : Runnable {
         override fun run() {
-            if (!awaitingService) return
-            awaitingService = false
+            if (!latch.ackExpired()) return
             lastState = "error"
             emit(
                 "error",
@@ -117,8 +114,7 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             override fun onReceive(context: Context?, intent: Intent?) {
                 val state = intent?.getStringExtra(LibboxVpnService.EXTRA_STATE) ?: return
                 lastHeardAt = System.currentTimeMillis()
-                heardFromService = true
-                awaitingService = false
+                latch.heard()
                 liveness.removeCallbacks(startAckTimeout)
                 if (state == "heartbeat") return
                 lastState = state
@@ -138,7 +134,7 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
         liveness.removeCallbacks(livenessCheck)
         liveness.removeCallbacks(startAckTimeout)
-        awaitingService = false
+        latch.startFailed()
         receiver?.let { runCatching { appContext?.unregisterReceiver(it) } }
         receiver = null
         channel?.setMethodCallHandler(null)
@@ -200,13 +196,12 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             }
             "stop" -> {
                 val context = appContext ?: activity?.applicationContext
-                val startInFlight = awaitingService
-                awaitingService = false
-                liveness.removeCallbacks(startAckTimeout)
                 // Only tell a service that exists to stop. A start still in flight
                 // is stopped as well, or it would come up with nothing left able
                 // to stop it.
-                if (context != null && (heardFromService || startInFlight)) {
+                val sendStop = latch.stopRequested()
+                liveness.removeCallbacks(startAckTimeout)
+                if (context != null && sendStop) {
                     LibboxVpnService.stop(context)
                 }
                 lastState = "disconnecting"
@@ -227,12 +222,12 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             LibboxVpnService.start(context, config)
             lastState = "connecting"
             lastHeardAt = System.currentTimeMillis()
-            awaitingService = true
+            latch.startRequested()
             liveness.removeCallbacks(startAckTimeout)
             liveness.postDelayed(startAckTimeout, START_ACK_TIMEOUT_MS)
             result.success(null)
         } catch (error: Throwable) {
-            awaitingService = false
+            latch.startFailed()
             liveness.removeCallbacks(startAckTimeout)
             result.error("vpn_start_failed", error.message ?: "Unable to start VPN service", null)
             lastState = "error"

@@ -77,10 +77,10 @@ jobs:
           restore-keys: |
             pub-${{ runner.os }}-
 
-      # This job only creates host projects and runs Dart tests/analysis; it
-      # does not compile a Linux or Android target. The runner already has the
-      # tools Flutter needs, and apt here has repeatedly hung before any build
-      # step ran.
+      # This job only creates host projects and runs Dart tests/analysis, plus
+      # the bridge's JVM unit tests; it does not compile a Linux or Android
+      # target. The runner already has the tools Flutter needs, and apt here has
+      # repeatedly hung before any build step ran.
       - name: Generate Flutter host projects
         working-directory: apps/client
         run: |
@@ -94,6 +94,35 @@ jobs:
       - name: Check optional native libbox artifact
         working-directory: apps/client
         run: ./tool/check-android-libbox.sh
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Gradle and the AGP plugins are the whole cost of this step on a cold
+      # runner; the bridge sources and its test are all that key it.
+      - name: Cache Gradle for the bridge tests
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-bridge-${{ runner.os }}-${{ hashFiles('apps/client/packages/libbox_bridge/android/build.gradle') }}
+          restore-keys: |
+            gradle-bridge-${{ runner.os }}-
+
+      # The start/stop rules are Kotlin, so only Gradle can exercise them. The
+      # host project above is what makes the plugin module buildable, and
+      # `--config-only` writes the Gradle files without producing an APK — the
+      # artifact jobs already own that build. No emulator, no Robolectric: the
+      # rules are pure Kotlin, and `ServiceLatchTest` checks them directly.
+      - name: Run the Android bridge unit tests
+        working-directory: apps/client
+        run: |
+          flutter build apk --debug --config-only
+          cd android
+          ./gradlew :libbox_bridge:testDebugUnitTest --no-daemon
 
       - name: Run Flutter tests
         working-directory: apps/client
