@@ -122,7 +122,7 @@ jobs:
         run: |
           flutter build apk --debug --config-only
           cd android
-          ./gradlew :libbox_bridge:testDebugUnitTest --no-daemon
+          ./gradlew :strict_proxy_libbox_bridge:testDebugUnitTest --no-daemon
 
       - name: Run Flutter tests
         working-directory: apps/client
