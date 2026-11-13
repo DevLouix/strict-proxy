@@ -58,7 +58,15 @@ class AuthController extends StateNotifier<AuthState> {
         email: user['email'] as String?,
         tier: user['tier'] as String?,
       );
-    } on ApiException {
+    } on ApiException catch (e) {
+      // A phone with no connection is not an expired session. Clearing the
+      // stored tokens here signed the user out permanently for launching
+      // offline; only a rejection from the server ends the session, and the
+      // tokens are kept so the next launch with connectivity restores it.
+      if (e.statusCode == 0) {
+        state = state.copyWith(status: AuthStatus.unauthenticated);
+        return;
+      }
       final refreshed = await _ref.read(apiProvider).tryRefresh();
       if (refreshed) {
         await _restore();

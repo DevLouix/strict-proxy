@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 
 import 'billing_models.dart';
@@ -51,8 +54,26 @@ class ControllerApi {
     } on FormatException {
       rethrow;
     } catch (error) {
-      throw ApiException(0, 'NETWORK_ERROR', 'Controller request failed: $error');
+      throw ApiException(0, 'NETWORK_ERROR', describeNetworkErrorForTest(error));
     }
+  }
+
+  /// Turns a transport failure into text a customer can act on.
+  ///
+  /// The underlying error is developer detail — `ClientException with
+  /// SocketException: Failed host lookup ... errno = 7` — and it was shown
+  /// verbatim under the sign-in form whenever the phone had no connection.
+  /// Every transport failure means the request never reached the server, so
+  /// they share one instruction; only a timeout is worth wording differently.
+  @visibleForTesting
+  static String describeNetworkErrorForTest(Object error) {
+    final text = error.toString();
+    final timedOut = error is TimeoutException ||
+        text.contains('TimeoutException') ||
+        text.contains('timed out');
+    return timedOut
+        ? 'StrictProxy took too long to respond. Try again.'
+        : 'Cannot reach StrictProxy. Check your internet connection and try again.';
   }
 
   Future<Map<String, dynamic>> _send(
