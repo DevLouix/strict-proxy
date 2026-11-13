@@ -24,6 +24,16 @@ android {
             jniLibs.srcDirs = ["libs"]
         }
     }
+
+    testOptions {
+        unitTests.all {
+            // A JUnit task that discovers no tests also exits successfully, so
+            // the CI log has to name every test to prove the rules were checked.
+            testLogging {
+                events "passed", "failed", "skipped"
+            }
+        }
+    }
 }
 
 kotlin {
