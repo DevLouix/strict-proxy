@@ -45,6 +45,10 @@ env:
 jobs:
   verify:
     name: Test and analyze client
+    # The bridge's Kotlin implements the engine's generated interfaces, so Gradle
+    # cannot compile it without the libbox classes. Depending on the engine job
+    # costs one cache restore on a warm run and replaces a cgo build here.
+    needs: libbox
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +98,20 @@ jobs:
       - name: Check optional native libbox artifact
         working-directory: apps/client
         run: ./tool/check-android-libbox.sh
+
+      # The engine job built or restored this AAR; unpacking it is what puts
+      # libbox-classes.jar next to the plugin. Without it the bridge module
+      # cannot compile — checkLibboxClasses says so in one line rather than
+      # burying the cause under unresolved references.
+      - name: Restore the pinned libbox engine
+        uses: actions/cache/restore@v4
+        with:
+          path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          key: libbox-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Unpack libbox for the Gradle plugin
+        run: ./apps/client/tool/unpack-libbox-aar.sh
 
       - uses: actions/setup-java@v5
         with:
