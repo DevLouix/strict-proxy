@@ -103,11 +103,16 @@ jobs:
       # libbox-classes.jar next to the plugin. Without it the bridge module
       # cannot compile — checkLibboxClasses says so in one line rather than
       # burying the cause under unresolved references.
+      # `actions/cache` keys an entry to its *path list* as well as its key, so
+      # this cannot restore the engine job's own entry: that one spans the Go
+      # module store and the sing-box checkout. It restores the AAR-only entry
+      # the engine job saves below instead. Failing on a miss is deliberate — a
+      # silent skip here would hide that the bridge never compiled.
       - name: Restore the pinned libbox engine
         uses: actions/cache/restore@v4
         with:
           path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
-          key: libbox-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
+          key: libbox-aar-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
           fail-on-cache-miss: true
 
       - name: Unpack libbox for the Gradle plugin
@@ -233,6 +238,18 @@ jobs:
       # The AAR is handed to the Android job through the actions cache, not an
       # uploaded artifact: it is a multi-hundred-megabyte build input, and the
       # artifact store's quota is shared with the APKs users download.
+      #
+      # The verify job needs the same file to compile the bridge, and it cannot
+      # reuse the entry above because that one is keyed to this job's full path
+      # list. This entry carries the AAR alone. `continue-on-error` because
+      # saving a key that already exists is a race between runs, and the AAR is
+      # then already in the cache anyway.
+      - name: Publish the engine AAR for the verify job
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          key: libbox-aar-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
 
   ios-verification:
     name: Verify the iOS client builds
