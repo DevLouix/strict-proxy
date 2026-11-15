@@ -1,23 +1,26 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- `systemExempted` is the foreground service type Android provides for
+         VpnService apps. `specialUse` would work too, but it is the type that
+         needs a Play Store declaration, for behaviour a VPN app already has an
+         exemption for. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <application>
-        <!-- Its own process: a native abort in the engine must take down the
-             tunnel, not the Flutter UI that can report and retry it. State
-             crosses back over package-scoped broadcasts (see the bridge). -->
+        <!-- One process, on purpose: the engine, this service and the Flutter UI
+             share it. There is no binder to a second process that can die while
+             the UI keeps trying to reach it, so "the service never answered"
+             is not a state that can exist. A native abort takes the app down,
+             which Android relaunches normally, instead of leaving a background
+             process the app can neither see nor restart. -->
         <service
             android:name=".LibboxVpnService"
             android:exported="false"
-            android:process=":vpn"
-            android:foregroundServiceType="specialUse"
+            android:foregroundServiceType="systemExempted"
             android:permission="android.permission.BIND_VPN_SERVICE">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="vpn" />
         </service>
     </application>
 </manifest>

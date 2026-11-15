@@ -1,25 +1,12 @@
 package com.strictproxy.libbox_bridge
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
-import android.os.Bundle
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
-import android.os.Message
-import android.os.Messenger
-import android.os.RemoteException
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import io.nekohasekai.libbox.BridgeOptions
 import io.nekohasekai.libbox.BridgeSession
-import io.nekohasekai.libbox.CommandServer
-import io.nekohasekai.libbox.CommandServerHandler
 import io.nekohasekai.libbox.ConnectionOwner
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.Libbox
@@ -28,17 +15,13 @@ import io.nekohasekai.libbox.NeighborUpdateListener
 import io.nekohasekai.libbox.NetworkInterface
 import io.nekohasekai.libbox.NetworkInterfaceIterator
 import io.nekohasekai.libbox.Notification as LibboxNotification
-import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.PlatformInterface
 import io.nekohasekai.libbox.PlatformUser
 import io.nekohasekai.libbox.RoutePrefixIterator
-import io.nekohasekai.libbox.SetupOptions
 import io.nekohasekai.libbox.ShellSession
 import io.nekohasekai.libbox.StringIterator
-import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
-import java.io.File
 import java.net.InterfaceAddress
 import java.net.NetworkInterface as AndroidNetworkInterface
 
@@ -46,57 +29,29 @@ import java.net.NetworkInterface as AndroidNetworkInterface
  * Foreground Android VPN service, bound to the engine's generated Java API.
  *
  * The libbox classes are a compile dependency (`libs/libbox-classes.jar`, built
- * from the pinned commit by `tool/build-libbox-aar.sh`), so an engine upgrade
- * that renames a callback or changes a signature fails the build here instead of
- * failing at runtime inside a `:vpn` process that Android then refuses to
- * restart. That is why this file implements the engine's interfaces directly
- * rather than answering them through reflection: [PlatformInterface] gained
- * seven callbacks and [TunOptions] replaced `getDNSServerAddress`'s StringBox
- * with an iterator between the previous artifact and the pin, and reflection
- * silently answered both with `null`. A null iterator is dereferenced in native
- * code and aborts the process.
+ * from the pinned commit by `tool/build-libbox.sh`), so an engine upgrade that
+ * renames a callback or changes a signature fails the build here instead of
+ * failing at runtime inside the tunnel. That is why this file implements the
+ * engine's interfaces directly rather than answering them through reflection.
  *
- * ## Lifetime
+ * ## One process
  *
- * The service outlives a single tunnel. Exactly one [CommandServer] is created
- * per process and every later connect goes through [CommandServer.startOrReloadService];
- * only `closeService()` is called on disconnect, never `close()`. The earlier
- * design created a server per connect and called `stopSelf()` on every
- * disconnect, which meant every reconnect re-entered the least-tested libbox
- * entry point in a brand-new process — and any native abort there makes Android
- * mark `:vpn` as a bad process and refuse to launch it again, so one failure
- * became permanent until the user force-stopped the app.
+ * This service, the engine and the Flutter UI share the app process. The
+ * previous design ran the service in `:vpn` and talked to it over a `Messenger`
+ * binder, which needed a timeout to decide whether that process had launched at
+ * all — and that guess is what told users "Android blocked the VPN service"
+ * after an engine crash. With one process there is nothing to be unreachable:
+ * [BoxRunner] publishes to [BoxStatus] and the plugin forwards it to Dart. If
+ * the engine aborts natively the app dies with it and Android relaunches it
+ * normally on the next connect, instead of the app kept talking to a process
+ * the system had given up on.
  *
- * State crosses to the app over a [Messenger] binder rather than package-scoped
- * broadcasts: binder death is immediate and unambiguous, where a broadcast
- * design has to infer death from missing heartbeats.
+ * Android's own client for this engine (`sing-box-for-android`) is laid out the
+ * same way, for the same reason.
  */
-class LibboxVpnService : VpnService(), PlatformInterface, CommandServerHandler {
+class LibboxVpnService : VpnService(), PlatformInterface {
     companion object {
         private const val TAG = "StrictProxyLibbox"
-        private const val ACTION_START = "com.strictproxy.libbox.START"
-        private const val ACTION_STOP = "com.strictproxy.libbox.STOP"
-        private const val EXTRA_CONFIG = "config"
-        private const val CHANNEL_ID = "strict_proxy_vpn"
-        private const val NOTIFICATION_ID = 48118
-
-        /** App -> service: stop the tunnel, keep the process and the engine. */
-        const val MESSAGE_STOP = 1
-
-        /** App -> service: what are you doing? Answered with [MESSAGE_STATE]. */
-        const val MESSAGE_SYNC = 2
-
-        /** Service -> app: the state carried in [EXTRA_STATE] and [EXTRA_MESSAGE]. */
-        const val MESSAGE_STATE = 3
-
-        const val EXTRA_STATE = "state"
-        const val EXTRA_MESSAGE = "message"
-
-        /**
-         * `Libbox.setup` may run once per process: the Go side keeps global
-         * state and aborts the process if it is initialised again.
-         */
-        private var enginePrepared = false
 
         /**
          * Whether the engine is packaged with this APK.
@@ -109,352 +64,54 @@ class LibboxVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
         fun start(context: Context, config: String) {
             val intent = Intent(context, LibboxVpnService::class.java)
-                .setAction(ACTION_START)
-                .putExtra(EXTRA_CONFIG, config)
+                .putExtra(BoxRunner.EXTRA_CONFIG, config)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
             else context.startService(intent)
         }
 
+        /**
+         * Stops the tunnel.
+         *
+         * A broadcast rather than a service intent on purpose: a broadcast
+         * reaches a running service without starting one, so a stop sent while
+         * nothing is running cannot cold-start a process to tell it to stop.
+         */
         fun stop(context: Context) {
-            context.startService(Intent(context, LibboxVpnService::class.java).setAction(ACTION_STOP))
+            context.sendBroadcast(Intent(BoxRunner.ACTION_STOP).setPackage(context.packageName))
         }
     }
 
-    /** The binder the app process talks to; alive for as long as this process. */
-    private val serviceMessenger = Messenger(ServiceHandler())
-    private var clientMessenger: Messenger? = null
-
-    /**
-     * The one CommandServer this process will ever create. Held across connects
-     * on purpose: see the lifetime note on the class.
-     */
-    private var commandServer: CommandServer? = null
-
-    private var engineRunning = false
-    private var lastConfig: String? = null
-    private var currentState = "disconnected"
-    private var currentMessage: String? = null
-    private var foreground = false
-
-    /** Handles what the app process asks of this service. */
-    private inner class ServiceHandler : Handler(Looper.getMainLooper()) {
-        override fun handleMessage(msg: Message) {
-            when (msg.what) {
-                MESSAGE_STOP -> stopBox()
-                MESSAGE_SYNC -> {
-                    msg.replyTo?.let { clientMessenger = it }
-                    sendState()
-                }
-            }
-        }
-    }
+    private lateinit var runner: BoxRunner
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        runner = BoxRunner(this, this)
+        runner.create()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> stopBox()
-            ACTION_START -> {
-                val config = intent.getStringExtra(EXTRA_CONFIG)
-                when {
-                    config.isNullOrBlank() -> fail("missing libbox configuration")
-                    // A foreground service may only be announced here: the start
-                    // request is the one moment Android allows it, and this is
-                    // the only entry point that arrives from startForegroundService.
-                    !enterForeground() -> fail("Android refused the VPN foreground service")
-                    else -> startBox(config)
-                }
-            }
-            // The system can restart a killed service with no intent. There is no
-            // configuration to rebuild from, so there is nothing to do.
-            else -> Unit
+        // The system can restart a killed service with no intent. There is no
+        // configuration to rebuild from, so there is nothing to do.
+        val config = intent?.getStringExtra(BoxRunner.EXTRA_CONFIG)
+        if (config == null) {
+            stopSelf()
+            return START_NOT_STICKY
         }
-        // The tunnel's lifetime is owned by the app's explicit start/stop, not by
-        // whether this service happens to be running.
+        runner.begin(config)
+        // The tunnel's lifetime is owned by the app's explicit start/stop, not
+        // by whether this service happens to be running.
         return START_NOT_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? = serviceMessenger.binder
-
     override fun onRevoke() {
-        // Another VPN app took over, or consent was withdrawn in Settings. The
-        // tun device is already gone, so the engine cannot be asked to close it
-        // politely; what matters is that the app stops claiming to be connected.
-        closeBox()
-        lastConfig = null
-        leaveForeground()
-        emitState("error", "Another app took over the VPN, so StrictProxy stopped. Turn StrictProxy back on to reconnect.")
+        runner.revoke()
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        // The process is going away, so the engine cannot be reused: drop the
-        // server as well as its service.
-        closeBox()
-        runCatching { commandServer?.close() }
-        commandServer = null
-        leaveForeground()
-        emitState("disconnected")
+        runner.destroy()
         super.onDestroy()
     }
-
-    // ---------------------------------------------------------------------
-    // Tunnel lifecycle
-    // ---------------------------------------------------------------------
-
-    private fun startBox(config: String) {
-        // A start while the same configuration is already up has nothing to do,
-        // but it still has to answer: the app waits for a state and would
-        // otherwise mistake the silence for a service that never launched.
-        if (engineRunning && config == lastConfig) {
-            emitState("connected")
-            return
-        }
-        emitState("connecting")
-        try {
-            val server = commandServer ?: newCommandServer()
-            // A different configuration (another node, for instance) is applied
-            // in place: the tun device and the Go runtime stay up.
-            server.startOrReloadService(config, OverrideOptions())
-            engineRunning = true
-            lastConfig = config
-            emitState("connected")
-        } catch (error: Throwable) {
-            lastConfig = null
-            closeBox()
-            val cause = generateSequence(error) { it.cause }.last()
-            fail(cause.message ?: "libbox failed to start")
-        }
-    }
-
-    /**
-     * Creates the process-wide command server and starts its control listener.
-     *
-     * `start()` binds the command socket once; every later connect only reloads
-     * the service through [CommandServer.startOrReloadService].
-     */
-    private fun newCommandServer(): CommandServer {
-        prepareEngine()
-        val server = Libbox.newCommandServer(this, this)
-        server.start()
-        commandServer = server
-        return server
-    }
-
-    private fun stopBox() {
-        // Also clears a notification left behind by a start that failed after
-        // the service had already announced itself as foreground.
-        leaveForeground()
-        if (!engineRunning) {
-            lastConfig = null
-            emitState("disconnected")
-            return
-        }
-        emitState("disconnecting")
-        closeBox()
-        lastConfig = null
-        emitState("disconnected")
-    }
-
-    /**
-     * Ends the current tunnel but keeps this process, the engine and its command
-     * server alive. Nothing here calls `stopSelf()`: a live process is the one
-     * thing that prevents the "process is bad" state from making every later
-     * connect fail.
-     */
-    private fun closeBox() {
-        try {
-            commandServer?.closeService()
-        } catch (error: Throwable) {
-            Log.w(TAG, "libbox closeService failed", error)
-        }
-        engineRunning = false
-    }
-
-    /**
-     * `SetupOptions` carries the writable directories libbox needs before any
-     * service exists, plus the values the engine reports in its own logs.
-     */
-    private fun prepareEngine() {
-        if (enginePrepared) return
-        val options = SetupOptions()
-        val files = filesDir.absolutePath
-        options.setBasePath(files)
-        options.setWorkingPath(File(files, "libbox").apply { mkdirs() }.absolutePath)
-        options.setTempPath(File(cacheDir, "libbox").apply { mkdirs() }.absolutePath)
-        options.setLogMaxLines(300)
-        options.setFixAndroidStack(true)
-        val version = appVersion()
-        options.setAppVersion(version)
-        options.setAppMarketingVersion(version)
-        Libbox.setup(options)
-        enginePrepared = true
-    }
-
-    private fun appVersion(): String = runCatching {
-        packageManager.getPackageInfo(packageName, 0).versionName ?: "0.1.0"
-    }.getOrDefault("0.1.0")
-
-    private fun fail(message: String) {
-        Log.e(TAG, message)
-        lastConfig = null
-        val announced = foreground
-        leaveForeground()
-        emitState("error", message)
-        if (!announced) {
-            // A startForegroundService request that never reaches
-            // startForeground is an ANR the system will charge to this process
-            // within seconds. Stopping is the only way out of it, and nothing is
-            // running yet, so nothing is lost by doing it here.
-            stopSelf()
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // State reporting
-    // ---------------------------------------------------------------------
-
-    private fun emitState(state: String, message: String? = null) {
-        currentState = state
-        currentMessage = message
-        sendState()
-        updateNotification()
-    }
-
-    /**
-     * Sends the current state to the app. A missing receiver is normal: this
-     * class lives in `:vpn` while the Flutter engine lives in the main process,
-     * and the app asks for a sync (and therefore the current state) after it
-     * binds.
-     */
-    private fun sendState() {
-        val messenger = clientMessenger ?: return
-        val message = Message.obtain(null, MESSAGE_STATE)
-        message.data = Bundle().apply {
-            putString(EXTRA_STATE, currentState)
-            currentMessage?.let { putString(EXTRA_MESSAGE, it) }
-        }
-        try {
-            messenger.send(message)
-        } catch (error: RemoteException) {
-            // The app process is gone. The tunnel is not: it keeps running and
-            // the next bind asks for the state again.
-            clientMessenger = null
-            Log.w(TAG, "state receiver went away", error)
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // Notification
-    // ---------------------------------------------------------------------
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "StrictProxy VPN", NotificationManager.IMPORTANCE_LOW),
-            )
-        }
-    }
-
-    /**
-     * Announces the service as foreground.
-     *
-     * Returns false instead of throwing: an FGS start Android refuses is a real
-     * connect failure, and reporting it as a state the app can show is better
-     * than an exception in `onStartCommand`, which the platform turns into a
-     * crash and, for this process, a "process is bad" refusal on every retry.
-     */
-    private fun enterForeground(): Boolean = try {
-        startForeground(NOTIFICATION_ID, notification())
-        foreground = true
-        true
-    } catch (error: Throwable) {
-        Log.e(TAG, "startForeground failed", error)
-        false
-    }
-
-    private fun leaveForeground() {
-        if (!foreground) return
-        foreground = false
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-        }
-    }
-
-    private fun updateNotification() {
-        if (!foreground) return
-        runCatching {
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
-        }
-    }
-
-    private fun notification() = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.stat_sys_warning)
-        .setContentTitle("StrictProxy")
-        .setContentText(notificationText())
-        .setStyle(NotificationCompat.BigTextStyle().bigText(notificationText()))
-        .setOngoing(true)
-        .setOnlyAlertOnce(true)
-        .setContentIntent(launchIntent())
-        .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent())
-        .build()
-
-    private fun notificationText(): String = when (currentState) {
-        "connecting" -> "Connecting to the VPN…"
-        "connected" -> "VPN connection active"
-        "disconnecting" -> "Disconnecting…"
-        "error" -> currentMessage ?: "The VPN stopped"
-        else -> "Not connected"
-    }
-
-    private fun launchIntent(): PendingIntent? = packageManager.getLaunchIntentForPackage(packageName)?.let {
-        PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-    }
-
-    private fun stopIntent(): PendingIntent = PendingIntent.getService(
-        this,
-        1,
-        Intent(this, LibboxVpnService::class.java).setAction(ACTION_STOP),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-    )
-
-    // ---------------------------------------------------------------------
-    // CommandServerHandler: what libbox asks the host app to do
-    // ---------------------------------------------------------------------
-
-    override fun serviceStop() {
-        stopBox()
-    }
-
-    /** The engine reloads itself; nothing for the host to do. */
-    override fun serviceReload() = Unit
-
-    /** Android has no system-wide proxy to report, so it is always disabled. */
-    override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus().apply {
-        setAvailable(false)
-        setEnabled(false)
-    }
-
-    override fun setSystemProxyEnabled(enabled: Boolean) = Unit
-
-    override fun triggerNativeCrash() {
-        Log.e(TAG, "libbox asked for a native crash")
-    }
-
-    override fun writeDebugMessage(message: String) {
-        Log.d(TAG, message)
-    }
-
-    /** SSH agents are not implemented; the engine asks only when configured. */
-    override fun connectSSHAgent(): Int = 0
 
     // ---------------------------------------------------------------------
     // PlatformInterface: what libbox calls to reach the device
@@ -464,60 +121,78 @@ class LibboxVpnService : VpnService(), PlatformInterface, CommandServerHandler {
      * Protects a socket the engine opened so its own traffic does not re-enter
      * the tunnel it just created.
      *
-     * Throwing is correct: the Go side turns the error into a failed connection.
-     * Returning quietly would leave that socket looping through the tunnel.
+     * Logged rather than thrown: the engine treats an exception from a platform
+     * callback as a failed connection, and a socket that cannot be protected is
+     * usually a transient state change, not a reason to tear the tunnel down.
      */
     override fun autoDetectInterfaceControl(fd: Int) {
-        if (!protect(fd)) throw IllegalStateException("VpnService.protect($fd) failed")
+        if (!protect(fd)) Log.w(TAG, "VpnService.protect($fd) failed")
     }
 
     override fun openTun(options: TunOptions): Int {
+        // Consent lives in the app process, but the check is cheap and a
+        // service started without it has no permission to establish anything.
+        if (prepare(this) != null) error("android: missing vpn permission")
+
         val builder = Builder().setSession("StrictProxy")
         val mtu = options.getMTU()
         if (mtu > 0) builder.setMtu(mtu)
-        addAddresses(builder, options.getInet4Address())
-        addAddresses(builder, options.getInet6Address())
-        // Scoped IPv6 addresses carry a `%wlan0` suffix that a sing-box prefix
-        // parser rejects, so the interface part is dropped.
-        val dns = options.getDNSServerAddress()
-        while (dns.hasNext()) {
-            val server = dns.next().substringBefore('%')
-            if (server.isNotBlank()) builder.addDnsServer(server)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
+
+        val inet4 = prefixes { options.getInet4Address() }
+        val inet6 = prefixes { options.getInet6Address() }
+        for (prefix in inet4) builder.addAddress(prefix.address, prefix.prefix)
+        for (prefix in inet6) builder.addAddress(prefix.address, prefix.prefix)
+
         if (options.getAutoRoute()) {
-            addRoutes(builder, options.getInet4RouteAddress(), "0.0.0.0")
-            addRoutes(builder, options.getInet6RouteAddress(), "::")
+            // The generated DNS getter throws when the engine has DNS disabled,
+            // which is why its iterator is collected defensively.
+            for (server in TunPlan.dnsServers(strings { options.getDNSServerAddress() })) {
+                builder.addDnsServer(server)
+            }
+            for (route in TunPlan.routes(prefixes { options.getInet4RouteAddress() }, "0.0.0.0", inet4.isNotEmpty())) {
+                builder.addRoute(route.address, route.prefix)
+            }
+            for (route in TunPlan.routes(prefixes { options.getInet6RouteAddress() }, "::", inet6.isNotEmpty())) {
+                builder.addRoute(route.address, route.prefix)
+            }
         }
+
         val descriptor = builder.establish() ?: error("VpnService.Builder.establish returned null")
         // The descriptor is handed to libbox, which owns it from here on: the
         // engine closes it when the tun endpoint closes, including on reload.
         // Keeping the ParcelFileDescriptor as well and closing it here would
-        // close an fd native code is still reading — a double close, and a crash.
+        // close an fd native code is still reading.
         return descriptor.detachFd()
     }
 
-    private fun addAddresses(builder: Builder, prefixes: RoutePrefixIterator) {
-        while (prefixes.hasNext()) {
-            val prefix = prefixes.next()
-            builder.addAddress(prefix.address(), prefix.prefix())
+    /**
+     * Addresses or routes the engine reported for one family.
+     *
+     * An exception or a short list is survivable (the default-route fallback
+     * covers it); a null iterator reaching Go is not.
+     */
+    private fun prefixes(iterator: () -> RoutePrefixIterator): List<TunPlan.Prefix> = runCatching {
+        val source = iterator()
+        val result = ArrayList<TunPlan.Prefix>()
+        while (source.hasNext()) {
+            val prefix = source.next()
+            result.add(TunPlan.Prefix(prefix.address(), prefix.prefix()))
         }
+        result
+    }.getOrElse {
+        Log.w(TAG, "libbox reported no addresses or routes for this family", it)
+        emptyList()
     }
 
-    /**
-     * Adds the engine's routes, or a default route when it asked for none.
-     *
-     * An empty iterator with `auto_route` would otherwise leave the tunnel
-     * without a route and the connection would come up dead.
-     */
-    private fun addRoutes(builder: Builder, prefixes: RoutePrefixIterator, fallback: String) {
-        if (!prefixes.hasNext()) {
-            builder.addRoute(fallback, 0)
-            return
-        }
-        while (prefixes.hasNext()) {
-            val prefix = prefixes.next()
-            builder.addRoute(prefix.address(), prefix.prefix())
-        }
+    private fun strings(iterator: () -> StringIterator): List<String> = runCatching {
+        val source = iterator()
+        val result = ArrayList<String>()
+        while (source.hasNext()) result.add(source.next())
+        result
+    }.getOrElse {
+        // DNS disabled: the generated getter refuses to hand back an iterator.
+        emptyList()
     }
 
     /**

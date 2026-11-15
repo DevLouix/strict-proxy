@@ -91,10 +91,11 @@ class MainActivity : FlutterActivity() {
      * package, so the next launch reports it through the same crash endpoint the
      * dashboard already lists.
      *
-     * The engine runs in `:vpn`, and a crash there is the failure the app has to
-     * learn from, so it wins over a crash of the UI process. The tombstone head
-     * travels with the report: without it a native abort is only ever "the engine
-     * crashed", with no signal and no aborting frame to act on.
+     * The engine shares this process, so a native abort is recorded against this
+     * package and is indistinguishable from a Dart crash except by its reason
+     * (`crash_native`). The tombstone head travels with the report: without it a
+     * native abort is only ever "the app crashed", with no signal and no
+     * aborting frame to act on.
      *
      * Read reflectively because `ApplicationExitInfo` and its accessors only exist
      * from API 30 while this host also compiles for older platforms. Null means
@@ -114,7 +115,7 @@ class MainActivity : FlutterActivity() {
                 .invoke(manager, packageName, 0, EXIT_HISTORY) as? List<*> ?: return null
             // Newest first, as Android returns them.
             val crashes = exits.mapNotNull { info -> info?.let { exitOf(it) } }
-            (crashes.firstOrNull { it.process.endsWith(":vpn") } ?: crashes.firstOrNull())?.toMap()
+            crashes.firstOrNull()?.toMap()
         } catch (_: Throwable) {
             // Reading exit history is diagnostics, never a reason to fail a launch.
             null

@@ -135,11 +135,12 @@ jobs:
           restore-keys: |
             gradle-bridge-${{ runner.os }}-
 
-      # The start/stop rules are Kotlin, so only Gradle can exercise them. The
-      # host project above is what makes the plugin module buildable, and
+      # The tun rules are Kotlin, so only Gradle can exercise them. The host
+      # project above is what makes the plugin module buildable, and
       # `--config-only` writes the Gradle files without producing an APK — the
       # artifact jobs already own that build. No emulator, no Robolectric: the
-      # rules are pure Kotlin, and `ServiceLatchTest` checks them directly.
+      # rules are pure Kotlin, and `TunPlanTest` checks them directly. This step
+      # also compiles the service, which is what fails on an engine API change.
       - name: Run the Android bridge unit tests
         working-directory: apps/client
         run: |

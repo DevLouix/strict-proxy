@@ -146,9 +146,10 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                               style: theme.textTheme.bodyMedium
                                   ?.copyWith(fontWeight: FontWeight.w600),
                             ),
-                            // Which process died: the engine runs in `:vpn`, so
-                            // this is what separates a tunnel crash from the UI
-                            // process being killed.
+                            // Which process died. The engine shares the app's
+                            // process, so a native abort shows up here as
+                            // `crash_native` against this package rather than a
+                            // separate `:vpn` process.
                             if ((exit['process'] as String?)?.trim().isNotEmpty ?? false)
                               Text(
                                 (exit['process'] as String).trim(),
