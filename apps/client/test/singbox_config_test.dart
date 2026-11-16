@@ -82,6 +82,29 @@ void main() {
     expect(inbound['address'], hasLength(2), reason: 'IPv6 must stay in the tunnel, not leak');
   });
 
+  // The device's DNS arrives at the tunnel as plain UDP:53, which the VLESS
+  // Vision outbound cannot carry. Without interception every app on the device
+  // fails its first lookup while the tunnel still reports connected.
+  test('hijacks DNS so lookups use the configured resolver', () {
+    for (final compat in [false, true]) {
+      final route =
+          buildSingBoxTunConfig(endpoint(), compat: compat)['route'] as Map<String, dynamic>;
+      final rules = (route['rules'] as List).cast<Map<String, dynamic>>();
+
+      expect(
+        rules.any((rule) => rule['action'] == 'sniff'),
+        isTrue,
+        reason: 'protocol matching needs sniffing, compat=$compat',
+      );
+      expect(
+        rules.any((rule) => rule['protocol'] == 'dns' && rule['action'] == 'hijack-dns'),
+        isTrue,
+        reason: 'unhijacked DNS dies in the proxy outbound, compat=$compat',
+      );
+      expect(route['final'], 'proxy');
+    }
+  });
+
   test('the normal datapath keeps the system stack', () {
     final inbound =
         (buildSingBoxTunConfig(endpoint())['inbounds'] as List).first as Map<String, dynamic>;

@@ -3,16 +3,12 @@ package com.strictproxy.libbox_bridge
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import io.nekohasekai.libbox.CommandServer
 import io.nekohasekai.libbox.CommandServerHandler
 import io.nekohasekai.libbox.Libbox
@@ -71,32 +67,21 @@ internal class BoxRunner(
     private var running = false
     private var lastConfig: String? = null
     private var foreground = false
-    private var receiverRegistered = false
 
-    private val receiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_STOP) stop()
-        }
-    }
+    /**
+     * Set when a stop was requested, so a start still running on [worker] cannot
+     * bring the tunnel back up after the user asked for it to go down.
+     */
+    @Volatile private var stopRequested = false
 
     fun create() {
         createNotificationChannel()
-        if (!receiverRegistered) {
-            // Not exported: only this app can stop its own tunnel, and a
-            // package-scoped broadcast reaches a running service without
-            // starting one that is not running.
-            ContextCompat.registerReceiver(
-                service,
-                receiver,
-                IntentFilter(ACTION_STOP),
-                ContextCompat.RECEIVER_NOT_EXPORTED,
-            )
-            receiverRegistered = true
-        }
     }
 
     /** A start intent arrived. */
     fun begin(config: String?) {
+        // An explicit start is newer than any stop still in flight.
+        stopRequested = false
         if (config.isNullOrBlank()) {
             fail("missing libbox configuration")
             return
@@ -120,11 +105,19 @@ internal class BoxRunner(
     }
 
     private fun startEngine(config: String) {
+        if (stopRequested) return
         try {
             val server = commandServer ?: newCommandServer()
             // A different configuration (another node, for instance) is applied
             // in place: the tun device and the Go runtime stay up.
             server.startOrReloadService(config, OverrideOptions())
+            // A disconnect that arrived while the engine was starting wins: the
+            // user asked for the tunnel to be down, not to come back. Publishing
+            // CONNECTED here would also overwrite the state the UI already left.
+            if (stopRequested) {
+                closeService()
+                return
+            }
             running = true
             lastConfig = config
             publish(BoxStatus.CONNECTED)
@@ -176,16 +169,22 @@ internal class BoxRunner(
         service.packageManager.getPackageInfo(service.packageName, 0).versionName ?: "0.1.0"
     }.getOrDefault("0.1.0")
 
-    /** User asked to disconnect, from the app or the notification. */
+    /**
+     * User asked to disconnect, from the app or the notification.
+     *
+     * The visible teardown happens before and independently of the engine: the
+     * notification and the service have to go away even if closing the engine is
+     * slow or stuck. The engine is closed by [destroy] when the service stops,
+     * rather than before `stopSelf`, so a close that never returns cannot keep
+     * the tunnel (and the device's traffic) up.
+     */
     fun stop() {
-        worker.execute {
-            closeService()
-            lastConfig = null
-            main.post {
-                leaveForeground()
-                publish(BoxStatus.DISCONNECTED)
-                service.stopSelf()
-            }
+        stopRequested = true
+        lastConfig = null
+        main.post {
+            leaveForeground()
+            publish(BoxStatus.DISCONNECTED)
+            service.stopSelf()
         }
     }
 
@@ -206,18 +205,27 @@ internal class BoxRunner(
     }
 
     fun destroy() {
-        if (receiverRegistered) {
-            runCatching { service.unregisterReceiver(receiver) }
-            receiverRegistered = false
-        }
-        closeService()
-        // The process is going away with this instance, so the engine goes with
-        // it: a command server created for this service cannot be reused by the
-        // next one, which builds its own.
-        runCatching { commandServer?.close() }
-        commandServer = null
-        worker.shutdownNow()
+        stopRequested = true
+        running = false
+        // Main-thread work first: the notification must not outlive the stop.
         leaveForeground()
+        publish(BoxStatus.DISCONNECTED)
+        // Closing the engine can wait on the Go side, and blocking `onDestroy` is
+        // an ANR at exactly the moment the tunnel is supposed to disappear. The
+        // worker is drained instead of interrupted so the queued close still runs.
+        // A command server created for this service cannot be reused by the next
+        // one, which builds its own.
+        val closing = commandServer
+        commandServer = null
+        runCatching {
+            worker.execute {
+                runCatching { closing?.closeService() }
+                    .onFailure { Log.w(TAG, "libbox closeService failed", it) }
+                runCatching { closing?.close() }
+                    .onFailure { Log.w(TAG, "libbox command server close failed", it) }
+            }
+            worker.shutdown()
+        }
     }
 
     /**
@@ -332,10 +340,15 @@ internal class BoxRunner(
         .getLaunchIntentForPackage(service.packageName)
         ?.let { PendingIntent.getActivity(service, 0, it, pendingFlags or PendingIntent.FLAG_UPDATE_CURRENT) }
 
-    private fun stopIntent(): PendingIntent = PendingIntent.getBroadcast(
+    /**
+     * The notification's Stop action. A service intent, not a broadcast: the
+     * service receives it through `onStartCommand` whether or not a runtime
+     * receiver happens to be registered in this process.
+     */
+    private fun stopIntent(): PendingIntent = PendingIntent.getService(
         service,
         1,
-        Intent(ACTION_STOP).setPackage(service.packageName),
+        Intent(service, LibboxVpnService::class.java).setAction(ACTION_STOP),
         pendingFlags or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 

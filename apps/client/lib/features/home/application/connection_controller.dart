@@ -81,6 +81,16 @@ Map<String, dynamic> buildSingBoxTunConfig(
       ],
       'route': {
         'auto_detect_interface': true,
+        // DNS has to be answered by the engine, not proxied as-is. The device's
+        // queries reach the tunnel as plain UDP:53; the final outbound is VLESS
+        // with the Vision flow, which carries no UDP at all, so without these
+        // two rules every app on the device times out on its first lookup while
+        // the tunnel still reports connected. `sniff` is what lets the
+        // `protocol: dns` matcher below recognise a query at all.
+        'rules': [
+          {'action': 'sniff'},
+          {'protocol': 'dns', 'action': 'hijack-dns'},
+        ],
         'final': 'proxy',
       },
     };

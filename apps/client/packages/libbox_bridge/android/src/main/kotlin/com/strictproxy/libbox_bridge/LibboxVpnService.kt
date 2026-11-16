@@ -72,14 +72,17 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         }
 
         /**
-         * Stops the tunnel.
+         * Stops the tunnel and the service.
          *
-         * A broadcast rather than a service intent on purpose: a broadcast
-         * reaches a running service without starting one, so a stop sent while
-         * nothing is running cannot cold-start a process to tell it to stop.
+         * `stopService` and not a broadcast: the system tears the service down,
+         * so `onDestroy` runs even if this process is busy or the engine is
+         * wedged, and the notification and the tun go with it. A broadcast only
+         * reached a receiver that had to still be registered and alive in this
+         * process, which is why Disconnect could leave the tunnel and its
+         * notification running.
          */
         fun stop(context: Context) {
-            context.sendBroadcast(Intent(BoxRunner.ACTION_STOP).setPackage(context.packageName))
+            context.stopService(Intent(context, LibboxVpnService::class.java))
         }
     }
 
@@ -92,6 +95,12 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The notification's Stop action is an intent rather than a broadcast, so
+        // it cannot be lost for want of a registered receiver.
+        if (intent?.action == BoxRunner.ACTION_STOP) {
+            runner.stop()
+            return START_NOT_STICKY
+        }
         // The system can restart a killed service with no intent. There is no
         // configuration to rebuild from, so there is nothing to do.
         val config = intent?.getStringExtra(BoxRunner.EXTRA_CONFIG)
