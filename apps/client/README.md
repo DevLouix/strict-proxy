@@ -111,5 +111,9 @@ flutter analyze
 flutter test
 ```
 
+The full local loop — prerequisites, the native engine, an emulator APK, the
+Kotlin bridge tests and the logcat checks for a real tunnel — is in
+[`docs/BUILD-AND-TEST.md`](../../docs/BUILD-AND-TEST.md).
+
 Tests load `test/canonical_fixtures.json` at runtime (JSON cannot be imported
 as a Dart library) and run from the package root, so paths are relative.

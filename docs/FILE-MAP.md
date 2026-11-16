@@ -181,6 +181,7 @@ Consequences worth memorising:
 | [SETUP.md](../SETUP.md) | You want a step-by-step from a blank server, including the admin dashboard tour |
 | [DOKPLOY.md](DOKPLOY.md) | You host on Dokploy |
 | [BACKUP.md](BACKUP.md) | You are backing up, restoring, or moving a deployment |
+| [BUILD-AND-TEST.md](BUILD-AND-TEST.md) | You are building or testing the client locally (no CI, no phone) |
 | [RELEASE-CLIENT.md](RELEASE-CLIENT.md) | You are about to hand an APK to users |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | You want to understand trust boundaries, data model, and known gaps |
 | This page | You are unsure which file to edit |
