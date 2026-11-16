@@ -2,6 +2,7 @@ package com.strictproxy.libbox_bridge
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.util.Log
@@ -22,6 +23,7 @@ import io.nekohasekai.libbox.ShellSession
 import io.nekohasekai.libbox.StringIterator
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
+import java.net.InetSocketAddress
 import java.net.InterfaceAddress
 import java.net.NetworkInterface as AndroidNetworkInterface
 
@@ -293,13 +295,55 @@ class LibboxVpnService : VpnService(), PlatformInterface {
 
     override fun closeNeighborMonitor(listener: NeighborUpdateListener) = Unit
 
+    /**
+     * Resolves which app owns a connection passing through the tunnel.
+     *
+     * Never returns null. The engine asks this for every tunnelled connection —
+     * `UsePlatformConnectionOwnerFinder` is hardcoded to true in the engine's Go
+     * wrapper — and then reads the fields off the result there. A null here is a
+     * nil-pointer panic that aborts the whole app (SIGABRT, Go `panic: runtime
+     * error: invalid memory address` in `platformInterfaceWrapper.
+     * FindConnectionOwner`) as soon as the tunnel carries its first packet, so
+     * an unknown owner is reported with a negative uid instead.
+     */
     override fun findConnectionOwner(
         ipProtocol: Int,
         sourceAddress: String,
         sourcePort: Int,
         destinationAddress: String,
         destinationPort: Int,
-    ): ConnectionOwner? = null
+    ): ConnectionOwner {
+        val owner = ConnectionOwner()
+        val uid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                connectivityManager.getConnectionOwnerUid(
+                    ipProtocol,
+                    InetSocketAddress(sourceAddress, sourcePort),
+                    InetSocketAddress(destinationAddress, destinationPort),
+                )
+            }.onFailure { Log.w(TAG, "getConnectionOwnerUid failed", it) }.getOrDefault(-1)
+        } else {
+            // Before Android 10 there is no supported way to attribute a socket;
+            // the generated setters still have to be called, or Go reads an
+            // unset field and panics the same way a null would.
+            -1
+        }
+        owner.setUserId(uid)
+        owner.setUserName("")
+        owner.setProcessPath("")
+        val packages = if (uid >= 0) {
+            runCatching { packageManager.getPackagesForUid(uid)?.toList().orEmpty() }
+                .onFailure { Log.w(TAG, "getPackagesForUid($uid) failed", it) }
+                .getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+        owner.setAndroidPackageNames(Strings(packages))
+        return owner
+    }
+
+    private val connectivityManager: ConnectivityManager
+        get() = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     override fun readWIFIState(): WIFIState? = null
 
