@@ -577,3 +577,9 @@ dialog .dlg-foot { padding: 14px 18px; border-top: 1px solid var(--border); disp
 .switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch-text { display: block; }
 .switch-text strong { display: block; }
+
+/* The gate switch sits in the Client apps header, beside the served build. */
+.switch-compact { margin: 0; align-items: center; gap: 8px; }
+.switch-compact .switch-track { width: 34px; height: 20px; }
+.switch-compact .switch-knob { width: 14px; height: 14px; }
+.switch-compact input:checked + .switch-track .switch-knob { transform: translateX(14px); }

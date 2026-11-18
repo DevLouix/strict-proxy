@@ -72,12 +72,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-            if (update.hasUpdate) ...[
+            // A refused build shows the banner even when no newer build is
+            // published yet, so the warning is not hidden behind a failed check.
+            if (update.hasUpdate || update.required) ...[
               _UpdateBanner(
-                version: update.release!.version,
+                version: update.release?.version,
                 source: update.source,
                 progress: update.progress,
-                onTap: update.progress == null ? _installUpdate : null,
+                required: update.required && !update.hasUpdate,
+                message: update.requiredMessage,
+                onTap: update.progress != null
+                    ? null
+                    : update.hasUpdate
+                        ? _installUpdate
+                        : () => ref.read(updateProvider.notifier).check(force: true),
               ),
               const SizedBox(height: 20),
             ],
@@ -169,12 +177,21 @@ class _UpdateBanner extends StatelessWidget {
     required this.version,
     required this.source,
     required this.progress,
+    required this.required,
+    required this.message,
     required this.onTap,
   });
 
-  final String version;
+  /// Null when the controller refused this build but nothing is published yet.
+  final String? version;
   final String? source;
   final double? progress;
+
+  /// Outranks [source] as the explanation: it is why connecting failed.
+  final String? message;
+
+  /// True when the banner exists because the controller refused this build.
+  final bool required;
   final VoidCallback? onTap;
 
   @override
@@ -196,10 +213,15 @@ class _UpdateBanner extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Update available · v$version',
+                        version == null ? 'Update required' : 'Update available · v$version',
                         style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
                       ),
-                      if (source != null)
+                      if (message != null)
+                        Text(
+                          message!,
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
+                        )
+                      else if (source != null)
                         Text(
                           source == 'github' ? 'from GitHub releases' : 'from the update feed',
                           style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
@@ -208,7 +230,10 @@ class _UpdateBanner extends StatelessWidget {
                   ),
                 ),
                 if (progress == null)
-                  TextButton(onPressed: onTap, child: const Text('Update'))
+                  TextButton(
+                    onPressed: onTap,
+                    child: Text(version == null ? 'Check again' : 'Update'),
+                  )
                 else
                   Text('${(progress! * 100).round()}%', style: theme.textTheme.bodySmall),
               ],

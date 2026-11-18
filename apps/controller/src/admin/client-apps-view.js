@@ -23,9 +23,8 @@ export async function clientAppsView(api) {
   async function load() {
     const [releases, gateData] = await Promise.all([
       api.get('/api/v1/admin/client-apps/android/releases'),
-      // The minimum client build lives on the Settings screen; read it here too
-      // so a feed that serves a build the gate refuses is visible where builds
-      // are published, not only where the gate is configured.
+      // The gate is toggled on this screen, beside the published build; the
+      // feed and the gate are compared below so a contradiction is visible.
       api.get('/api/v1/admin/settings/client').catch(() => null),
     ]);
     data = releases;
@@ -34,6 +33,34 @@ export async function clientAppsView(api) {
       .get('/api/v1/admin/client-apps/android/crashes?limit=50')
       .catch(() => ({ crashes: [] }));
     draw(crashData.crashes ?? []);
+  }
+
+  /**
+   * Turns the client version gate on or off.
+   *
+   * On means "only the published build and newer may connect": the gate exists
+   * to retire builds, and the published build is the one users can actually
+   * install, so it is the safe minimum. The write is immediate — a switch that
+   * needs a separate Save is the old number field with extra steps.
+   */
+  async function changeGate(enabled) {
+    const publishedBuild = Number(data?.activeBuildNumber ?? 0);
+    if (enabled && publishedBuild <= 0) {
+      toast('Publish a build before turning the gate on', 'err');
+      await load();
+      return;
+    }
+    try {
+      await api.put('/api/v1/admin/settings/client', {
+        minimumBuild: enabled ? publishedBuild : 0,
+      });
+      toast(enabled
+        ? `Only build ${publishedBuild} and newer may connect`
+        : 'Client version gate off — every build may connect');
+    } catch (err) {
+      toast(err.message || 'Could not change the client version gate', 'err');
+    }
+    await load();
   }
 
   async function changeStatus(buildNumber, status) {
@@ -176,6 +203,25 @@ export async function clientAppsView(api) {
         h('div', { class: 'row' },
           h('span', { class: data?.activeBuildNumber ? 'badge active' : 'badge offline' },
             data?.activeBuildNumber ? `serving build ${data.activeBuildNumber}` : 'no build published'),
+          h('label', {
+            class: 'switch switch-compact',
+            title: minimum === null
+              ? 'Every build may connect'
+              : `Only build ${minimum} or newer may connect`,
+          },
+            h('input', {
+              type: 'checkbox',
+              id: 'client-version-gate',
+              checked: minimum !== null,
+              onChange: (event) => { void changeGate(Boolean(event.target.checked)); },
+            }),
+            h('span', { class: 'switch-track' }, h('span', { class: 'switch-knob' })),
+            h('span', { class: 'switch-text' },
+              h('strong', {}, 'Version gate'),
+              h('span', { class: 'muted small' },
+                minimum === null ? 'every build may connect' : `build ${minimum}+ may connect`),
+            ),
+          ),
           h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
         ),
       ),
@@ -194,7 +240,7 @@ export async function clientAppsView(api) {
         ? h('div', { class: 'panel' },
             h('div', { class: 'notice warn' },
               h('strong', {}, 'Published build is below the minimum client version. '),
-              `The update feed offers build ${publishedBuild}, but Settings → Client version requires build ${minimum} or newer. `,
+              `The update feed offers build ${publishedBuild}, but the client version gate requires build ${minimum} or newer. `,
               'Every device on the newest published build is refused when it connects ', 
               'and has nothing newer to update to. Publish a build at or above the ', 
               'minimum, or lower the minimum.',
@@ -207,7 +253,7 @@ export async function clientAppsView(api) {
             h('div', { class: 'notice warn' },
               h('strong', {}, 'No build is published while the client version gate is on. '),
               `Builds below ${minimum} are refused, so older installs cannot connect `,
-              'and have no update to install. Publish a build or turn the gate off.',
+              'and have no update to install. Publish a build or switch the gate off.',
             ),
           )
         : null,

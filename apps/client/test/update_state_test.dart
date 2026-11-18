@@ -16,3 +16,13 @@ void main() {
     expect(next.error, isNull);
   });
 }
+
+  test('a refusal is recorded on the state and survives a copy', () {
+    final next = const UpdateState().copyWith(
+      required: true,
+      requiredMessage: 'Update to build 80 or newer.',
+    );
+    expect(next.required, isTrue);
+    expect(next.requiredMessage, 'Update to build 80 or newer.');
+    expect(next.hasUpdate, isFalse);
+  });

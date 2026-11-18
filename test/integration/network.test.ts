@@ -315,3 +315,52 @@ test('the list verifies only against the key id the controller reports', () => {
   assert.equal(otherKey.asymmetricKeyType, 'ed25519');
   assert.notEqual(h.cfg.signingKeyId, 'other-key');
 });
+
+// ---------------------------------------------------------------------------
+// Client version gate
+// ---------------------------------------------------------------------------
+
+test('a refused build cannot fetch tunnel credentials', async () => {
+  await h.seedNode({ status: 'online' });
+  const { token } = await activeUser();
+  const admin = await h.adminToken();
+
+  // Same route the dashboard switch uses, so this pins the wiring end to end.
+  const saved = await h.request('PUT', '/api/v1/admin/settings/client', {
+    token: admin,
+    body: { minimumBuild: 80 },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+
+  try {
+    const refused = await h.request('GET', '/api/v1/network/config', {
+      token,
+      headers: { 'x-client-build': '79' },
+    });
+    assert.equal(refused.status, 426);
+    assert.equal(refused.body.code, 'CLIENT_UPDATE_REQUIRED');
+    assert.equal(refused.body.minimumBuild, 80);
+    assert.equal(refused.body.configs, undefined, 'a refused build gets no tunnel configs');
+
+    // Every APK that predates the header is exactly who the gate exists to
+    // stop, so sending nothing must not pass a `>= 0` style check.
+    const headerless = await h.request('GET', '/api/v1/network/config', { token });
+    assert.equal(headerless.status, 426);
+
+    const allowed = await h.request('GET', '/api/v1/network/config', {
+      token,
+      headers: { 'x-client-build': '80' },
+    });
+    assert.equal(allowed.status, 200);
+    assert.ok(
+      Object.keys(allowed.body.configs ?? {}).length > 0,
+      'the build at the minimum still gets its credentials',
+    );
+  } finally {
+    // platform_settings is not truncated between tests in this file.
+    await h.request('PUT', '/api/v1/admin/settings/client', {
+      token: admin,
+      body: { minimumBuild: 0 },
+    });
+  }
+});

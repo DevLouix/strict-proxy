@@ -449,11 +449,11 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     } on BundleVerificationException catch (e) {
       _fail(e.reason);
     } on ApiException catch (e) {
-      // A refused build is fixable in one tap, so ask the updater for the
-      // published release now; the home banner then offers the install instead
-      // of leaving the user with an error and no route forward.
+      // A refused build is fixable in one tap, so record the refusal and ask
+      // the updater for the published release now; the home banner then offers
+      // the install instead of leaving the user with an error and no route.
       if (e.code == 'CLIENT_UPDATE_REQUIRED') {
-        unawaited(_ref.read(updateProvider.notifier).check(force: true));
+        unawaited(_ref.read(updateProvider.notifier).requireUpdate(e.message));
       }
       _fail(_describeConnectFailure(e));
     } catch (e) {

@@ -142,7 +142,7 @@ If instead you see
 
 the APK exists only on the GitHub release: installed apps will not be offered it.
 `curl -s https://<controller>/api/v1/app/android` must report the same build
-number. Once it does, raise the minimum in **Settings → Client version** if this
+number. Once it does, turn on the gate in **Client apps** if this
 build is meant to be mandatory.
 
 ### Or in one command
@@ -428,10 +428,10 @@ build published from **Client apps** takes precedence over it.
 
 #### Requiring a minimum build
 
-An operator can retire old APKs without touching the node fleet: **Settings →
-Client version** has a **Gate client versions** switch. Off — the default —
-every build may connect. On, the minimum build number is the lowest build
-allowed to connect.
+An operator can retire old APKs without touching the node fleet: **Client apps**
+has a **Version gate** switch beside the published build. Off — the default —
+every build may connect. On, the gate requires the published build number or
+newer, which is the build users can actually install.
 
 The app sends `x-client-build` (its `APP_BUILD_NUMBER`) on every request. When
 the caller is older, `GET /api/v1/network/config` answers:

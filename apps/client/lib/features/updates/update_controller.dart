@@ -107,6 +107,8 @@ class UpdateState {
     this.error,
     this.handedToInstaller = false,
     this.source,
+    this.required = false,
+    this.requiredMessage,
   });
 
   final AppRelease? release;
@@ -126,6 +128,13 @@ class UpdateState {
   /// Where the offer came from: `controller` or `github`.
   final String? source;
 
+  /// True when the controller refused this build with
+  /// `CLIENT_UPDATE_REQUIRED`, rather than the feed merely offering a newer one.
+  final bool required;
+
+  /// The controller's own reason for refusing this build.
+  final String? requiredMessage;
+
   bool get hasUpdate => release != null && release!.buildNumber > AppVersion.buildNumber;
 
   UpdateState copyWith({
@@ -136,6 +145,8 @@ class UpdateState {
     Object? error = _unset,
     Object? handedToInstaller = _unset,
     Object? source = _unset,
+    Object? required = _unset,
+    Object? requiredMessage = _unset,
   }) =>
       UpdateState(
         release: identical(release, _unset) ? this.release : release as AppRelease?,
@@ -149,6 +160,10 @@ class UpdateState {
             ? this.handedToInstaller
             : handedToInstaller as bool,
         source: identical(source, _unset) ? this.source : source as String?,
+        required: identical(required, _unset) ? this.required : required as bool,
+        requiredMessage: identical(requiredMessage, _unset)
+            ? this.requiredMessage
+            : requiredMessage as String?,
       );
 
   static const _unset = Object();
@@ -182,7 +197,8 @@ class UpdateController extends StateNotifier<UpdateState> {
         // Nothing published on the controller. A released build still exists, so
         // fall back to the GitHub release rather than leaving the device on the
         // build it shipped with.
-        state = await _fromGitHub();
+        final next = await _fromGitHub();
+        state = next.copyWith(required: state.required, requiredMessage: state.requiredMessage);
         return;
       }
       if (res.statusCode >= 400) {
@@ -195,12 +211,32 @@ class UpdateController extends StateNotifier<UpdateState> {
         release: release,
         artifact: release.artifactFor(device?.abis ?? const <String>[]),
         source: 'controller',
+        required: state.required,
+        requiredMessage: state.requiredMessage,
       );
     } catch (_) {
       // A failed update check must never get in the way of connecting: an
-      // unreachable controller simply means "no update known".
-      state = const UpdateState();
+      // unreachable controller simply means "no update known" — but a refusal
+      // that already happened stays on screen.
+      state = UpdateState(required: state.required, requiredMessage: state.requiredMessage);
     }
+  }
+
+  /// Records that the controller refused this build (`426
+  /// CLIENT_UPDATE_REQUIRED`) and looks for the build that can replace it.
+  ///
+  /// The refusal can arrive before Home's background check has run, and the
+  /// update feed itself is not gated, so fetching here is what turns the error
+  /// into an install button.
+  Future<void> requireUpdate([String? message]) async {
+    final text = message?.trim() ?? '';
+    state = state.copyWith(
+      required: true,
+      requiredMessage: text.isEmpty
+          ? 'This build of StrictProxy can no longer connect. Update the app to continue.'
+          : text,
+    );
+    await check(force: true);
   }
 
   /// Downloads the published APK and opens the system installer.
