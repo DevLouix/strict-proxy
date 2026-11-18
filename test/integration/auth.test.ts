@@ -94,6 +94,17 @@ test('a disabled account cannot log in', async () => {
   assert.equal(res.status, 401);
 });
 
+test('signing in again on the same device replaces its seat', async () => {
+  const user = await h.seedUser('reseat@example.test');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await h.request('POST', '/api/v1/auth/login', {
+      body: { email: user.email, password: user.password, deviceId: 'release-script' },
+    });
+    assert.equal(res.status, 200, `login ${attempt}: ${JSON.stringify(res.body)}`);
+    assert.ok(res.body.accessToken);
+  }
+});
+
 test('a revoked subscription blocks login with 403', async () => {
   const user = await h.seedUser('revoked@example.test');
   await h.db.execute(`UPDATE subscriptions SET status = 'revoked' WHERE user_id = '${user.id}'`);

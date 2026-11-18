@@ -82,34 +82,41 @@ export async function issueRefreshToken(
 
   if (!deviceRow) throw new Error('failed to upsert device');
 
-  // Enforce seat limits: count distinct devices with a live refresh token.
+  // Re-authenticating on a device replaces its seat; it does not add one.
+  // Retire that device's previous token before counting capacity, otherwise a
+  // device holding the only seat (the CI publisher on a one-seat tier) looks
+  // like a new device that is over the limit and can never sign in again.
+  await db
+    .update(refreshTokens)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(refreshTokens.userId, params.userId),
+        eq(refreshTokens.deviceRowId, deviceRow.id),
+        isNull(refreshTokens.revokedAt),
+      ),
+    );
+
+  // Count the other devices that still hold a live seat.
   const activeDevices = await db
     .selectDistinct({ deviceRowId: refreshTokens.deviceRowId })
     .from(refreshTokens)
     .where(and(eq(refreshTokens.userId, params.userId), isNull(refreshTokens.revokedAt), gt(refreshTokens.expiresAt, new Date())));
 
-  if (activeDevices.length >= params.seatLimit) {
-    // Evict the stalest device(s) until we are within capacity.
+  const excess = activeDevices.length - params.seatLimit + 1;
+  if (excess > 0) {
+    // Evict the stalest other device(s) to make room for this device.
     const evictable = await db
       .select({ deviceRowId: refreshTokens.deviceRowId, lastSeen: devices.lastSeenAt })
       .from(refreshTokens)
       .innerJoin(devices, eq(devices.id, refreshTokens.deviceRowId))
       .where(and(eq(refreshTokens.userId, params.userId), isNull(refreshTokens.revokedAt), gt(refreshTokens.expiresAt, new Date())))
       .orderBy(devices.lastSeenAt);
-    const excess = activeDevices.length - params.seatLimit + 1;
-    const toEvict = evictable.slice(0, excess).map((r) => r.deviceRowId);
-    if (toEvict.includes(deviceRow.id)) {
-      // Re-authentication from an already active device should refresh its
-      // token, not evict the device itself.
-      const otherDevices = evictable.filter((r) => r.deviceRowId !== deviceRow.id);
-      if (otherDevices.length < excess) throw new Error('device_seat_limit');
-      toEvict.splice(0, toEvict.length, ...otherDevices.slice(0, excess).map((r) => r.deviceRowId));
-    }
-    for (const deviceRowId of toEvict) {
+    for (const row of evictable.slice(0, excess)) {
       await db
         .update(refreshTokens)
         .set({ revokedAt: new Date() })
-        .where(and(eq(refreshTokens.userId, params.userId), eq(refreshTokens.deviceRowId, deviceRowId), isNull(refreshTokens.revokedAt)));
+        .where(and(eq(refreshTokens.userId, params.userId), eq(refreshTokens.deviceRowId, row.deviceRowId), isNull(refreshTokens.revokedAt)));
     }
   }
 
