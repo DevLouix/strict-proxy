@@ -3,6 +3,7 @@
  */
 import { ApiClient, getSession, clearSession, setUnauthorizedHandler } from './api.js';
 import { h, mount, toast } from './dom.js';
+import { createSidebar, navIcon } from './nav.js';
 import { passwordField } from './password-toggle.js';
 import { overviewView, usersView, nodesView, enrollmentsView, paymentsView, usageView } from './views.js';
 import { settingsView } from './settings-view.js';
@@ -76,6 +77,8 @@ function loginScreen() {
 }
 
 let currentView = 'overview';
+let sidebar = null;
+let menuButton = null;
 
 async function renderView(viewId) {
   const view = VIEWS.find((v) => v.id === viewId) ?? VIEWS[0];
@@ -85,6 +88,7 @@ async function renderView(viewId) {
   if (!main) return;
 
   // Reflect the active item before awaiting data.
+  sidebar?.setActive(view.id);
   for (const el of document.querySelectorAll('.nav-item')) {
     el.classList.toggle('active', el.dataset.view === view.id);
   }
@@ -109,34 +113,101 @@ async function renderView(viewId) {
   }
 }
 
+/** Close the mobile drawer; safe to call on desktop. */
+function closeDrawer() {
+  document.body.classList.remove('nav-open');
+  menuButton?.setAttribute('aria-expanded', 'false');
+}
+
+/** Two-letter monogram for the account card. */
+function initials(email) {
+  const local = String(email ?? '').split('@')[0].replace(/[^a-zA-Z0-9]+/g, ' ').trim();
+  const parts = local.split(/\s+/).filter(Boolean);
+  const letters = parts.length > 1
+    ? (parts[0][0] ?? '') + (parts[1][0] ?? '')
+    : (parts[0] ?? '?').slice(0, 2);
+  return letters.toUpperCase();
+}
+
 function shell(email) {
-  const nav = h('nav', {},
-    ...VIEWS.map((v) => h('button', {
-      class: `nav-item${v.id === currentView ? ' active' : ''}`,
-      dataset: { view: v.id },
-      onClick: () => renderView(v.id),
-    }, v.label)),
-  );
+  const nav = createSidebar({
+    views: VIEWS,
+    activeId: currentView,
+    onNavigate: (id) => { closeDrawer(); renderView(id); },
+  });
+  sidebar = nav;
+
+  menuButton = h('button', {
+    class: 'icon-btn menu-btn',
+    type: 'button',
+    'aria-label': 'Open navigation',
+    'aria-controls': 'sidebar',
+    'aria-expanded': 'false',
+    onClick: () => {
+      const open = document.body.classList.toggle('nav-open');
+      menuButton.setAttribute('aria-expanded', String(open));
+    },
+  }, navIcon('menu', 'menu-ico'));
+
+  const signOut = async () => {
+    closeDrawer();
+    sidebar = null;
+    await api.logout();
+    await boot();
+  };
 
   mount(root,
     h('div', { class: 'shell' },
-      h('aside', { class: 'sidebar' },
-        h('div', { class: 'brand' }, h('span', { class: 'dot' }), 'StrictProxy'),
-        nav,
+      h('header', { class: 'mobile-bar' },
+        menuButton,
+        h('span', { class: 'brand-logo' }, navIcon('shield', 'brand-ico')),
+        h('span', { class: 'brand-name' }, 'StrictProxy'),
+      ),
+      h('aside', { class: 'sidebar', id: 'sidebar' },
+        h('div', { class: 'brand' },
+          h('span', { class: 'brand-logo' }, navIcon('shield', 'brand-ico')),
+          h('div', { class: 'brand-text' },
+            h('span', { class: 'brand-name' }, 'StrictProxy'),
+            h('span', { class: 'brand-sub' }, 'Control plane'),
+          ),
+        ),
+        nav.el,
         h('div', { class: 'spacer' }),
         h('div', { class: 'who' },
-          h('div', {}, email),
+          h('div', { class: 'who-id' },
+            h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(email)),
+            h('div', { style: 'min-width:0' },
+              h('span', { class: 'who-mail', title: email }, email),
+              h('span', { class: 'who-role' }, 'Administrator'),
+            ),
+          ),
           h('button', {
-            class: 'btn sm',
-            style: 'margin-top:8px',
-            onClick: async () => { await api.logout(); await boot(); },
-          }, 'Sign out'),
+            class: 'icon-btn',
+            type: 'button',
+            title: 'Sign out',
+            'aria-label': 'Sign out',
+            onClick: signOut,
+          }, navIcon('logout', 'signout-ico')),
         ),
       ),
+      h('div', { class: 'nav-backdrop', onClick: closeDrawer }),
       h('main', { class: 'main', id: 'main' }),
     ),
   );
 }
+
+document.addEventListener('keydown', (event) => {
+  const target = event.target;
+  const typing = target instanceof HTMLElement
+    && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+      || target.tagName === 'SELECT' || target.isContentEditable);
+
+  if (event.key === '/' && !typing) {
+    event.preventDefault();
+    sidebar?.focusSearch();
+  }
+  if (event.key === 'Escape') closeDrawer();
+});
 
 async function boot() {
   const session = getSession();
