@@ -323,6 +323,16 @@ body {
 }
 .panel > header h3 { margin: 0; font-size: 14px; font-weight: 600; }
 .panel .body { padding: 16px; }
+/* Some panels put warnings, copy or actions straight inside the frame instead
+   of a .body wrapper; without this their content sits flush against the border
+   and rounded corner. Direct-child selectors leave .body and full-width tables
+   (which pad their own cells) untouched. */
+.panel > p,
+.panel > .notice,
+.panel > .stack,
+.panel > .form-grid { padding: 16px; margin: 0; }
+.panel > .actions { padding: 0 16px 16px; }
+.panel > .notice + .actions { padding-top: 0; }
 
 /* ---------- tables ---------- */
 
