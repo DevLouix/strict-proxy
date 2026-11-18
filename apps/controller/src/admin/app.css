@@ -343,7 +343,23 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--surface-2); }
 td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
 td.actions { text-align: right; white-space: nowrap; }
-.table-wrap { overflow-x: auto; }
+/* Wide tables (the node fleet has ten columns) scroll sideways inside the
+   panel. The default browser scrollbar is a bright trough that breaks the dark
+   surface, so it uses the same thin, muted bar as the sidebar. */
+.table-wrap {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #2b333d transparent;
+}
+.table-wrap::-webkit-scrollbar { height: 8px; }
+.table-wrap::-webkit-scrollbar-track { background: transparent; }
+.table-wrap::-webkit-scrollbar-thumb {
+  background: #2b333d;
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
 
 .empty { padding: 34px 16px; text-align: center; color: var(--muted); }
 
