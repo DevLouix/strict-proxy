@@ -47,6 +47,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         title: const Text('StrictProxy'),
         actions: [
           IconButton(
+            tooltip: 'Links',
+            icon: const Icon(Icons.language),
+            onPressed: () => Navigator.of(context).pushNamed('/links'),
+          ),
+          IconButton(
             tooltip: 'Account',
             icon: const Icon(Icons.person_outline),
             onPressed: () => Navigator.of(context).pushNamed('/account'),
@@ -130,20 +135,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               Text(auth.email!, style: theme.textTheme.bodySmall),
             ],
             const SizedBox(height: 32),
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              alignment: WrapAlignment.center,
-              children: [
-                FilledButton.tonal(
-                  onPressed: () => Navigator.of(context).pushNamed('/servers'),
-                  child: const Text('Choose server'),
-                ),
-                FilledButton.tonal(
-                  onPressed: () => Navigator.of(context).pushNamed('/links'),
-                  child: const Text('Links'),
-                ),
-              ],
+            _ServerPickerCard(
+              state: conn,
+              onTap: () => Navigator.of(context).pushNamed('/servers'),
             ),
             const SizedBox(height: 20),
             PlanStrip(
@@ -269,6 +263,106 @@ class _CompatBanner extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The server picker, promoted from a plain button to a card that names the
+/// node in use, so home answers "which server am I on?" without a tap.
+class _ServerPickerCard extends StatelessWidget {
+  const _ServerPickerCard({required this.state, required this.onTap});
+
+  final ConnState state;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final subtitle = switch (state) {
+      EngineStateConnected(:final node) => 'Connected via ${node.region} — tap to switch',
+      EngineStateConnecting() => 'Bringing the tunnel up on the best node…',
+      _ => 'Pick the fastest node for your connection',
+    };
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: SizedBox(
+        width: double.infinity,
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(18),
+          clipBehavior: Clip.antiAlias,
+          child: Ink(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF221B3D), Color(0xFF141821)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: theme.colorScheme.primary.withValues(alpha: 0.35),
+              ),
+            ),
+            child: InkWell(
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(13),
+                        gradient: LinearGradient(
+                          colors: [
+                            theme.colorScheme.primary,
+                            const Color(0xFF22D3EE),
+                          ],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.dns_outlined,
+                        color: Colors.white,
+                        size: 22,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Choose server',
+                            style: theme.textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.2,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall
+                                ?.copyWith(color: theme.hintColor),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(Icons.chevron_right, color: theme.colorScheme.primary),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );

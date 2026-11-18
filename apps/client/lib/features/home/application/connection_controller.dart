@@ -231,6 +231,26 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   /// single proxy session.
   static const sessionCheckInterval = Duration(seconds: 45);
 
+  /// Endpoints that prove the tunnel carries real traffic.
+  ///
+  /// The engine publishes `connected` once the tun is up, which says nothing
+  /// about whether packets make it out through the proxy: a dead DNS path or a
+  /// datapath the device cannot use looks exactly like a working tunnel in that
+  /// state. These are plain HTTPS GETs from the app itself, so they traverse the
+  /// tun, the DNS hijack and the proxy outbound in one check. Two unrelated
+  /// hosts so one blocked destination is not mistaken for a broken tunnel.
+  static final dataPathProbes = <Uri>[
+    Uri.parse('https://cloudflare.com/cdn-cgi/trace'),
+    Uri.parse('https://www.gstatic.com/generate_204'),
+  ];
+
+  static const dataPathProbeTimeout = Duration(seconds: 8);
+
+  /// True once this run already fell back to compat mode for a dead datapath,
+  /// so a second failed probe reports the failure instead of reconnecting
+  /// forever.
+  bool _autoCompatTried = false;
+
   ServerNode? _selected;
 
   /// The session id the config request must present, when one was claimed.
@@ -261,6 +281,10 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _startSessionWatch();
         final node = _selected;
         if (node != null) state = EngineStateConnected(node);
+        // `connected` only means the interface exists. Verify it actually
+        // carries traffic, because a tunnel that silently drops everything is
+        // otherwise indistinguishable from a working one.
+        unawaited(_verifyDataPath());
       case EngineState.disconnecting:
         _watchdog?.cancel();
         if (!_failed) state = const EngineStateDisconnecting();
@@ -277,6 +301,67 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         // The engine runs in its own process now, so losing it while the tunnel
         // was up is survivable — and worth learning from before the next try.
         if (wasConnected) unawaited(_learnFromEngineDeath());
+    }
+  }
+
+  /// Follows up `connected` with a real request through the tunnel.
+  ///
+  /// The normal datapath is tried first; if it carries nothing, the conservative
+  /// one is applied and the tunnel reloaded once. If that also carries nothing,
+  /// the app says so instead of showing a green "Connected" over a dead link.
+  Future<void> _verifyDataPath() async {
+    final attempt = _attempt;
+    // Routes and the DNS hijack settle a moment after the interface comes up.
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (attempt != _attempt || state is! EngineStateConnected) return;
+    if (await probeDataPath()) {
+      _autoCompatTried = false;
+      return;
+    }
+    if (attempt != _attempt || state is! EngineStateConnected) return;
+
+    if (!_ref.read(compatModeProvider) && !_autoCompatTried) {
+      _autoCompatTried = true;
+      await _recovery.enableCompat();
+      _ref.read(compatModeProvider.notifier).state = true;
+      if (attempt != _attempt || state is! EngineStateConnected) return;
+      // Reloading the engine in place applies the compat datapath without
+      // tearing down the session the controller just minted.
+      await connect();
+      return;
+    }
+
+    await disconnect();
+    _fail(
+      'The tunnel is up but no traffic is getting through it. Try another '
+      'server, or contact support if every server does this.',
+    );
+  }
+
+  /// True when at least one probe endpoint answers through the tunnel.
+  @visibleForTesting
+  static Future<bool> probeDataPath({
+    Iterable<Uri>? urls,
+    Duration timeout = dataPathProbeTimeout,
+  }) async {
+    final targets = (urls ?? dataPathProbes).toList(growable: false);
+    if (targets.isEmpty) return true;
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final results = await Future.wait(targets.map((uri) async {
+        try {
+          final request = await client.getUrl(uri).timeout(timeout);
+          request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+          final response = await request.close().timeout(timeout);
+          await response.drain<void>().timeout(timeout);
+          return response.statusCode >= 200 && response.statusCode < 400;
+        } catch (_) {
+          return false;
+        }
+      }));
+      return results.any((reachable) => reachable);
+    } finally {
+      client.close(force: true);
     }
   }
 

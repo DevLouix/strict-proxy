@@ -64,17 +64,11 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #2b333d transparent;
+  /* The account card is a footer, so the sidebar itself must not scroll: the
+     nav list below is the only scroll region. Scrolling the whole column is
+     what carried the account card up with the items. */
+  overflow: hidden;
   z-index: 60;
-}
-.sidebar::-webkit-scrollbar { width: 8px; }
-.sidebar::-webkit-scrollbar-thumb {
-  background: #2b333d;
-  border-radius: 99px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
 }
 
 .brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 10px; }
@@ -96,9 +90,37 @@ body {
 
 /* ---------- sidebar navigation ---------- */
 
-.nav-shell { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.nav-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: #2b333d transparent;
+}
+.nav-shell::-webkit-scrollbar { width: 8px; }
+.nav-shell::-webkit-scrollbar-thumb {
+  background: #2b333d;
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
 
-.nav-search { position: relative; display: flex; align-items: center; margin: 0 4px 2px; }
+.nav-search {
+  /* Stays reachable while only the grouped items scroll underneath it. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  margin: 0 4px;
+  padding: 2px 0 6px;
+  background: #11161c;
+}
 .nav-search .search-ico {
   position: absolute;
   left: 9px;
@@ -209,9 +231,10 @@ body {
 .nav-item[hidden] { display: none; }
 .nav-none { padding: 14px 10px; text-align: center; color: var(--muted); font-size: 12px; }
 
-.sidebar .spacer { flex: 1; }
+.sidebar .spacer { flex: 0 1 0; }
 
 .sidebar .who {
+  flex: none;
   margin-top: 2px;
   padding: 9px 10px;
   display: flex;

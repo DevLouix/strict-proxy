@@ -3,6 +3,8 @@ package com.strictproxy.libbox_bridge
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.util.Log
@@ -87,6 +89,22 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     }
 
     private lateinit var runner: BoxRunner
+
+    /**
+     * The engine's default-interface listeners, and the system callbacks that
+     * feed them.
+     *
+     * The config sets `route.auto_detect_interface`, and on Android the engine
+     * has no way to read the default route itself: the platform is expected to
+     * report which interface currently carries traffic. Leaving these as no-ops
+     * meant the engine had no default interface to bind outbound sockets to, so
+     * the tunnel came up (`connected`) and then carried nothing — the exact
+     * "connected but no internet" symptom. `getInterfaces()` alone is not a
+     * substitute: it lists interfaces, it does not say which one is the path
+     * out of the device.
+     */
+    private val defaultInterfaceCallbacks =
+        HashMap<InterfaceUpdateListener, ConnectivityManager.NetworkCallback>()
 
     override fun onCreate() {
         super.onCreate()
@@ -300,9 +318,54 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     /** StrictProxy shows its own foreground notification; the engine's is unused. */
     override fun sendNotification(notification: LibboxNotification) = Unit
 
-    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) = Unit
+    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        // registerDefaultNetworkCallback landed in Android 7. On older releases
+        // the engine falls back to its own interface selection; there is no
+        // supported way to observe the default network there.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        val manager = connectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = reportDefaultInterface(manager, network, listener)
 
-    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) = Unit
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
+                reportDefaultInterface(manager, network, listener)
+
+            override fun onLost(network: Network) {
+                listener.updateDefaultInterface("", 0, false, false)
+            }
+        }
+        defaultInterfaceCallbacks[listener] = callback
+        runCatching { manager.registerDefaultNetworkCallback(callback) }
+            .onFailure { Log.e(TAG, "could not monitor the default network", it) }
+    }
+
+    /**
+     * Tells the engine which interface and index the default network uses.
+     *
+     * The metered flag matters: the engine avoids expensive paths for its own
+     * connections when it can. A network announced without a name is skipped
+     * rather than reported as an empty interface the engine would bind to.
+     */
+    private fun reportDefaultInterface(
+        manager: ConnectivityManager,
+        network: Network,
+        listener: InterfaceUpdateListener,
+    ) {
+        runCatching {
+            val link = manager.getLinkProperties(network) ?: return
+            val name = link.interfaceName ?: return
+            val index = AndroidNetworkInterface.getByName(name)?.index ?: 0
+            val metered = manager.getNetworkCapabilities(network)
+                ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
+            listener.updateDefaultInterface(name, index, metered, false)
+        }.onFailure { Log.w(TAG, "could not report the default interface", it) }
+    }
+
+    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        val callback = defaultInterfaceCallbacks.remove(listener) ?: return
+        runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+            .onFailure { Log.w(TAG, "could not stop the default network monitor", it) }
+    }
 
     override fun startNeighborMonitor(listener: NeighborUpdateListener) = Unit
 

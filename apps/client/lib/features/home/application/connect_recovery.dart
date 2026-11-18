@@ -61,6 +61,14 @@ class ConnectRecovery {
   /// Returns to the normal tunnel settings at the user's request.
   Future<void> clearCompat() async => (await _prefs).remove(_kCompat);
 
+  /// Switches to the conservative settings without a crash to point at.
+  ///
+  /// Used when the normal datapath reports connected but carries no traffic:
+  /// the engine did not abort, so [noteEngineCrash] has nothing to read, yet
+  /// repeating the same attempt is pointless. Persisted so the next launch
+  /// starts on the datapath that was last seen to work.
+  Future<void> enableCompat() async => (await _prefs).setBool(_kCompat, true);
+
   /// Called when the engine died while the app itself is still running.
   ///
   /// The engine has its own process now, so its death is survivable — and
