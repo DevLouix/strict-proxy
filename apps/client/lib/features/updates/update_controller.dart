@@ -141,7 +141,9 @@ class UpdateState {
         release: identical(release, _unset) ? this.release : release as AppRelease?,
         artifact: identical(artifact, _unset) ? this.artifact : artifact as AppArtifact?,
         checking: identical(checking, _unset) ? this.checking : checking as bool,
-        progress: identical(progress, _unset) ? this.progress : progress as double?,
+        // Callers naturally write `progress: 0`; narrowing a num to double
+        // here turned that into a TypeError inside an update tap handler.
+        progress: identical(progress, _unset) ? this.progress : (progress as num?)?.toDouble(),
         error: identical(error, _unset) ? this.error : error as String?,
         handedToInstaller: identical(handedToInstaller, _unset)
             ? this.handedToInstaller
@@ -213,7 +215,7 @@ class UpdateController extends StateNotifier<UpdateState> {
       return 'This update was not built for your device\'s CPU.';
     }
 
-    state = state.copyWith(progress: 0, error: null);
+    state = state.copyWith(progress: 0.0, error: null);
     File? file;
     try {
       final dir = Directory('${await _cacheDir()}/updates');
