@@ -163,6 +163,10 @@ class Agent {
       uplinkRttMs: await this.measureUplinkRtt(),
       uptimeSeconds: Math.floor(osUptime.uptime),
       engineVersion: await this.singBoxVersion(),
+      // Sent on every heartbeat so the controller follows a node whose tunnel
+      // port changed (the installer picks a free one), rather than handing
+      // clients the port it enrolled with forever.
+      tunnelPort: this.cfg.tunnelPort,
       engineHealthy: this.engineHealthy,
       ...(this.statsApiHealthy === null ? {} : { statsApiHealthy: this.statsApiHealthy }),
       ...(observedPublicIp ? { observedPublicIp } : {}),

@@ -1204,11 +1204,24 @@ export function buildRouter(ctx: Ctx): Router {
         statsApiHealthy?: boolean;
         /** The address the node sees for itself (from its IP echo service). */
         observedPublicIp?: string;
+        /** The port the engine listens on; clients are handed this port. */
+        tunnelPort?: number;
       };
       const cpu = Number(body.cpuPercent ?? 0);
       const mem = Number(body.memoryPercent ?? 0);
       const load = computeLoadScore(cpu, mem);
-      const [node] = await ctx.db.select({ status: nodes.status }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+      if (
+        body.tunnelPort !== undefined &&
+        (!Number.isInteger(body.tunnelPort) || body.tunnelPort < 1 || body.tunnelPort > 65535)
+      ) {
+        res.status(400).json({ error: 'tunnelPort must be an integer from 1 to 65535', code: 'VALIDATION' });
+        return;
+      }
+      const [node] = await ctx.db
+        .select({ status: nodes.status, tunnelPort: nodes.tunnelPort })
+        .from(nodes)
+        .where(eq(nodes.id, nodeId))
+        .limit(1);
       if (!node) {
         res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
         return;
@@ -1226,9 +1239,19 @@ export function buildRouter(ctx: Ctx): Router {
           ...(typeof body.engineHealthy === 'boolean' || typeof body.statsApiHealthy === 'boolean'
             ? { engineHealthCheckedAt: new Date() }
             : {}),
+          // Omitted keeps the enrolled value; a changed port is what clients
+          // are handed next, so it must follow the engine rather than drift.
+          ...(body.tunnelPort === undefined ? {} : { tunnelPort: body.tunnelPort }),
           lastHeartbeatAt: new Date(),
         })
         .where(eq(nodes.id, nodeId));
+
+      if (body.tunnelPort !== undefined && body.tunnelPort !== node.tunnelPort) {
+        console.warn(
+          `[controller] node ${nodeId} tunnel port changed ${node.tunnelPort} -> ${body.tunnelPort}; ` +
+            'clients will be handed the new port on their next config fetch',
+        );
+      }
 
       // Keep the Gatekeeper allowlist pointing at where the node actually is.
       const ipChange = await applyObservedNodeIp(ctx.db, ctx.cfg, nodeId, body.observedPublicIp);

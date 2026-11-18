@@ -493,10 +493,14 @@ admin**.
 
 ### What the node installer now guarantees
 
-`install-node.sh` refuses to continue when another process already listens on
-`NODE_TUNNEL_PORT` (nginx, Caddy, Traefik or a second agent), then opens the
-port for **TCP and UDP** in ufw or firewalld, enables IP forwarding and loads
-the tun device. The agent's systemd unit runs `src/preflight.ts` before the
+`install-node.sh` picks the first free tunnel port when `NODE_TUNNEL_PORT` is
+unset — 443 preferred, then 8443, 2053, 2083, 2087, 2096, 8880, 9443, 10443 —
+skipping anything nginx, Caddy, Traefik or a second agent already listens on.
+A pinned `NODE_TUNNEL_PORT` is never overridden: it fails loudly instead. The
+chosen port is written to `agent.env`, opened for **TCP and UDP** in ufw or
+firewalld, and reported on every heartbeat, so the controller hands clients the
+port the engine actually listens on. The script also enables IP forwarding and
+loads the tun device. The agent's systemd unit runs `src/preflight.ts` before the
 agent starts, so a missing `sing-box` binary or an invalid port fails the unit
 with a readable reason instead of serving clients nothing.
 

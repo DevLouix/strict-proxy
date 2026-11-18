@@ -48,26 +48,43 @@ if ! getent hosts "$controller_host" >/dev/null 2>&1; then
   fi
 fi
 
-# A node on port 443 needs that port to itself. When the controller or its
-# reverse proxy shares the host, Dokploy/Traefik already owns 443, so fail with
-# the fix instead of letting sing-box start and immediately die.
-tunnel_port=${NODE_TUNNEL_PORT:-443}
-if [ "$tunnel_port" = "443" ] && command -v ss >/dev/null 2>&1; then
-  if ss -ltn 'sport = :443' 2>/dev/null | grep -q LISTEN; then
-    echo "Port 443 is already in use on this host." >&2
-    echo "If the controller or a proxy shares this host, rerun with NODE_TUNNEL_PORT=8443 and open 8443/tcp and 8443/udp." >&2
+# The tunnel port must be free: sing-box exits immediately when something else
+# serves it, and every client then hangs on a port that accepts connections.
+# 443 is preferred because it looks like ordinary HTTPS; the alternates are
+# HTTPS-ish ports that are usually unused. A pinned NODE_TUNNEL_PORT is never
+# overridden — an explicit choice that is broken should fail loudly.
+port_is_free() {
+  if ! command -v ss >/dev/null 2>&1; then
+    return 0
+  fi
+  ! ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN
+}
+
+if [ -n "${NODE_TUNNEL_PORT:-}" ]; then
+  tunnel_port=$NODE_TUNNEL_PORT
+  if ! port_is_free "$tunnel_port"; then
+    echo "Port $tunnel_port is already in use on this host:" >&2
+    ss -ltnp "sport = :$tunnel_port" 2>/dev/null >&2 || true
+    echo "Stop that service, or omit NODE_TUNNEL_PORT and rerun to let the installer pick a free port." >&2
     exit 1
   fi
-fi
-
-# Whatever port was chosen, the install refuses to continue when something else
-# already serves it: sing-box would exit and every client would hang.
-if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$tunnel_port" 2>/dev/null | grep -q LISTEN; then
-  echo "Port $tunnel_port is already in use on this host:" >&2
-  ss -ltnp "sport = :$tunnel_port" 2>/dev/null >&2 || true
-  echo "Stop that service, or rerun with NODE_TUNNEL_PORT set to a free port." >&2
-  echo "Whichever port you choose must be open for TCP and UDP inbound." >&2
-  exit 1
+else
+  tunnel_port=
+  for candidate in 443 8443 2053 2083 2087 2096 8880 9443 10443; do
+    if port_is_free "$candidate"; then
+      tunnel_port=$candidate
+      break
+    fi
+  done
+  if [ -z "$tunnel_port" ]; then
+    echo "Every preferred tunnel port is in use (443 8443 2053 2083 2087 2096 8880 9443 10443)." >&2
+    echo "Free one of them, or rerun with NODE_TUNNEL_PORT=<free port>; it must be open for TCP and UDP inbound." >&2
+    exit 1
+  fi
+  echo "NODE_TUNNEL_PORT was not set; picked free port $tunnel_port."
+  if [ "$tunnel_port" != "443" ]; then
+    echo "443 is taken on this host, so clients will be pointed at $tunnel_port instead." >&2
+  fi
 fi
 
 apt-get update

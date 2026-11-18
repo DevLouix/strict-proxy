@@ -224,6 +224,25 @@ test('a heartbeat that omits engine health leaves the stored value alone', async
   assert.equal(rowRows[0].engine_healthy, false, 'a missing field must not clear a reported failure');
 });
 
+test('a heartbeat moves the node to the port the engine listens on', async () => {
+  const node = await h.seedNode({ status: 'offline', tunnelPort: 443 });
+
+  const res = await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', {
+    tunnelPort: 8443,
+  });
+  assert.equal(res.status, 200);
+
+  const rowRows = await h.query<any>(`SELECT tunnel_port FROM nodes WHERE id = '${node.id}'`);
+  assert.equal(rowRows[0].tunnel_port, 8443, 'clients must be handed the port the engine uses');
+
+  const bad = await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', {
+    tunnelPort: 70000,
+  });
+  assert.equal(bad.status, 400);
+  const after = await h.query<any>(`SELECT tunnel_port FROM nodes WHERE id = '${node.id}'`);
+  assert.equal(after[0].tunnel_port, 8443, 'an invalid port must not be stored');
+});
+
 test('a heartbeat on a saturated node marks it degraded', async () => {
   const node = await h.seedNode({ status: 'offline' });
   await h.nodeRequest(node.id, node.hmacSecret, 'POST', '/internal/v1/node/heartbeat', { cpuPercent: 100, memoryPercent: 100 });

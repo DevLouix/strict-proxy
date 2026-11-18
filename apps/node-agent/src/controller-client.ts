@@ -61,6 +61,8 @@ export class ControllerClient {
     uplinkRttMs: number;
     uptimeSeconds: number;
     engineVersion: string;
+    /** The port the engine is configured to listen on for clients. */
+    tunnelPort: number;
     /** The agent's own view of its engine; the controller shows it in the fleet. */
     engineHealthy?: boolean;
     statsApiHealthy?: boolean;
