@@ -106,12 +106,35 @@ node ──POST /internal/v1/node/usage      (HMAC)──> bandwidth windows
 | Boundary | Mechanism | Failure mode |
 |---|---|---|
 | Client -> controller | JWT, short-lived, device-bound | `401` |
-| Admin routes | JWT **and** `role === 'admin'` | `401` / `403` |
+| Admin routes | JWT **and** a role permission (`requirePermission`) | `401` / `403` |
 | Node -> controller | HMAC-SHA256 + single-use nonce + timestamp window | `401` |
 | Provider -> controller | Stripe-style HMAC over the raw body + timestamp | `401` |
 | Public artifacts | Ed25519 over canonical JSON, key-id tagged | consumer refuses |
 | Unauthenticated routes | per-IP Redis limiter, one bucket per endpoint | `429` |
 | Device seats | evict least-recently-seen device | reclaims the seat |
+
+### Roles and permissions
+
+Admin authorisation is permission-based rather than a `role === 'admin'` string
+repeated in handlers. `services/rbac.ts` is the single mapping:
+
+| Permission | Administrator | User |
+|---|---|---|
+| `users.read` | yes | no |
+| `users.create` | yes | no |
+| `users.update` | yes | no |
+| `users.subscription` | yes | no |
+
+`requirePermission(cfg, db, 'users.create')` composes the normal JWT check and
+fails closed: an unknown role or permission is refused, never treated as an
+administrator. The user-management routes use it; routes outside that family
+still use `requireAdmin`, which is the same rule while administrators hold every
+permission. A new role is one entry in `ROLE_PERMISSIONS`.
+
+`POST /api/v1/admin/users` creates an account from the dashboard: email and
+password are validated, the password is bcrypt-hashed and never returned, a
+free subscription row is created in the same transaction, and `user.created` is
+written to the audit log with the acting administrator and role.
 
 ## Data model (13 tables)
 

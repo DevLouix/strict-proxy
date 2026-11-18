@@ -209,6 +209,58 @@ test('clientAppsView renders releases, the upload form and crash reports', async
   assert.ok(text.includes('serving build 19'), 'the currently served build should be visible');
 });
 
+test('Client apps warns when the published build is below the minimum client version', async () => {
+  const api = stubApi();
+  const node = await clientApps.clientAppsView(api);
+  const text = node.text();
+
+  assert.ok(text.includes('Published build is below the minimum client version'), text.slice(0, 400));
+  assert.ok(text.includes('requires build 21 or newer'), 'the warning names the required build');
+  assert.ok(text.includes('published build is refused'), 'the gate stat says the feed is refused');
+});
+
+test('Client apps stays quiet when the published build meets the minimum', async () => {
+  const api = stubApi();
+  const get = api.get.bind(api);
+  api.get = async (path: string) =>
+    path.startsWith('/api/v1/admin/settings/client')
+      ? { minimumBuild: 10, enabled: true }
+      : get(path);
+
+  const node = await clientApps.clientAppsView(api);
+  const text = node.text();
+  assert.ok(!text.includes('below the minimum client version'));
+  assert.ok(text.includes('published build is allowed'), 'the gate stat confirms the feed is allowed');
+});
+
+test('an administrator can create a user from the Users screen', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.usersView(api, () => {});
+  const open = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Create user');
+  assert.ok(open, 'the Users screen needs a Create user control');
+  open.dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c: any) => c.tagName === 'DIALOG');
+  assert.ok(dialog, 'clicking Create user should open the form');
+
+  const inputs = [...dialog.walk()].filter((el: any) => el.tagName === 'INPUT');
+  assert.equal(inputs.length, 2, 'email and password');
+  inputs[0].value = 'new@example.test';
+  inputs[1].value = 'long-enough-password';
+
+  const submit = [...dialog.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Create user');
+  submit.dispatch('click');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const call = api.calls.find((c: any) => c[0] === 'POST' && c[1] === '/api/v1/admin/users');
+  assert.ok(call, 'submitting should POST the new user');
+  assert.equal(call[2].email, 'new@example.test');
+  assert.equal(call[2].password, 'long-enough-password');
+  assert.equal(call[2].role, 'user');
+});
+
 test('usersView hides disabled accounts by default', async () => {
   const api = stubApi();
   const node = await views.usersView(api, () => {});

@@ -274,6 +274,66 @@ export async function usersView(api, rerender) {
     dlg.showModal();
   }
 
+  /**
+   * Creates an account without leaving the dashboard.
+   *
+   * Only the fields the server requires are collected; the account starts on
+   * the free tier, and the password is stored hashed, so the copy says to share
+   * it now rather than implying it can be read back later.
+   */
+  function createUserDialog() {
+    const email = h('input', { type: 'email', placeholder: 'user@example.com', autocomplete: 'off', spellcheck: 'false' });
+    const password = h('input', { type: 'password', placeholder: 'at least 10 characters', autocomplete: 'new-password' });
+    const role = h('select', {},
+      h('option', { value: 'user' }, 'User'),
+      h('option', { value: 'admin' }, 'Administrator'),
+    );
+    // Set after the options exist: the browser default is the first option, but
+    // the DOM shim used by the tests has no such default.
+    role.value = 'user';
+    const error = h('p', { class: 'muted small', style: 'min-height:18px' });
+    const submit = h('button', { class: 'btn primary', type: 'button' }, 'Create user');
+
+    const dlg = h('dialog', {},
+      h('div', { class: 'dlg-head' }, h('h3', {}, 'Create user')),
+      h('div', { class: 'dlg-body' },
+        h('label', { class: 'field' }, h('span', {}, 'Email'), email),
+        h('label', { class: 'field' }, h('span', {}, 'Password'), password),
+        h('label', { class: 'field' }, h('span', {}, 'Role'), role),
+        h('p', { class: 'muted small' },
+          'The account starts on the free tier. Share the password now: it is stored hashed and cannot be read back.'),
+        error,
+      ),
+      h('div', { class: 'dlg-foot' },
+        h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
+        submit,
+      ),
+    );
+
+    submit.addEventListener('click', async () => {
+      error.textContent = '';
+      submit.disabled = true;
+      try {
+        await api.post('/api/v1/admin/users', {
+          email: email.value.trim(),
+          password: password.value,
+          role: role.value,
+        });
+        toast('User created');
+        dlg.close();
+        await load();
+      } catch (err) {
+        error.textContent = err.message || 'Could not create the user';
+        submit.disabled = false;
+      }
+    });
+
+    document.body.append(dlg);
+    dlg.addEventListener('close', () => dlg.remove(), { once: true });
+    dlg.showModal();
+    email.focus?.();
+  }
+
   function draw() {
     const list = visible();
     mount(host,
@@ -282,7 +342,10 @@ export async function usersView(api, rerender) {
           h('h2', {}, 'Users'),
           h('p', {}, 'Accounts, roles and subscription state.'),
         ),
-        h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn sm primary', onClick: createUserDialog }, 'Create user'),
+          h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
+        ),
       ),
       h('div', { class: 'toolbar' },
         h('input', {

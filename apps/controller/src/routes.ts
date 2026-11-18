@@ -42,6 +42,7 @@ import { mintEntitlementToken } from './services/entitlements.js';
 import { claimVpnSession, currentVpnSession } from './services/sessions.js';
 import { buildLinksCatalog, normalizeLinkInput, type LinkInput } from './services/links.js';
 import { auditActor, listAuditEntries, recordAudit } from './services/audit.js';
+import { requirePermission } from './services/rbac.js';
 
 interface Ctx {
   db: Db;
@@ -276,7 +277,7 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ users: Number(userCount?.count ?? 0), activeSubscriptions: Number(activeSubscriptions?.count ?? 0), onlineNodes: Number(onlineNodes?.count ?? 0), activeCredentials: Number(credentialCount?.count ?? 0) });
   }));
 
-  router.get('/api/v1/admin/users', ...requireAdministrator, asyncHandler(async (req, res) => {
+  router.get('/api/v1/admin/users', requirePermission(ctx.cfg, ctx.db, 'users.read'), asyncHandler(async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit ?? 50), 1), 200);
     const rows = await ctx.db.select({ id: users.id, email: users.email, role: users.role, disabledAt: users.disabledAt, createdAt: users.createdAt, tier: subscriptions.tier, subscriptionStatus: subscriptions.status, currentPeriodEnd: subscriptions.currentPeriodEnd })
       .from(users).leftJoin(subscriptions, eq(subscriptions.userId, users.id)).orderBy(desc(users.createdAt)).limit(limit);
@@ -288,7 +289,7 @@ export function buildRouter(ctx: Ctx): Router {
    * the operator actions taken against it. The users table alone could not
    * answer "why did this customer lose access" without three other screens.
    */
-  router.get('/api/v1/admin/users/:userId', ...requireAdministrator, asyncHandler(async (req, res) => {
+  router.get('/api/v1/admin/users/:userId', requirePermission(ctx.cfg, ctx.db, 'users.read'), asyncHandler(async (req, res) => {
     const userId = req.params.userId;
     if (typeof userId !== 'string' || userId.length === 0) {
       res.status(400).json({ error: 'userId is required', code: 'VALIDATION' });
@@ -337,7 +338,76 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ user, subscription: subscription ?? null, devices: deviceRows, credentials: credentialRows, checkouts: checkoutRows, audit: auditRows });
   }));
 
-  router.patch('/api/v1/admin/users/:userId', ...requireAdministrator, asyncHandler(async (req, res) => {
+  /**
+   * Creates an account from the dashboard.
+   *
+   * The password is hashed here and never returned; the operator shares it out
+   * of band. The account starts on the free tier so every account has a
+   * subscription row from the first request, and the creation is audited with
+   * the acting administrator and the chosen role.
+   */
+  router.post('/api/v1/admin/users', requirePermission(ctx.cfg, ctx.db, 'users.create'), asyncHandler(async (req, res) => {
+    const body = req.body as { email?: unknown; password?: unknown; role?: unknown };
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    const role = body.role === undefined ? 'user' : body.role;
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: 'a valid email address is required', code: 'VALIDATION' });
+      return;
+    }
+    if (password.length < 10 || password.length > 200) {
+      res.status(400).json({ error: 'password must be between 10 and 200 characters', code: 'VALIDATION' });
+      return;
+    }
+    if (role !== 'user' && role !== 'admin') {
+      res.status(400).json({ error: 'role must be user or admin', code: 'VALIDATION' });
+      return;
+    }
+
+    const [existing] = await ctx.db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+    if (existing) {
+      res.status(409).json({ error: 'an account with that email already exists', code: 'EMAIL_TAKEN' });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    let created: { id: string; email: string; role: string; createdAt: Date };
+    try {
+      created = await ctx.db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(users)
+          .values({ email, passwordHash, role })
+          .returning({ id: users.id, email: users.email, role: users.role, createdAt: users.createdAt });
+        if (!row) throw new Error('failed to create user');
+        await tx
+          .insert(subscriptions)
+          .values({ userId: row.id, tier: 'free', status: 'active' })
+          .onConflictDoNothing({ target: subscriptions.userId });
+        return row;
+      });
+    } catch (error) {
+      // The pre-check above races another creation of the same address; the
+      // unique index is the authority, and its conflict is still a 409.
+      if ((error as { code?: string }).code === '23505') {
+        res.status(409).json({ error: 'an account with that email already exists', code: 'EMAIL_TAKEN' });
+        return;
+      }
+      throw error;
+    }
+
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'user.created',
+      targetType: 'user',
+      targetId: created.id,
+      summary: `${created.email} created as ${created.role}`,
+      metadata: { role: created.role },
+    });
+    res.status(201).json({ user: created });
+  }));
+
+  router.patch('/api/v1/admin/users/:userId', requirePermission(ctx.cfg, ctx.db, 'users.update'), asyncHandler(async (req, res) => {
     const userId = req.params.userId;
     if (typeof userId !== 'string' || userId.length === 0) {
       res.status(400).json({ error: 'userId is required', code: 'VALIDATION' });
@@ -414,7 +484,7 @@ export function buildRouter(ctx: Ctx): Router {
     res.json({ user: updated });
   }));
 
-  router.patch('/api/v1/admin/users/:userId/subscription', ...requireAdministrator, asyncHandler(async (req, res) => {
+  router.patch('/api/v1/admin/users/:userId/subscription', requirePermission(ctx.cfg, ctx.db, 'users.subscription'), asyncHandler(async (req, res) => {
     const userId = req.params.userId;
     if (typeof userId !== 'string' || userId.length === 0) {
       res.status(400).json({ error: 'userId is required', code: 'VALIDATION' });

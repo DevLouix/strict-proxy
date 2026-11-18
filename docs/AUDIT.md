@@ -26,7 +26,7 @@ Two classes of gap stand out:
 | --- | --- |
 | Disputes had no dashboard | New **Disputes** tab (`disputes-view.js`): status filter, amount at stake, per-dispute detail, evidence history, evidence filing, and manual "mark filed" for providers without an evidence API. |
 | Refunds had no control | The Payments ledger now has a **Refund** action on settled checkouts: full or partial amount, a reason, and a statement of the access consequence before it is issued. |
-| Operator actions were unattributed | New **Audit log** tab backed by `admin_audit_log`: user changes, subscription changes, refunds, price and plan changes, subscription cancellations, node edits/deletes, enrollment issue/rotate/revoke, release publish/delete, and reset-token issuance. |
+| Operator actions were unattributed | New **Audit log** tab backed by `admin_audit_log`: user creation, user changes, subscription changes, refunds, price and plan changes, subscription cancellations, node edits/deletes, enrollment issue/rotate/revoke, release publish/delete, and reset-token issuance. |
 | Users had no detail view | **Details** in the users table opens the subscription, devices, node credentials, payments, recent operator actions, and an issue-password-reset control. |
 | Client ignored session expiry | `ControllerApi.onSessionExpired` fires when a 401 cannot be refreshed; `AuthController` clears local tokens and leaves the authenticated state, so the gate shows sign-in. |
 | Signing out left the tunnel up | The app-level auth listener disconnects the engine whenever the session goes from authenticated to unauthenticated — on explicit logout, account deletion, or expiry. |

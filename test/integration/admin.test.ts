@@ -23,6 +23,7 @@ beforeEach(async () => {
 const ADMIN_ROUTES: Array<[string, string, unknown]> = [
   ['GET', '/api/v1/admin/overview', undefined],
   ['GET', '/api/v1/admin/users', undefined],
+  ['POST', '/api/v1/admin/users', { email: 'created@example.test', password: 'long-enough-password' }],
   ['PATCH', '/api/v1/admin/users/00000000-0000-0000-0000-000000000000', { disabled: true }],
   ['PATCH', '/api/v1/admin/users/00000000-0000-0000-0000-000000000000/subscription', { tier: 'pro', status: 'active' }],
   ['GET', '/api/v1/admin/nodes', undefined],
