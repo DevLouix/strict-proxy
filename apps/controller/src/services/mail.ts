@@ -170,6 +170,18 @@ export function invalidateMailTransport(): void {
 }
 
 /**
+ * Whether a failure means the server does not speak implicit TLS on this port.
+ *
+ * Port 465 expects a TLS handshake immediately; 587 (and most relays) expect
+ * plaintext then STARTTLS. Choosing the wrong one produces an OpenSSL record
+ * error — "wrong version number" — which reads like a broken certificate rather
+ * than a one-bit setting.
+ */
+export function isImplicitTlsMismatch(detail: string): boolean {
+  return /wrong version number|record layer|packet length too long|ssl3_get_record|EPROTO/i.test(detail);
+}
+
+/**
  * Checks that the saved settings can reach and authenticate with the SMTP
  * server, without sending a message.
  *
@@ -185,13 +197,38 @@ export type VerifyResult =
 export async function verifyMailSettings(db: Db, cfg: ControllerConfig): Promise<VerifyResult> {
   const settings = await loadSmtpSettings(db, cfg);
   if (!isMailConfigured(settings)) return { ok: false, reason: 'not_configured' };
+  if (settings.username && !settings.password) {
+    return {
+      ok: false,
+      reason: 'failed',
+      detail: 'SMTP username is set but no password is stored. Re-enter the password and save.',
+    };
+  }
+
+  const attempt = async (s: SmtpSettings): Promise<void> => {
+    await transportFor(s).verify();
+  };
+
   try {
-    await transportFor(settings).verify();
+    await attempt(settings);
     return { ok: true };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(`[controller] mail connection check failed: ${detail}`);
-    return { ok: false, reason: 'failed', detail };
+    const firstDetail = err instanceof Error ? err.message : String(err);
+    if (settings.secure && isImplicitTlsMismatch(firstDetail)) {
+      // Retry with STARTTLS: TLS is still required (requireTLS), only the
+      // handshake position changes, so this is not a fallback to plaintext.
+      try {
+        await attempt({ ...settings, secure: false });
+        console.warn('[controller] SMTP server rejected implicit TLS; connected with STARTTLS instead');
+        return { ok: true };
+      } catch (retryErr) {
+        const retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        console.error(`[controller] mail connection check failed: ${retryDetail}`);
+        return { ok: false, reason: 'failed', detail: retryDetail };
+      }
+    }
+    console.error(`[controller] mail connection check failed: ${firstDetail}`);
+    return { ok: false, reason: 'failed', detail: firstDetail };
   }
 }
 
@@ -199,21 +236,43 @@ export async function verifyMailSettings(db: Db, cfg: ControllerConfig): Promise
 export async function sendMail(db: Db, cfg: ControllerConfig, message: MailMessage): Promise<SendResult> {
   const settings = await loadSmtpSettings(db, cfg);
   if (!isMailConfigured(settings)) return { sent: false, reason: 'not_configured' };
+  if (settings.username && !settings.password) {
+    return {
+      sent: false,
+      reason: 'failed',
+      detail: 'SMTP username is set but no password is stored. Re-enter the password and save.',
+    };
+  }
 
-  try {
-    const info = await transportFor(settings).sendMail({
-      from: `"${settings.fromName.replace(/"/g, '')}" <${settings.fromAddress}>`,
+  const deliver = async (s: SmtpSettings) => {
+    const info = await transportFor(s).sendMail({
+      from: `"${s.fromName.replace(/"/g, '')}" <${s.fromAddress}>`,
       to: message.to,
       subject: message.subject,
       text: message.text,
       html: message.html,
     });
-    return { sent: true, messageId: String(info.messageId ?? '') };
+    return String(info.messageId ?? '');
+  };
+
+  try {
+    return { sent: true, messageId: await deliver(settings) };
   } catch (err) {
     // Log the reason; never include the password in an error message.
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(`[controller] mail send to ${message.to} failed: ${detail}`);
-    return { sent: false, reason: 'failed', detail };
+    const firstDetail = err instanceof Error ? err.message : String(err);
+    if (settings.secure && isImplicitTlsMismatch(firstDetail)) {
+      try {
+        const messageId = await deliver({ ...settings, secure: false });
+        console.warn('[controller] SMTP server rejected implicit TLS; sent with STARTTLS instead');
+        return { sent: true, messageId };
+      } catch (retryErr) {
+        const retryDetail = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        console.error(`[controller] mail send to ${message.to} failed: ${retryDetail}`);
+        return { sent: false, reason: 'failed', detail: retryDetail };
+      }
+    }
+    console.error(`[controller] mail send to ${message.to} failed: ${firstDetail}`);
+    return { sent: false, reason: 'failed', detail: firstDetail };
   }
 }
 

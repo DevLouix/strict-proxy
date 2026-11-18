@@ -103,7 +103,11 @@ export async function settingsView(api) {
     const port0 = h('input', { type: 'number', value: String(summary?.port ?? 587), min: '1', max: '65535' });
     const secure0 = h('input', { type: 'checkbox', checked: Boolean(summary?.secure) });
     const user0 = h('input', { type: 'text', value: summary?.username ?? '', placeholder: 'postmaster@example.com', spellcheck: 'false', autocomplete: 'off' });
-    const pass0 = passwordField(h('input', { type: 'password', placeholder: summary?.passwordSet ? '•••••••• (unchanged)' : 'not set', autocomplete: 'new-password' }));
+    // passwordField returns a wrapper, not the input; reading `.value` from the
+    // wrapper silently sent no password at all, so SMTP authenticated with an
+    // empty credential ("Missing credentials for PLAIN").
+    const passInput = h('input', { type: 'password', placeholder: summary?.passwordSet ? '•••••••• (unchanged)' : 'not set', autocomplete: 'new-password' });
+    const pass0 = passwordField(passInput);
     const from0 = h('input', { type: 'email', value: summary?.fromAddress ?? '', placeholder: 'no-reply@example.com', spellcheck: 'false' });
     const name0 = h('input', { type: 'text', value: summary?.fromName ?? '', placeholder: 'StrictProxy' });
     const testTo0 = h('input', { type: 'email', placeholder: 'you@example.com', spellcheck: 'false' });
@@ -139,9 +143,9 @@ export async function settingsView(api) {
         };
         if (user0.value.trim()) body.username = user0.value.trim();
         if (name0.value.trim()) body.fromName = name0.value.trim();
-        if (pass0.value) body.password = pass0.value;
+        if (passInput.value) body.password = passInput.value;
         await api.put('/api/v1/admin/settings/email', body);
-        pass0.value = '';
+        passInput.value = '';
         toast('Mail settings saved');
         if (refresh) await load();
         return true;

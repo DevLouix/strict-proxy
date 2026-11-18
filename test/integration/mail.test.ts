@@ -11,6 +11,7 @@ import { createHarness, type Harness } from '../helpers/harness.js';
 import { encryptSecret, decryptSecret, settingsKey, isEncrypted } from '../../apps/controller/src/services/settings.js';
 import {
   validateSmtpSettings,
+  isImplicitTlsMismatch,
   resetLink,
   passwordResetEmail,
   invalidateMailTransport,
@@ -223,6 +224,24 @@ test('the test-send endpoint reports mail that is not configured', async () => {
   });
   assert.equal(res.status, 503);
   assert.equal(res.body.code, 'MAIL_NOT_CONFIGURED');
+});
+
+test('a TLS version mismatch is recognised so it can be retried with STARTTLS', () => {
+  assert.equal(isImplicitTlsMismatch('C09C0EB3:error:0A00010B:SSL routines:tls_validate_record_header:wrong version number'), true);
+  assert.equal(isImplicitTlsMismatch('EPROTO: packet length too long'), true);
+  assert.equal(isImplicitTlsMismatch('Invalid login: 535 Authentication failed'), false);
+});
+
+test('a username without a stored password says so instead of failing authentication', async () => {
+  // The dashboard used to send no password at all, which surfaced as
+  // "Missing credentials for PLAIN" from nodemailer.
+  await configureSmtp({ username: 'postmaster@example.com', password: '' });
+  const res = await h.request('POST', '/api/v1/admin/settings/email/test', {
+    token: await h.adminToken(),
+    body: { to: 'ops@example.com' },
+  });
+  assert.equal(res.status, 502);
+  assert.match(String(res.body.detail), /no password is stored/i);
 });
 
 test('the test-send endpoint requires a real recipient', async () => {
