@@ -38,7 +38,11 @@
 #
 # WHAT IT PUBLISHES
 #   Host networking: TCP and UDP on NODE_TUNNEL_PORT (default 443). Open both on
-#   the VPS firewall. The stats listener stays on 127.0.0.1:10085.
+#   the VPS firewall. If that port is already held on the host (nginx, Caddy,
+#   Traefik), the managed agent falls back at startup to the first free port in
+#   443, 8443, 2053, 2083, 2087, 2096, 8880, 9443, 10443 and logs it; open the
+#   port it reports on both protocols. The stats listener stays on
+#   127.0.0.1:10085.
 #
 # DO NOT
 #   - add a Dokploy domain: this is not an HTTP app;

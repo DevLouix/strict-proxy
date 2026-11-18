@@ -499,8 +499,9 @@ skipping anything nginx, Caddy, Traefik or a second agent already listens on.
 A pinned `NODE_TUNNEL_PORT` is never overridden: it fails loudly instead. The
 chosen port is written to `agent.env`, opened for **TCP and UDP** in ufw or
 firewalld, and reported on every heartbeat, so the controller hands clients the
-port the engine actually listens on. The script also enables IP forwarding and
-loads the tun device. The agent's systemd unit runs `src/preflight.ts` before the
+port the engine actually listens on. A managed (Docker) agent does the same
+fallback at startup, because a container cannot run the installer. The script
+also enables IP forwarding and loads the tun device. The agent's systemd unit runs `src/preflight.ts` before the
 agent starts, so a missing `sing-box` binary or an invalid port fails the unit
 with a readable reason instead of serving clients nothing.
 

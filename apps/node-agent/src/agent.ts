@@ -16,6 +16,7 @@ import { ControllerClient } from './controller-client.js';
 import { detectPublicIp } from './public-ip.js';
 import { collectUserUsage } from './usage.js';
 import { listeningPorts } from './preflight.js';
+import { chooseTunnelPort } from './tunnel-port.js';
 import {
   renderSingBoxConfig,
   liveCredentials,
@@ -172,6 +173,33 @@ class Agent {
       ...(observedPublicIp ? { observedPublicIp } : {}),
     });
     log('debug', 'heartbeat sent');
+  }
+
+  /**
+   * Moves off a tunnel port another process already holds.
+   *
+   * Managed engine only: with systemd the engine is already listening on the
+   * configured port, so "busy" means "ours". A container that inherits
+   * NODE_TUNNEL_PORT=443 on a host where nginx owns 443 otherwise starts an
+   * engine that exits immediately and serves nobody.
+   */
+  async resolveTunnelPort(): Promise<void> {
+    if (this.cfg.singBoxRestartMode !== 'managed') return;
+    const tables = await Promise.all(
+      ['/proc/net/tcp', '/proc/net/tcp6'].map((file) => fs.readFile(file, 'utf8').catch(() => '')),
+    );
+    const listening = listeningPorts(...tables);
+    const choice = chooseTunnelPort(this.cfg.tunnelPort, (port) => listening.has(port));
+    if (!choice.changed) {
+      if (choice.reason) log('error', `tunnel port: ${choice.reason}; clients cannot connect until it is freed`);
+      return;
+    }
+    log(
+      'warn',
+      `tunnel port: ${choice.reason}. Open ${choice.port}/tcp and ${choice.port}/udp inbound; ` +
+        'the heartbeat advertises the new port so clients follow it.',
+    );
+    this.cfg.tunnelPort = choice.port;
   }
 
   private async tunnelPortListening(): Promise<boolean> {
@@ -345,6 +373,8 @@ async function main(): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
     }
   }
+  // Before the config is rendered and the heartbeat reports the port.
+  await agent.resolveTunnelPort();
   await agent.syncOnce();
   await agent.heartbeatOnce();
   await agent.reportUsageOnce();
