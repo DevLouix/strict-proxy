@@ -260,6 +260,7 @@ export function stubApi() {
         },
       ],
     },
+    clientGate: { minimumBuild: 21, enabled: true },
     crashes: {
       crashes: [
         {
@@ -298,6 +299,7 @@ export function stubApi() {
       if (path.startsWith('/api/v1/admin/payments/events')) return data.events;
       if (path.startsWith('/api/v1/admin/client-apps/android/crashes')) return data.crashes;
       if (path.startsWith('/api/v1/admin/client-apps/android/releases')) return data.clientReleases;
+      if (path.startsWith('/api/v1/admin/settings/client')) return data.clientGate;
       throw new Error(`unstubbed GET ${path}`);
     },
     async post(path, body) {

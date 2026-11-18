@@ -18,9 +18,18 @@ const ABIS = ['universal', 'arm64-v8a', 'armeabi-v7a', 'x86_64'];
 export async function clientAppsView(api) {
   const host = h('div', {});
   let data = null;
+  let gate = null;
 
   async function load() {
-    data = await api.get('/api/v1/admin/client-apps/android/releases');
+    const [releases, gateData] = await Promise.all([
+      api.get('/api/v1/admin/client-apps/android/releases'),
+      // The minimum client build lives on the Settings screen; read it here too
+      // so a feed that serves a build the gate refuses is visible where builds
+      // are published, not only where the gate is configured.
+      api.get('/api/v1/admin/settings/client').catch(() => null),
+    ]);
+    data = releases;
+    gate = gateData;
     const crashData = await api
       .get('/api/v1/admin/client-apps/android/crashes?limit=50')
       .catch(() => ({ crashes: [] }));
@@ -150,6 +159,14 @@ export async function clientAppsView(api) {
     const storedApks = releases.reduce((total, release) => total + (release.artifacts?.length ?? 0), 0);
     const active = releases.find((release) => release.buildNumber === data?.activeBuildNumber) ?? null;
 
+    // The status check this screen exists to make obvious: the feed and the
+    // gate are configured in two places, and a published build below the gate
+    // means every up-to-date install is refused when it tries to connect.
+    const minimum = Number.isSafeInteger(gate?.minimumBuild) ? gate.minimumBuild : null;
+    const publishedBuild = Number(data?.activeBuildNumber ?? 0);
+    const belowMinimum = minimum !== null && publishedBuild > 0 && publishedBuild < minimum;
+    const gateWithoutBuild = minimum !== null && publishedBuild === 0;
+
     mount(host,
       h('div', { class: 'page-head' },
         h('div', {},
@@ -173,6 +190,28 @@ export async function clientAppsView(api) {
           )
         : null,
 
+      belowMinimum
+        ? h('div', { class: 'panel' },
+            h('div', { class: 'notice warn' },
+              h('strong', {}, 'Published build is below the minimum client version. '),
+              `The update feed offers build ${publishedBuild}, but Settings → Client version requires build ${minimum} or newer. `,
+              'Every device on the newest published build is refused when it connects ', 
+              'and has nothing newer to update to. Publish a build at or above the ', 
+              'minimum, or lower the minimum.',
+            ),
+          )
+        : null,
+
+      gateWithoutBuild
+        ? h('div', { class: 'panel' },
+            h('div', { class: 'notice warn' },
+              h('strong', {}, 'No build is published while the client version gate is on. '),
+              `Builds below ${minimum} are refused, so older installs cannot connect `,
+              'and have no update to install. Publish a build or turn the gate off.',
+            ),
+          )
+        : null,
+
       h('div', { class: 'stats' },
         h('div', { class: 'stat' },
           h('div', { class: 'label' }, 'Published build'),
@@ -188,6 +227,18 @@ export async function clientAppsView(api) {
           h('div', { class: 'label' }, 'Crash reports'),
           h('div', { class: 'value' }, String(crashes.length)),
           h('div', { class: 'hint' }, crashes.length ? 'most recent shown below' : 'none reported'),
+        ),
+        h('div', { class: 'stat' },
+          h('div', { class: 'label' }, 'Client version gate'),
+          h('div', { class: 'value' }, minimum === null ? 'off' : `≥ ${minimum}`),
+          h('div', { class: 'hint' },
+            minimum === null
+              ? 'every build may connect'
+              : belowMinimum
+                ? 'published build is refused'
+                : gateWithoutBuild
+                  ? 'nothing to update to'
+                  : 'published build is allowed'),
         ),
       ),
 

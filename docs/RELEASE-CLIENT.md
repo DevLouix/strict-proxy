@@ -54,7 +54,7 @@ installed apps are never offered it as an update (the run prints a warning).
 | `ANDROID_KEY_PASSWORD` | secret | key password (optional if equal to the keystore one) | the password you chose |
 | `CLIENT_CONTROLLER_URL` | variable | public HTTPS URL compiled into the app | your deployment, e.g. `https://api.example.com` |
 | `CLIENT_SIGNING_PUBLIC_KEY` | variable | base64 of the controller's 32-byte Ed25519 public key (not the APK keystore) | derived from `signing-key.pem` or `SIGNING_PRIVATE_KEY_PEM` |
-| `CLIENT_PUBLISH_ADMIN_EMAIL` | secret, optional | administrator that publishes the build to the in-app update feed | the admin account's email |
+| `CLIENT_PUBLISH_ADMIN_EMAIL` | secret, optional | controller administrator that publishes the build to the in-app update feed | [the publishing account](#the-controller-account-that-publishes-updates) |
 | `CLIENT_PUBLISH_ADMIN_PASSWORD` | secret, optional | that account's password | the password you chose |
 
 The keystore and the public key are produced in
@@ -86,6 +86,64 @@ gh secret set CLIENT_PUBLISH_ADMIN_PASSWORD --body '<that account password>'
 `gh` must be authenticated as an account with admin access to the repository:
 GitHub returns `HTTP 403: Resource not accessible by integration` for tokens
 without it.
+
+### The controller account that publishes updates
+
+`CLIENT_PUBLISH_ADMIN_EMAIL` / `CLIENT_PUBLISH_ADMIN_PASSWORD` identify a
+**controller** administrator — not a GitHub user. The workflow signs in with
+them at `/api/v1/auth/login` and uses the returned access token on the admin
+upload and publish routes. The account therefore needs exactly two things: the
+`admin` role and a working email + password login.
+
+- **An existing administrator is fine** if you already sign in to `/admin` with
+  it.
+- **A dedicated account is better** when you would rather not store a personal
+  password as a repository secret. Create it with either:
+  - `https://<controller>/setup` — only while **no** administrator exists; the
+    page returns 404 afterwards;
+  - the seed command in [SETUP.md §4](../SETUP.md) with your own
+    `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`, which prints them once.
+- **Do not use a normal user account, a GitHub identity or a node secret.** A
+  user gets `403` from the admin upload routes, and the publish step fails even
+  though the build itself succeeded.
+
+Set both secrets from a `gh` session that can administer the repository
+(Settings → Secrets and variables → Actions → **Secrets**):
+
+```bash
+gh secret set CLIENT_PUBLISH_ADMIN_EMAIL --body 'release@example.com'
+gh secret set CLIENT_PUBLISH_ADMIN_PASSWORD --body '<that account password>'
+```
+
+They are only read at publish time, so:
+
+- **Both belong together.** With no password, the workflow prints a warning and
+  skips publishing (the run stays green). With a password but no email, it
+  fails the step.
+- **Rotating the password** is another `gh secret set`; no client rebuild is
+  needed, because these values are not compiled into the APK.
+- **The token that pushes code is not enough.** A repository `GITHUB_TOKEN`
+  cannot write secrets (`403 Resource not accessible by integration`); run
+  `gh auth login` as a repository admin, or set them in the web UI.
+
+**Confirm the feed actually switched** in the *Build Android client artifact*
+job log:
+
+```text
+Published build 70.
+Verified: the update feed offers build 70 and serves arm64-v8a bytes matching ...apk
+```
+
+If instead you see
+
+```text
+##[warning]CLIENT_PUBLISH_ADMIN_PASSWORD is not set, so build 70 was not published ...
+```
+
+the APK exists only on the GitHub release: installed apps will not be offered it.
+`curl -s https://<controller>/api/v1/app/android` must report the same build
+number. Once it does, raise the minimum in **Settings → Client version** if this
+build is meant to be mandatory.
 
 ### Or in one command
 
@@ -388,6 +446,9 @@ than a bare "connection failed".
 
 The value is stored as `client.minBuild` in `platform_settings` and written with
 `PUT /api/v1/admin/settings/client` (`{"minimumBuild": 67}`, or `0` to clear).
+**Client apps** reads it alongside the feed and shows a warning when the
+published build is below the minimum (or when the gate is on and nothing is
+published), so the two settings cannot silently contradict each other.
 
 Two operational rules:
 
