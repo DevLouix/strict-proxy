@@ -185,6 +185,21 @@ test('crash reports are stored once and shown to administrators', async () => {
   assert.equal((await h.request('GET', '/api/v1/admin/client-apps/android/crashes')).status, 401);
 });
 
+test('an administrator can purge every crash report', async () => {
+  const admin = await h.adminToken();
+  await h.request('POST', '/api/v1/client/crashes', {
+    body: { reportId: 'purge-1', message: 'boom' },
+  });
+
+  const purge = await h.request('DELETE', '/api/v1/admin/client-apps/android/crashes', { token: admin });
+  assert.equal(purge.status, 200);
+  assert.equal(purge.body.deleted, 1);
+
+  const list = await h.request('GET', '/api/v1/admin/client-apps/android/crashes', { token: admin });
+  assert.equal(list.body.crashes.length, 0);
+  assert.equal((await h.request('DELETE', '/api/v1/admin/client-apps/android/crashes')).status, 401);
+});
+
 test('an empty crash report is refused', async () => {
   const res = await h.request('POST', '/api/v1/client/crashes', { body: { reportId: 'crash-2' } });
   assert.equal(res.status, 400);

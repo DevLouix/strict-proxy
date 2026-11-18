@@ -242,5 +242,22 @@ export function buildClientAppsAdminRouter({ db, cfg }: { db: Db; cfg: Controlle
     }),
   );
 
+  router.delete(
+    '/api/v1/admin/client-apps/android/crashes',
+    ...requireAdministrator,
+    asyncHandler(async (req, res) => {
+      const removed = await db.delete(clientCrashReports).returning({ id: clientCrashReports.id });
+      await recordAudit(db, {
+        ...auditActor(req),
+        action: 'client_crashes.purged',
+        targetType: 'client_crashes',
+        targetId: 'all',
+        summary: `Purged ${removed.length} client crash report(s)`,
+        metadata: { removed: removed.length },
+      });
+      res.json({ ok: true, deleted: removed.length });
+    }),
+  );
+
   return router;
 }

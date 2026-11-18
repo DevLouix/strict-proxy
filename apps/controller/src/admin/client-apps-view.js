@@ -334,6 +334,27 @@ export async function clientAppsView(api) {
         h('header', {},
           h('h3', {}, 'Crash reports'),
           h('span', { class: 'muted small' }, 'Sent by the app when it hits an uncaught error'),
+          crashes.length > 0
+            ? h('button', {
+                class: 'btn sm danger',
+                onClick: async () => {
+                  const ok = await confirmDialog({
+                    title: 'Purge crash reports?',
+                    body: 'This deletes every stored crash report. It cannot be undone.',
+                    confirmLabel: 'Purge all',
+                    danger: true,
+                  });
+                  if (!ok) return;
+                  try {
+                    const result = await api.del('/api/v1/admin/client-apps/android/crashes');
+                    toast(`Purged ${result.deleted} crash report(s)`);
+                    await load();
+                  } catch (err) {
+                    toast(err.message);
+                  }
+                },
+              }, 'Purge all')
+            : null,
         ),
         h('div', { class: 'table-wrap' },
           crashes.length === 0
