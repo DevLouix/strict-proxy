@@ -15,6 +15,7 @@ import { assertAuthenticatedConfig, loadAgentConfig, type AgentConfig, type Pers
 import { ControllerClient } from './controller-client.js';
 import { detectPublicIp } from './public-ip.js';
 import { collectUserUsage } from './usage.js';
+import { listeningPorts } from './preflight.js';
 import {
   renderSingBoxConfig,
   liveCredentials,
@@ -143,7 +144,18 @@ class Agent {
     const bandwidthBytes = net.reduce((acc, n) => acc + (n.rx_sec ?? 0) + (n.tx_sec ?? 0), 0);
     const observedPublicIp = await this.resolvePublicIp();
     const engine = this.managedSingBox.current;
-    this.engineHealthy = this.cfg.singBoxRestartMode !== 'managed' || Boolean(engine && engine.exitCode === null && !engine.killed);
+    const running = this.cfg.singBoxRestartMode !== 'managed' || Boolean(engine && engine.exitCode === null && !engine.killed);
+    // A live process is not enough: the engine can be up while another service
+    // holds the tunnel port, which leaves every client connecting into a wall.
+    const listening = await this.tunnelPortListening();
+    this.engineHealthy = running && listening;
+    if (running && !listening) {
+      log(
+        'warn',
+        `the engine is running but port ${this.cfg.tunnelPort} is not listening; clients cannot connect. ` +
+          'A web server (nginx/Caddy/Traefik) or another VPN may hold the port; free it or change NODE_TUNNEL_PORT.',
+      );
+    }
     await this.client.heartbeat({
       cpuPercent: Number((cpu.currentLoad ?? 0).toFixed(2)),
       memoryPercent: Number((mem.active / Math.max(1, mem.total) * 100).toFixed(2)),
@@ -156,6 +168,17 @@ class Agent {
       ...(observedPublicIp ? { observedPublicIp } : {}),
     });
     log('debug', 'heartbeat sent');
+  }
+
+  private async tunnelPortListening(): Promise<boolean> {
+    try {
+      const tables = await Promise.all(
+        ['/proc/net/tcp', '/proc/net/tcp6'].map((file) => fs.readFile(file, 'utf8').catch(() => '')),
+      );
+      return listeningPorts(...tables).has(this.cfg.tunnelPort);
+    } catch {
+      return false;
+    }
   }
 
   private async measureUplinkRtt(): Promise<number> {

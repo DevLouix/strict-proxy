@@ -254,6 +254,17 @@ class ControllerApi {
         ),
       );
 
+  /// Unauthenticated liveness probe used to prove the tunnel carries traffic.
+  ///
+  /// Once the VPN is up this request leaves through the tunnel, so a success is
+  /// evidence of a working datapath rather than of the engine merely starting.
+  Future<void> health() async {
+    final res = await _request(() => _client.get(_uri('/healthz')));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, 'HEALTH_CHECK_FAILED', 'health check failed');
+    }
+  }
+
   /// Signed dynamic sing-box config bundle (per-node VLESS+REALITY).
   Future<Map<String, dynamic>> networkConfig({String? sessionId}) => _send(
         () => _client.get(

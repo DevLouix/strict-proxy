@@ -51,6 +51,18 @@ test('the config bundle is signed and verifies against the controller key', asyn
   assert.ok(!verifyJson(publicKey, { ...payload, nodes: [] }, res.body.signature));
 });
 
+test('a node whose engine is down is never offered to clients', async () => {
+  await h.seedNode({ status: 'online' });
+  const dead = await h.seedNode({ status: 'online' });
+  await h.query(`UPDATE nodes SET engine_healthy = false WHERE id = '${dead.id}'`);
+
+  const { token } = await activeUser();
+  const res = await h.request('GET', '/api/v1/network/config', { token });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.nodes.length, 1);
+  assert.notEqual(res.body.nodes[0].id, dead.id, 'an engine that is down must not be dialled');
+});
+
 test('the bundle requires authentication and an active subscription', async () => {
   await h.seedNode({ status: 'online' });
   const { user, token } = await activeUser();

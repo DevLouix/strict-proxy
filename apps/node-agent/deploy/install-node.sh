@@ -60,8 +60,45 @@ if [ "$tunnel_port" = "443" ] && command -v ss >/dev/null 2>&1; then
   fi
 fi
 
+# Whatever port was chosen, the install refuses to continue when something else
+# already serves it: sing-box would exit and every client would hang.
+if command -v ss >/dev/null 2>&1 && ss -ltn "sport = :$tunnel_port" 2>/dev/null | grep -q LISTEN; then
+  echo "Port $tunnel_port is already in use on this host:" >&2
+  ss -ltnp "sport = :$tunnel_port" 2>/dev/null >&2 || true
+  echo "Stop that service, or rerun with NODE_TUNNEL_PORT set to a free port." >&2
+  echo "Whichever port you choose must be open for TCP and UDP inbound." >&2
+  exit 1
+fi
+
 apt-get update
 apt-get install -y ca-certificates curl nodejs npm sing-box
+
+# --- grant the node what it needs -------------------------------------------
+# TUN device for the engine's own outbound sockets.
+modprobe tun 2>/dev/null || true
+
+# Forwarding lets the engine route client traffic out of the VPS.
+if [ -d /etc/sysctl.d ]; then
+  cat > /etc/sysctl.d/99-strict-proxy-node.conf <<'SYSCTL'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+SYSCTL
+  sysctl --system >/dev/null 2>&1 || true
+fi
+
+# Open the tunnel port for both protocols. REALITY is TCP; usage accounting and
+# future UDP flows need UDP, and a closed UDP port looks like a broken tunnel.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow "$tunnel_port"/tcp >/dev/null
+  ufw allow "$tunnel_port"/udp >/dev/null
+  echo "Opened $tunnel_port/tcp and $tunnel_port/udp in ufw."
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port="$tunnel_port"/tcp >/dev/null
+  firewall-cmd --permanent --add-port="$tunnel_port"/udp >/dev/null
+  firewall-cmd --reload >/dev/null
+  echo "Opened $tunnel_port/tcp and $tunnel_port/udp in firewalld."
+fi
 
 install -d -m 0750 /opt/strict-proxy/node-agent /etc/strict-proxy
 # The release/package deployment should place the compiled agent and proto here.
@@ -94,3 +131,4 @@ chmod 0600 "$env_file"
 echo "Agent environment written to $env_file."
 echo "Copy the built node-agent files and deploy/strict-proxy-agent.service, then enable it."
 echo "The enrollment token is one-use and should be removed from $env_file after the first successful enrollment."
+echo "Verify the deployment with: sudo -u strictproxy env $(grep -v '^#' "$env_file" | xargs) npm run self-check -w apps/node-agent"

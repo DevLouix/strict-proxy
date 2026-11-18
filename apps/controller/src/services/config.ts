@@ -62,10 +62,17 @@ export async function buildSignedConfigBundle(
 
   // Provision per-node credentials for this user before rendering configs,
   // so a fresh user immediately gets working VLESS UUIDs on every node.
+  // A node whose engine is not running cannot carry a tunnel; offering it
+  // anyway produced "connected" clients with no traffic. A node that has never
+  // reported health is still usable — only a reported `false` excludes it.
+  const usableNode = and(
+    inArray(nodes.status, ['online', 'degraded']),
+    or(isNull(nodes.engineHealthy), ne(nodes.engineHealthy, false)),
+  );
   const activeNodes = await db
     .select({ id: nodes.id, loadScore: nodes.loadScore, status: nodes.status })
     .from(nodes)
-    .where(inArray(nodes.status, ['online', 'degraded']));
+    .where(usableNode);
   if (activeNodes.length === 0) {
     throw new Error('no_nodes_available');
   }
@@ -112,7 +119,7 @@ export async function buildSignedConfigBundle(
         eq(nodeCredentials.revoked, false),
       ),
     )
-    .where(and(inArray(nodes.status, ['online', 'degraded']), inArray(nodes.id, allowedNodeIds)));
+    .where(and(usableNode, inArray(nodes.id, allowedNodeIds)));
 
   const limited = rows;
 

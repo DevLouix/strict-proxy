@@ -445,6 +445,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         nodeConfig,
         compat: _ref.read(compatModeProvider),
       )));
+      await _verifyTraffic(attempt);
     } on BundleVerificationException catch (e) {
       _fail(e.reason);
     } on ApiException catch (e) {
@@ -457,6 +458,24 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       _fail(_describeConnectFailure(e));
     } catch (e) {
       _fail(_engine.lastErrorMessage ?? _describeError(e));
+    }
+  }
+
+  /// Proves the tunnel carries traffic before the UI claims success.
+  ///
+  /// A connected engine only means the tun exists. When the node's tunnel port
+  /// is closed, or a web server holds it, the tunnel comes up and carries
+  /// nothing — which read as "connected, no internet" until this probe.
+  Future<void> _verifyTraffic(int attempt) async {
+    try {
+      await _ref.read(apiProvider).health().timeout(const Duration(seconds: 8));
+    } catch (_) {
+      if (attempt != _attempt) return;
+      await _engine.disconnect();
+      _fail(
+        'The VPN connected, but no traffic is getting through. The server is '
+        'not reachable — check that its tunnel port is open, then try again.',
+      );
     }
   }
 

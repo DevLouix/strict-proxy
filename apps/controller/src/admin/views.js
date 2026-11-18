@@ -694,6 +694,7 @@ export async function nodesView(api) {
                 h('th', {}, 'Hostname'),
                 h('th', {}, 'Region'),
                 h('th', {}, 'Public IP'),
+                h('th', {}, 'Tunnel'),
                 h('th', {}, 'Status'),
                 h('th', {}, 'Load'),
                 h('th', {}, 'Usage'),
@@ -714,6 +715,12 @@ export async function nodesView(api) {
                     : n.publicIpSource === 'manual'
                       ? h('span', { class: 'muted small' }, 'set by admin')
                       : null,
+                ),
+                h('td', {},
+                  h('div', { class: 'mono small' }, `${n.publicIp}:${n.tunnelPort}`),
+                  n.engineHealthy === false
+                    ? h('span', { class: 'muted small' }, 'not offered: engine down')
+                    : null,
                 ),
                 h('td', {}, badge(n.status)),
                 h('td', {}, h('span', { class: 'small' }, `${n.loadScore}%`)),

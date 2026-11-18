@@ -6,6 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/strict-proxy/agent.env
+# Fails the unit with a readable reason instead of starting an agent whose
+# engine cannot serve clients (missing binary, invalid tunnel port).
+ExecStartPre=/usr/bin/node --import tsx /opt/strict-proxy/node-agent/src/preflight.ts
 ExecStart=/usr/bin/node --import tsx /opt/strict-proxy/node-agent/src/agent.ts
 Restart=always
 RestartSec=5
