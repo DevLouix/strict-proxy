@@ -368,6 +368,36 @@ A deployment that predates the dashboard can still publish a single APK with
 `CLIENT_ANDROID_NOTES`. It is served as a `universal` artifact, and the first
 build published from **Client apps** takes precedence over it.
 
+#### Requiring a minimum build
+
+An operator can retire old APKs without touching the node fleet: **Settings →
+Client version** in the admin dashboard sets the lowest build number allowed to
+connect. `0` or a blank field disables the gate (the default).
+
+The app sends `x-client-build` (its `APP_BUILD_NUMBER`) on every request. When
+the caller is older, `GET /api/v1/network/config` answers:
+
+```json
+{ "code": "CLIENT_UPDATE_REQUIRED", "error": "…build 67 or newer.", "minimumBuild": 67 }
+```
+
+with HTTP `426`. No tunnel credentials are issued, so the old build cannot carry
+traffic even if it is already signed in. The app turns that into an update
+prompt through the in-app updater — the same feed as any other update — rather
+than a bare "connection failed".
+
+The value is stored as `client.minBuild` in `platform_settings` and written with
+`PUT /api/v1/admin/settings/client` (`{"minimumBuild": 67}`, or `0` to clear).
+
+Two operational rules:
+
+- **Set it to a build that exists.** Raise the minimum only after the new APK is
+  published and installable; otherwise users are blocked with nothing to install.
+- **Builds older than this check send no header and are refused.** That is the
+  point of the gate, but it means enabling it immediately blocks every install
+  that predates the feature. Set the minimum to the first build people can
+  update to.
+
 #### Crash reports
 
 The app posts uncaught Flutter and platform errors to

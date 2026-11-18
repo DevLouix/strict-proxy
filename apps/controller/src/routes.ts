@@ -31,6 +31,13 @@ import { publicIpFromRequest } from './services/client-ip.js';
 import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
 import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
+import {
+  CLIENT_BUILD_HEADER,
+  clientMeetsMinimum,
+  clientUpdateRequiredBody,
+  minimumClientBuild,
+  parseClientBuild,
+} from './services/client-version.js';
 import { mintEntitlementToken } from './services/entitlements.js';
 import { claimVpnSession, currentVpnSession } from './services/sessions.js';
 import { buildLinksCatalog, normalizeLinkInput, type LinkInput } from './services/links.js';
@@ -961,6 +968,16 @@ export function buildRouter(ctx: Ctx): Router {
     requireAuth,
     asyncHandler(async (req, res) => {
       const claims = req.auth!;
+      // Credentials are withheld from builds the operator has retired. This is
+      // the enforcement point because a tunnel cannot be configured without
+      // this response; refusing at sign-in would leave already-signed-in older
+      // installs working until their tokens expired.
+      const minimum = await minimumClientBuild(ctx.db, ctx.cfg);
+      const build = parseClientBuild(req.header(CLIENT_BUILD_HEADER));
+      if (!clientMeetsMinimum(build, minimum)) {
+        res.status(426).json(clientUpdateRequiredBody(minimum!, build));
+        return;
+      }
       const sub = await getSubscription(ctx.db, claims.sub);
       // A free row is not a trial: it exists so status and limits always have a
       // value, but only a paid tier that is currently active gets credentials.

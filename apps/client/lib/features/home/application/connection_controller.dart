@@ -13,6 +13,7 @@ import '../../engine/config_bundle_loader.dart';
 import '../../engine/engine_adapter.dart';
 import '../../engine/libbox_engine.dart';
 import '../../engine/linux_singbox_engine.dart';
+import '../../updates/update_controller.dart';
 import 'connect_recovery.dart';
 
 /// TUN MTU used on every device.
@@ -440,6 +441,12 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     } on BundleVerificationException catch (e) {
       _fail(e.reason);
     } on ApiException catch (e) {
+      // A refused build is fixable in one tap, so ask the updater for the
+      // published release now; the home banner then offers the install instead
+      // of leaving the user with an error and no route forward.
+      if (e.code == 'CLIENT_UPDATE_REQUIRED') {
+        unawaited(_ref.read(updateProvider.notifier).check(force: true));
+      }
       _fail(_describeConnectFailure(e));
     } catch (e) {
       _fail(_engine.lastErrorMessage ?? _describeError(e));
@@ -485,6 +492,8 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         return 'No servers are available right now. Try again shortly.';
       case 'SESSION_SUPERSEDED':
         return 'Your account connected on another device, so this session was closed.';
+      case 'CLIENT_UPDATE_REQUIRED':
+        return 'This build of StrictProxy can no longer connect. Update the app to continue.';
       case 'TOKEN_REVOKED':
       case 'UNAUTHENTICATED':
       case 'INVALID_REFRESH':

@@ -12,9 +12,17 @@ import { passwordField } from './password-toggle.js';
 export async function settingsView(api) {
   const host = h('div', {});
   let state = null;
+  let gate = null;
+  let published = null;
 
   async function load() {
-    state = await api.get('/api/v1/admin/settings/email');
+    [state, gate, published] = await Promise.all([
+      api.get('/api/v1/admin/settings/email'),
+      // Optional panels: a controller that predates them must not blank the
+      // whole settings screen.
+      api.get('/api/v1/admin/settings/client').catch(() => null),
+      api.get('/api/v1/app/android').catch(() => null),
+    ]);
     render();
   }
 
@@ -23,6 +31,67 @@ export async function settingsView(api) {
       h('span', { class: 'field-label' }, label),
       input,
       hint ? h('span', { class: 'muted small' }, hint) : null,
+    );
+  }
+
+  /**
+   * The minimum build that may connect. Shown as a build number because that is
+   * what the APK, Android and the in-app updater all compare; the published
+   * version name is displayed beside it purely to help an operator pick it.
+   */
+  function clientVersionPanel() {
+    const min0 = h('input', {
+      type: 'number',
+      min: '0',
+      step: '1',
+      value: gate?.minimumBuild != null ? String(gate.minimumBuild) : '',
+      placeholder: published?.buildNumber ? String(published.buildNumber) : 'e.g. 68',
+    });
+    const error = h('p', { class: 'muted small', style: 'min-height:18px' });
+    const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save minimum');
+
+    const form = h('form', {
+      onSubmit: async (event) => {
+        event.preventDefault();
+        error.textContent = '';
+        save.disabled = true;
+        try {
+          const raw = min0.value.trim();
+          const minimumBuild = raw === '' ? 0 : Number(raw);
+          if (!Number.isInteger(minimumBuild) || minimumBuild < 0) {
+            throw new Error('Enter a whole build number, or 0 to allow every build.');
+          }
+          await api.put('/api/v1/admin/settings/client', { minimumBuild });
+          toast(minimumBuild > 0
+            ? `Builds below ${minimumBuild} can no longer connect`
+            : 'Client version gate disabled');
+          await load();
+        } catch (err) {
+          error.textContent = err.message || 'Save failed';
+          save.disabled = false;
+        }
+      },
+    },
+      field('Minimum build that may connect', min0,
+        published?.buildNumber
+          ? `Published build: ${published.buildNumber}${published.version ? ` (v${published.version})` : ''}. 0 or blank allows every build.`
+          : 'No build is published yet. 0 or blank allows every build.'),
+      h('div', { class: 'actions' }, save, error),
+    );
+
+    return h('div', { class: 'panel' },
+      h('header', {},
+        h('h3', {}, 'Client version'),
+        h('span', { class: gate?.enabled ? 'badge active' : 'badge offline' },
+          gate?.enabled ? `Minimum build ${gate.minimumBuild}` : 'All builds allowed'),
+      ),
+      h('div', { class: 'form-grid' }, form),
+      h('p', { class: 'muted small' },
+        'Refused builds cannot fetch tunnel credentials (',
+        h('code', {}, '426 CLIENT_UPDATE_REQUIRED'),
+        ') and the app offers its in-app update. Builds older than this check send no '
+        + 'build number, so enabling the gate blocks them too — set the minimum to the '
+        + 'build users can actually install.'),
     );
   }
 
@@ -135,6 +204,7 @@ export async function settingsView(api) {
             ),
           )
         : null,
+      clientVersionPanel(),
       h('div', { class: 'panel' },
         h('header', {}, h('h3', {}, 'SMTP server')),
         h('div', { class: 'form-grid' }, form),

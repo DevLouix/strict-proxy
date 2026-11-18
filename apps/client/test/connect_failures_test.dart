@@ -26,6 +26,13 @@ void main() {
     }
   });
 
+  test('a retired build tells the user to update, not to retry', () {
+    expect(
+      describe(426, 'CLIENT_UPDATE_REQUIRED'),
+      'This build of StrictProxy can no longer connect. Update the app to continue.',
+    );
+  });
+
   test('an unreachable controller reads as a connectivity problem', () {
     expect(describe(0, 'NETWORK_ERROR'), 'Cannot reach the controller. Check your connection.');
   });

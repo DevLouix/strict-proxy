@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 
+import 'app_version.dart';
 import 'billing_models.dart';
 import 'config.dart';
 import 'link_models.dart';
@@ -43,6 +44,10 @@ class ControllerApi {
 
   Map<String, String> _headers({bool auth = true}) => {
         'content-type': 'application/json',
+        // Lets the controller retire builds it can no longer support. Sent on
+        // every request, including login, so the gate never has to guess.
+        'x-client-version': AppVersion.name,
+        'x-client-build': '${AppVersion.buildNumber}',
         if (auth && _tokens.accessToken != null)
           'authorization': 'Bearer ${_tokens.accessToken}',
       };

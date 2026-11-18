@@ -22,6 +22,7 @@ import { buildClientCrashRouter } from './routes/client-crashes.js';
 import { buildCouponsAdminRouter } from './routes/coupons-admin.js';
 import { errorHandler } from './middleware.js';
 import { mountAdminDashboard } from './admin-ui.js';
+import { buildClientVersionRouter } from './routes/client-version.js';
 import { mountIndexPage } from './index-page.js';
 
 export interface AppContext {
@@ -104,6 +105,7 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
   app.use(buildDisputesRouter({ db, cfg, redis }));
   app.use(buildAccountRouter({ db, cfg, redis }));
   app.use(buildMailRouter({ db, cfg }));
+  app.use(buildClientVersionRouter({ db, cfg }));
   app.use(buildBillingOpsRouter({ db, cfg }));
   app.use(buildCouponsAdminRouter({ db, cfg }));
 
