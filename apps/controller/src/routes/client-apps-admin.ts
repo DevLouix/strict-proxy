@@ -23,6 +23,7 @@ import {
   activeRelease,
   deleteRelease,
   isClientAbi,
+  isStorageWriteError,
   listReleases,
   setReleaseStatus,
   upsertArtifact,
@@ -138,14 +139,30 @@ export function buildClientAppsAdminRouter({ db, cfg }: { db: Db; cfg: Controlle
         return;
       }
 
-      const release = await upsertArtifact(db, cfg, {
-        buildNumber,
-        version,
-        notes,
-        abi,
-        bytes,
-        createdBy: req.auth?.sub ?? null,
-      });
+      let release: Awaited<ReturnType<typeof upsertArtifact>>;
+      try {
+        release = await upsertArtifact(db, cfg, {
+          buildNumber,
+          version,
+          notes,
+          abi,
+          bytes,
+          createdBy: req.auth?.sub ?? null,
+        });
+      } catch (err) {
+        if (!isStorageWriteError(err)) throw err;
+        // The APK never reached the disk. Saying so names the one thing the
+        // operator can fix; a bare "internal error" sent the release pipeline
+        // hunting the APK and the admin account instead.
+        console.error('[controller] could not store the uploaded APK:', err);
+        fail(
+          res,
+          503,
+          'the controller cannot write the APK to CLIENT_ANDROID_STORAGE_DIR: the release volume is not writable by the controller user',
+          'STORAGE_UNAVAILABLE',
+        );
+        return;
+      }
 
       res.status(201).json({
         release: adminRelease(release),

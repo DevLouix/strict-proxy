@@ -366,14 +366,15 @@ class LibboxVpnService : VpnService(), PlatformInterface {
             val name = link.interfaceName ?: return
             val capabilities = manager.getNetworkCapabilities(network)
             val isVpn = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
-            val index = AndroidNetworkInterface.getByName(name)?.index ?: 0
+            val update = TunPlan.defaultInterfaceUpdate(name, isVpn) ?: return
+            val index = AndroidNetworkInterface.getByName(update.name)?.index ?: 0
             val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
             // The last argument is "this is a VPN". Reporting the tun with it
             // unset let the engine adopt its own tunnel as the upstream NIC,
             // because an Android VPN is only accepted as upstream when the
             // config asks for it (`route.override_android_vpn`). The result was
             // a connected tunnel that carried nothing on every app.
-            listener.updateDefaultInterface(name, index, metered, isVpn)
+            listener.updateDefaultInterface(update.name, index, metered, update.isVpn)
             reportedDefaultNetworks[listener] = network
         }.onFailure { Log.w(TAG, "could not report the default interface", it) }
     }

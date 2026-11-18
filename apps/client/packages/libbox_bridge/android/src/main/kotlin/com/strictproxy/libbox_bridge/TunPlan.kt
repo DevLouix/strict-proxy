@@ -17,6 +17,20 @@ internal object TunPlan {
     data class Prefix(val address: String, val prefix: Int)
 
     /**
+     * The default-interface announcement handed to the engine.
+     *
+     * [isVpn] is not decoration: the engine accepts a VPN interface as an
+     * upstream NIC only when the config opts in with
+     * `route.override_android_vpn`. Dropping the flag made Android's own tun
+     * look like a physical network and the engine dialled the node into it.
+     */
+    data class DefaultInterface(val name: String, val isVpn: Boolean)
+
+    /** The announcement to send for [interfaceName], or null when unusable. */
+    fun defaultInterfaceUpdate(interfaceName: String?, isVpn: Boolean): DefaultInterface? =
+        if (interfaceName.isNullOrBlank()) null else DefaultInterface(interfaceName, isVpn)
+
+    /**
      * Resolvers to put on the VPN interface when the engine reports none.
      *
      * Android resolves names through the DNS servers of the active network, and

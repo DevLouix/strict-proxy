@@ -12,6 +12,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHarness, type Harness } from '../helpers/harness.js';
+import { isStorageWriteError } from '../../apps/controller/src/services/client-apps.js';
 
 const APK = (label: string) => `PK\u0003\u0004${label}`;
 
@@ -49,6 +50,19 @@ async function upload(
     },
   );
 }
+
+test('a filesystem refusal is a storage error, not a bad upload', () => {
+  // Docker creates a named volume root-owned; the controller runs as its own
+  // user. That failure used to surface as a bare "internal error".
+  const withCode = (code: string) => Object.assign(new Error(code), { code });
+  assert.equal(isStorageWriteError(withCode('EACCES')), true);
+  assert.equal(isStorageWriteError(withCode('EPERM')), true);
+  assert.equal(isStorageWriteError(withCode('EROFS')), true);
+  assert.equal(isStorageWriteError(withCode('ENOSPC')), true);
+  assert.equal(isStorageWriteError(withCode('ENOENT')), false);
+  assert.equal(isStorageWriteError(new Error('validation')), false);
+  assert.equal(isStorageWriteError(null), false);
+});
 
 test('a build stays a draft until an administrator publishes it', async () => {
   const admin = await h.adminToken();

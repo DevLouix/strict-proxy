@@ -43,6 +43,23 @@ class TunPlanTest {
     }
 
     @Test
+    fun `the default-interface update carries the vpn flag`() {
+        // The engine only refuses to use its own tun as the upstream NIC when
+        // it is told the interface is a VPN; the flag was previously hard-coded
+        // to false, which made every request loop into the tunnel.
+        assertEquals(
+            TunPlan.DefaultInterface("tun0", isVpn = true),
+            TunPlan.defaultInterfaceUpdate("tun0", isVpn = true),
+        )
+        assertEquals(
+            TunPlan.DefaultInterface("wlan0", isVpn = false),
+            TunPlan.defaultInterfaceUpdate("wlan0", isVpn = false),
+        )
+        assertEquals(null, TunPlan.defaultInterfaceUpdate(null, isVpn = false))
+        assertEquals(null, TunPlan.defaultInterfaceUpdate("   ", isVpn = true))
+    }
+
+    @Test
     fun `no advertised routes falls back to a default route`() {
         assertEquals(
             listOf(TunPlan.Prefix("0.0.0.0", 0)),

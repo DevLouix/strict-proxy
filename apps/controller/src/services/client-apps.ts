@@ -69,6 +69,17 @@ export function storageDir(cfg: ClientReleaseConfig): string {
 }
 
 /**
+ * Whether the filesystem refused the upload, as opposed to the request being
+ * wrong. These are the failures an operator can fix: a release volume Docker
+ * created root-owned while the controller runs as another user, a read-only
+ * mount, or a full disk. Everything else keeps the generic internal error.
+ */
+export function isStorageWriteError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'EACCES' || code === 'EPERM' || code === 'EROFS' || code === 'ENOSPC';
+}
+
+/**
  * The release published by environment variables, if it is complete and its
  * file is present. Never throws: a half-configured deployment simply offers no
  * update.
