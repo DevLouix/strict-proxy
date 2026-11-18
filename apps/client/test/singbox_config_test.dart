@@ -134,6 +134,22 @@ void main() {
     }
   });
 
+  // sing-box 1.14 refuses to start when an outbound dial has no resolver, and
+  // the failure is fatal at startup: the UI can still show a connected tunnel
+  // while every request fails. The tag must also name a DNS server in the same
+  // config, otherwise the resolver lookup itself fails at load.
+  test('every dial resolves through a configured DNS server', () {
+    final config = buildSingBoxTunConfig(endpoint());
+    final route = config['route'] as Map<String, dynamic>;
+    final tags = ((config['dns'] as Map<String, dynamic>)['servers'] as List)
+        .cast<Map<String, dynamic>>()
+        .map((server) => server['tag'])
+        .toSet();
+
+    expect(route['default_domain_resolver'], isA<String>());
+    expect(tags, contains(route['default_domain_resolver']));
+  });
+
   test('the normal datapath keeps the system stack', () {
     final inbound =
         (buildSingBoxTunConfig(endpoint())['inbounds'] as List).first as Map<String, dynamic>;

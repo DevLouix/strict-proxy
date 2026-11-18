@@ -101,6 +101,11 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
                 ),
               ],
             ],
+            _ProfileCard(
+              email: ref.watch(authStateProvider).email ?? '',
+              onChangeEmail: _changeEmail,
+              onChangePassword: _changePassword,
+            ),
             const SizedBox(height: 24),
             Text(
               'Your data allowance resets every 30 days.',
@@ -172,6 +177,41 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
   void _showMessage(String message) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _changeEmail() async {
+    final values = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (_) => _ChangeEmailDialog(
+        currentEmail: ref.read(authStateProvider).email ?? '',
+      ),
+    );
+    if (!mounted || values == null) return;
+    final error = await ref.read(authStateProvider.notifier).changeEmail(
+          values['email']!,
+          values['password']!,
+        );
+    if (!mounted) return;
+    _showMessage(error ?? 'Email updated.');
+  }
+
+  Future<void> _changePassword() async {
+    final values = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => const _ChangePasswordDialog(),
+    );
+    if (!mounted || values == null) return;
+    final error = await ref
+        .read(authStateProvider.notifier)
+        .changePassword(values[0], values[1]);
+    if (!mounted) return;
+    if (error != null) {
+      _showMessage(error);
+      return;
+    }
+    // The server revoked every session, including this one; the root gate now
+    // shows sign-in instead of a shell whose requests would all fail.
+    Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
   Future<void> _startCheckout(String tier) async {
@@ -509,6 +549,207 @@ class _LimitRow extends StatelessWidget {
       title: Text(label),
       trailing:
           Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+/// Self-service profile controls. Deleting the account lives in the danger
+/// zone below; changing an email or password does not need a support ticket.
+class _ProfileCard extends StatelessWidget {
+  const _ProfileCard({
+    required this.email,
+    required this.onChangeEmail,
+    required this.onChangePassword,
+  });
+
+  final String email;
+  final Future<void> Function() onChangeEmail;
+  final Future<void> Function() onChangePassword;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Text('Profile', style: theme.textTheme.labelMedium),
+          ),
+          ListTile(
+            title: const Text('Email'),
+            subtitle: Text(email.isEmpty ? 'Loading…' : email),
+            trailing: TextButton(
+              onPressed: email.isEmpty ? null : () => onChangeEmail(),
+              child: const Text('Change'),
+            ),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            title: const Text('Password'),
+            subtitle: const Text('Changing it signs out every device'),
+            trailing: TextButton(
+              onPressed: () => onChangePassword(),
+              child: const Text('Change'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChangeEmailDialog extends StatefulWidget {
+  const _ChangeEmailDialog({required this.currentEmail});
+  final String currentEmail;
+
+  @override
+  State<_ChangeEmailDialog> createState() => _ChangeEmailDialogState();
+}
+
+class _ChangeEmailDialogState extends State<_ChangeEmailDialog> {
+  late final _email = TextEditingController(text: widget.currentEmail);
+  final _password = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final email = _email.text.trim();
+    // The server validates again; this only avoids a round trip for an obvious
+    // typo and keeps the error next to the field.
+    if (!email.contains('@') || !email.contains('.')) {
+      setState(() => _error = 'Enter a valid email address.');
+      return;
+    }
+    if (_password.text.isEmpty) {
+      setState(() => _error = 'Enter your password to confirm.');
+      return;
+    }
+    Navigator.of(context)
+        .pop({'email': email, 'password': _password.text});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Change email'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'This address is used to sign in and for password resets.',
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _email,
+            keyboardType: TextInputType.emailAddress,
+            autocorrect: false,
+            decoration: const InputDecoration(labelText: 'New email'),
+          ),
+          const SizedBox(height: 12),
+          PasswordField(
+            controller: _password,
+            label: 'Current password',
+            onFieldSubmitted: (_) => _submit(),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              _error!,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+class _ChangePasswordDialog extends StatefulWidget {
+  const _ChangePasswordDialog();
+
+  @override
+  State<_ChangePasswordDialog> createState() => _ChangePasswordDialogState();
+}
+
+class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
+  final _current = TextEditingController();
+  final _next = TextEditingController();
+  final _confirm = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _current.dispose();
+    _next.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (_current.text.isEmpty) {
+      setState(() => _error = 'Enter your current password.');
+      return;
+    }
+    if (_next.text.length < 10) {
+      setState(() => _error = 'Use at least 10 characters.');
+      return;
+    }
+    if (_next.text != _confirm.text) {
+      setState(() => _error = 'The new passwords do not match.');
+      return;
+    }
+    Navigator.of(context).pop([_current.text, _next.text]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Change password'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          PasswordField(
+            controller: _current,
+            autofocus: true,
+            label: 'Current password',
+          ),
+          const SizedBox(height: 12),
+          PasswordField(controller: _next, label: 'New password'),
+          const SizedBox(height: 12),
+          PasswordField(controller: _confirm, label: 'Confirm new password'),
+          if (_error != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              _error!,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Change')),
+      ],
     );
   }
 }

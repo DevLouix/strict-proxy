@@ -134,6 +134,41 @@ class AuthController extends StateNotifier<AuthState> {
     state = state.copyWith(status: AuthStatus.unauthenticated, email: null, tier: null);
   }
 
+  /// Changes the account email. Returns an error message, or null.
+  ///
+  /// The password is required by the server, so a stolen token cannot move the
+  /// account. The session stays valid: the server authorises by user id.
+  Future<String?> changeEmail(String email, String password) async {
+    try {
+      final body = await _ref.read(apiProvider).changeEmail(email, password);
+      final updated = body['email'] as String?;
+      if (updated != null) state = state.copyWith(email: updated);
+      return null;
+    } on ApiException catch (e) {
+      return e.message;
+    }
+  }
+
+  /// Changes the password. Returns an error message, or null.
+  ///
+  /// Every session is revoked server-side on success, including this one, so
+  /// local credentials are dropped and the gate returns to sign-in.
+  Future<String?> changePassword(
+      String currentPassword, String newPassword) async {
+    try {
+      await _ref.read(apiProvider).changePassword(currentPassword, newPassword);
+    } on ApiException catch (e) {
+      return e.message;
+    }
+    await _ref.read(tokenStoreProvider).clear();
+    state = state.copyWith(
+      status: AuthStatus.unauthenticated,
+      email: null,
+      tier: null,
+    );
+    return null;
+  }
+
   /// Deletes the account server-side, then clears local credentials.
   ///
   /// Returns an error message to show, or null on success. Local state is only

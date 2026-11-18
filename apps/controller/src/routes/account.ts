@@ -10,7 +10,7 @@ import { Router, type Request, type Response } from 'express';
 import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
 import type { Redis } from 'ioredis';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { asyncHandler, requireJwt } from '../middleware.js';
 import { rateLimit } from '../services/rate-limit.js';
 import { users, subscriptions } from '../db/schema.js';
@@ -36,6 +36,9 @@ interface Ctx {
 
 /** Mirrors the register endpoint's floor. */
 const MIN_PASSWORD_LENGTH = 10;
+
+/** Same shape the register endpoint accepts; kept in one place for changes. */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function buildAccountRouter(ctx: Ctx): Router {
   const router = Router();
@@ -155,6 +158,79 @@ export function buildAccountRouter(ctx: Ctx): Router {
       await clearPasswordResets(ctx.db, claims.sub);
       await revokeRefreshes(ctx.db, claims.sub);
       res.json({ ok: true, message: 'Password changed. All sessions were signed out.' });
+    }),
+  );
+
+  /**
+   * Changes the signed-in account's email.
+   *
+   * The current password is required for the same reason deletion requires it:
+   * an access token alone must not be able to move an account to an address the
+   * token's holder controls. Authorisation is by subject, so rotating the
+   * address does not invalidate the session, and the stale email claim in the
+   * access token is never used to decide access.
+   */
+  router.post(
+    '/api/v1/auth/email/change',
+    requireJwt(ctx.cfg, ctx.db),
+    limit('auth.change'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const claims = req.auth!;
+      const body = req.body as { email?: string; password?: string };
+      const email = typeof body.email === 'string' ? body.email.toLowerCase().trim() : '';
+      if (email.length > 254 || !EMAIL_PATTERN.test(email)) {
+        res.status(400).json({ error: 'a valid email is required', code: 'VALIDATION' });
+        return;
+      }
+
+      const [user] = await ctx.db
+        .select({ id: users.id, email: users.email, passwordHash: users.passwordHash })
+        .from(users)
+        .where(eq(users.id, claims.sub))
+        .limit(1);
+      if (!user) {
+        res.status(404).json({ error: 'user not found', code: 'NOT_FOUND' });
+        return;
+      }
+      if (!body.password || !(await bcrypt.compare(body.password, user.passwordHash))) {
+        res.status(401).json({ error: 'password is incorrect', code: 'INVALID_CREDENTIALS' });
+        return;
+      }
+      if (email === user.email) {
+        res.json({ ok: true, email });
+        return;
+      }
+
+      // Drizzle wraps driver failures, so checking only the top-level `code`
+      // missed the unique violation and turned a taken address into a 500.
+      const [taken] = await ctx.db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.email, email), ne(users.id, claims.sub)))
+        .limit(1);
+      if (taken) {
+        res.status(409).json({ error: 'email already registered', code: 'EMAIL_TAKEN' });
+        return;
+      }
+
+      try {
+        await ctx.db
+          .update(users)
+          .set({ email, updatedAt: new Date() })
+          .where(eq(users.id, claims.sub));
+      } catch (error) {
+        // The pre-check still races another request, so the unique index is the
+        // authority on whether the address is free.
+        const code = (error as { code?: string; cause?: { code?: string } }).code
+          ?? (error as { cause?: { code?: string } }).cause?.code;
+        if (code === '23505') {
+          res.status(409).json({ error: 'email already registered', code: 'EMAIL_TAKEN' });
+          return;
+        }
+        throw error;
+      }
+
+      res.json({ ok: true, email });
     }),
   );
 

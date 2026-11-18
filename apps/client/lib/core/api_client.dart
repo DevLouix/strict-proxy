@@ -193,6 +193,33 @@ class ControllerApi {
     );
   }
 
+  /// Changes the signed-in account's email address.
+  ///
+  /// The password confirms the change; the server rejects a wrong one with 401.
+  Future<Map<String, dynamic>> changeEmail(String email, String password) {
+    return _send(() => _client.post(
+          _uri('/api/v1/auth/email/change'),
+          headers: _headers(),
+          body: jsonEncode({'email': email, 'password': password}),
+        ));
+  }
+
+  /// Changes the password for the signed-in account.
+  ///
+  /// The server signs out every session on success, including this one, so the
+  /// caller must clear local credentials rather than assume the session survives.
+  Future<Map<String, dynamic>> changePassword(
+      String currentPassword, String newPassword) {
+    return _send(() => _client.post(
+          _uri('/api/v1/auth/password/change'),
+          headers: _headers(),
+          body: jsonEncode({
+            'currentPassword': currentPassword,
+            'newPassword': newPassword,
+          }),
+        ));
+  }
+
   /// Deletes the signed-in account. The password is required by the server so a
   /// stolen access token alone cannot destroy the account.
   ///

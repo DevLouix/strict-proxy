@@ -91,6 +91,13 @@ Map<String, dynamic> buildSingBoxTunConfig(
       ],
       'route': {
         'auto_detect_interface': true,
+        // 1.14 makes a dial without a resolver a fatal startup error, so this
+        // is load-bearing rather than a tidy-up: the engine refuses to start
+        // (and the tunnel reports connected with no traffic) without it. The
+        // proxy server is an IP, so `local` only resolves names the engine has
+        // to look up before dialling — never the tunnel's own endpoint, which
+        // would loop.
+        'default_domain_resolver': 'local',
         // DNS has to be answered by the engine, not proxied as-is. The device's
         // queries reach the tunnel as plain UDP:53; the final outbound is VLESS
         // with the Vision flow, which carries no UDP at all, so without these
