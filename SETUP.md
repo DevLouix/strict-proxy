@@ -490,6 +490,26 @@ admin**.
 
 ---
 
+
+### What the node installer now guarantees
+
+`install-node.sh` refuses to continue when another process already listens on
+`NODE_TUNNEL_PORT` (nginx, Caddy, Traefik or a second agent), then opens the
+port for **TCP and UDP** in ufw or firewalld, enables IP forwarding and loads
+the tun device. The agent's systemd unit runs `src/preflight.ts` before the
+agent starts, so a missing `sing-box` binary or an invalid port fails the unit
+with a readable reason instead of serving clients nothing.
+
+After deploying, verify the node with:
+
+```bash
+sudo env $(grep -v '^#' /etc/strict-proxy/agent.env | xargs) \
+  npm run self-check -w apps/node-agent
+```
+
+The heartbeat now reports the engine as unhealthy unless the tunnel port is
+actually listening, and the controller stops offering such a node to clients.
+
 ## 8. Change what a plan costs
 
 The **Plans** tab shows two numbers per tier:
