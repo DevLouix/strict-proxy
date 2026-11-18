@@ -139,12 +139,16 @@ for apk in "${APKS[@]}"; do
     exit 1
   fi
 
-  SERVER_SHA="$(printf '%s' "$RESPONSE" | json_field artifact \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha256"])') || {
-      echo 'error: unexpected upload response:' >&2
-      echo "$RESPONSE" >&2
-      exit 1
-    }
+  SERVER_SHA="$(printf '%s' "$RESPONSE" | python3 -c '
+import json, sys
+release = json.load(sys.stdin)
+print((release.get("artifact") or {}).get("sha256") or "")
+')"
+  if [[ -z "$SERVER_SHA" ]]; then
+    echo 'error: unexpected upload response:' >&2
+    echo "$RESPONSE" >&2
+    exit 1
+  fi
   LOCAL_SHA="$(sha256sum "$apk" | cut -d' ' -f1)"
   if [[ "$SERVER_SHA" != "$LOCAL_SHA" ]]; then
     echo 'FAILED'
