@@ -97,9 +97,14 @@ print(json.dumps({
     }
 
   TOKEN="$(printf '%s' "$LOGIN_RESPONSE" | json_field accessToken 2>/dev/null)" || {
-    echo 'error: sign-in did not return an access token (is the account an administrator?)' >&2
+    echo "error: sign-in did not return an access token: ${LOGIN_RESPONSE}" >&2
     exit 1
   }
+  ROLE="$(printf '%s' "$LOGIN_RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("user",{}).get("role",""))' 2>/dev/null || true)"
+  if [[ "$ROLE" != "admin" ]]; then
+    echo "error: ${ADMIN_EMAIL} signed in with role '${ROLE:-unknown}', not 'admin'; that account cannot publish releases." >&2
+    exit 1
+  fi
 fi
 
 # --- upload one APK per ABI -------------------------------------------------
@@ -121,14 +126,25 @@ for apk in "${APKS[@]}"; do
   URL="${CONTROLLER_URL}/api/v1/admin/client-apps/android/releases/${APP_BUILD_NUMBER}/artifacts?version=$(urlencode "$APP_VERSION")&abi=${ABI}&notes=$(urlencode "$NOTES")"
   printf '  uploading %-42s as %s ... ' "$(basename "$apk")" "$ABI"
 
-  RESPONSE="$("${CURL[@]}" -X PUT \
+  RESPONSE_FILE="$(mktemp)"
+  CODE="$("${CURL[@]}" -o "$RESPONSE_FILE" -w '%{http_code}' -X PUT \
     -H "authorization: Bearer ${TOKEN}" \
     -H 'content-type: application/vnd.android.package-archive' \
     --data-binary "@${apk}" \
-    "$URL")" || { echo 'FAILED'; echo "$RESPONSE" >&2; exit 1; }
+    "$URL")" || { echo 'FAILED'; rm -f "$RESPONSE_FILE"; exit 1; }
+  RESPONSE="$(cat "$RESPONSE_FILE")"; rm -f "$RESPONSE_FILE"
+  if [[ "$CODE" != '201' ]]; then
+    echo "FAILED (HTTP ${CODE})"
+    echo "$RESPONSE" >&2
+    exit 1
+  fi
 
   SERVER_SHA="$(printf '%s' "$RESPONSE" | json_field artifact \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha256"])')"
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha256"])') || {
+      echo 'error: unexpected upload response:' >&2
+      echo "$RESPONSE" >&2
+      exit 1
+    }
   LOCAL_SHA="$(sha256sum "$apk" | cut -d' ' -f1)"
   if [[ "$SERVER_SHA" != "$LOCAL_SHA" ]]; then
     echo 'FAILED'
@@ -141,11 +157,19 @@ done
 # --- publish ----------------------------------------------------------------
 
 if [[ "${PUBLISH:-1}" == "1" ]]; then
-  "${CURL[@]}" -X POST \
+  STATUS_FILE="$(mktemp)"
+  CODE="$("${CURL[@]}" -o "$STATUS_FILE" -w '%{http_code}' -X POST \
     -H "authorization: Bearer ${TOKEN}" \
     -H 'content-type: application/json' \
     --data '{"status":"published"}' \
-    "${CONTROLLER_URL}/api/v1/admin/client-apps/android/releases/${APP_BUILD_NUMBER}/status" >/dev/null
+    "${CONTROLLER_URL}/api/v1/admin/client-apps/android/releases/${APP_BUILD_NUMBER}/status")" \
+    || { rm -f "$STATUS_FILE"; echo 'error: publishing the build failed at the network level' >&2; exit 1; }
+  if [[ "$CODE" != '200' ]]; then
+    echo "error: publishing build ${APP_BUILD_NUMBER} was refused (HTTP ${CODE}): $(cat "$STATUS_FILE")" >&2
+    rm -f "$STATUS_FILE"
+    exit 1
+  fi
+  rm -f "$STATUS_FILE"
   echo "Published build ${APP_BUILD_NUMBER}."
 else
   echo "Uploaded build ${APP_BUILD_NUMBER} as a draft (PUBLISH=0)."
