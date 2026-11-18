@@ -442,6 +442,11 @@ jobs:
     # re-run after changing the release secrets actually produces an APK.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    # The publish credentials live on this repository's environment, and an
+    # environment secret is only exposed to a job that names its environment.
+    # Without this line the publish step saw empty ADMIN_EMAIL/ADMIN_PASSWORD
+    # even though they were set in Settings -> Environments.
+    environment: Strict Proxy
     permissions:
       contents: write
     env:
