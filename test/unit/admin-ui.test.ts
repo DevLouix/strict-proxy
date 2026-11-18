@@ -477,3 +477,36 @@ test('issuing a token from the dialog posts the enrollment', async () => {
   assert.ok(post, 'issuing a token should POST to the enrollments endpoint');
   assert.equal(typeof post[2].region, 'string');
 });
+test('the client version gate is a switch that can be turned off', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const { settingsView } = await import('../../apps/controller/src/admin/settings-view.js');
+  const api = stubApi();
+  const get = api.get.bind(api);
+  api.get = async (path: string) =>
+    path.startsWith('/api/v1/admin/settings/email')
+      ? { configured: false, summary: null }
+      : path.startsWith('/api/v1/app/android')
+        ? { buildNumber: 21, version: '0.1.0' }
+        : get(path);
+
+  const node = await settingsView(api);
+  const sw = [...node.walk()].find((el: any) => el.tagName === 'INPUT' && el.attributes.id === 'client-version-gate');
+  assert.ok(sw, 'the settings page needs the gate switch');
+  assert.equal(sw.checked, true, 'the stubbed gate is on');
+
+  const min = [...node.walk()].find((el: any) => el.tagName === 'INPUT' && el.attributes.id === 'client-version-min');
+  assert.equal(min.disabled, false, 'the minimum is editable while the switch is on');
+
+  sw.checked = false;
+  sw.dispatch('change');
+  assert.equal(min.disabled, true, 'turning the switch off disables the minimum');
+
+  const form = [...node.walk()].find((el: any) => el.tagName === 'FORM');
+  await form.dispatch('submit');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const put = api.calls.find((c: any) => c[0] === 'PUT' && c[1] === '/api/v1/admin/settings/client');
+  assert.ok(put, 'saving the switch should update the gate');
+  assert.equal(put[2].minimumBuild, 0, 'off clears the minimum so every build may connect');
+});

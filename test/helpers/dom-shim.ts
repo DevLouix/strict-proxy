@@ -313,6 +313,10 @@ export function stubApi() {
       this.calls.push(['PATCH', path, body]);
       return { ok: true };
     },
+    async put(path, body) {
+      this.calls.push(['PUT', path, body]);
+      return { ok: true };
+    },
     async del(path) {
       this.calls.push(['DELETE', path]);
       return { ok: true, deleted: 1 };

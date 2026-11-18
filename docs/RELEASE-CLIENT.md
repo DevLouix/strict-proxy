@@ -429,8 +429,9 @@ build published from **Client apps** takes precedence over it.
 #### Requiring a minimum build
 
 An operator can retire old APKs without touching the node fleet: **Settings →
-Client version** in the admin dashboard sets the lowest build number allowed to
-connect. `0` or a blank field disables the gate (the default).
+Client version** has a **Gate client versions** switch. Off — the default —
+every build may connect. On, the minimum build number is the lowest build
+allowed to connect.
 
 The app sends `x-client-build` (its `APP_BUILD_NUMBER`) on every request. When
 the caller is older, `GET /api/v1/network/config` answers:

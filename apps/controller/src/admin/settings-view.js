@@ -40,15 +40,34 @@ export async function settingsView(api) {
    * version name is displayed beside it purely to help an operator pick it.
    */
   function clientVersionPanel() {
+    const enabled = Boolean(gate?.enabled);
+    const publishedBuild = Number.isSafeInteger(published?.buildNumber) ? published.buildNumber : null;
+    const enforce = h('input', {
+      type: 'checkbox',
+      id: 'client-version-gate',
+      checked: enabled,
+    });
     const min0 = h('input', {
       type: 'number',
-      min: '0',
+      id: 'client-version-min',
+      min: '1',
       step: '1',
       value: gate?.minimumBuild != null ? String(gate.minimumBuild) : '',
-      placeholder: published?.buildNumber ? String(published.buildNumber) : 'e.g. 68',
+      placeholder: publishedBuild ? String(publishedBuild) : 'e.g. 68',
+      disabled: !enabled,
     });
     const error = h('p', { class: 'muted small', style: 'min-height:18px' });
-    const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save minimum');
+    const save = h('button', { class: 'btn primary', type: 'submit' }, enabled ? 'Save minimum' : 'Allow every build');
+
+    /** Keeps the number field and the button honest while the switch moves. */
+    function syncSwitch() {
+      min0.disabled = !enforce.checked;
+      save.textContent = enforce.checked ? 'Save minimum' : 'Allow every build';
+      // Turning the gate on with nothing typed would otherwise save an invalid
+      // value; the published build is the safe starting point.
+      if (enforce.checked && !min0.value.trim() && publishedBuild) min0.value = String(publishedBuild);
+    }
+    enforce.addEventListener('change', syncSwitch);
 
     const form = h('form', {
       onSubmit: async (event) => {
@@ -56,15 +75,14 @@ export async function settingsView(api) {
         error.textContent = '';
         save.disabled = true;
         try {
-          const raw = min0.value.trim();
-          const minimumBuild = raw === '' ? 0 : Number(raw);
-          if (!Number.isInteger(minimumBuild) || minimumBuild < 0) {
-            throw new Error('Enter a whole build number, or 0 to allow every build.');
+          const minimumBuild = enforce.checked ? Number(min0.value.trim()) : 0;
+          if (enforce.checked && (!min0.value.trim() || !Number.isInteger(minimumBuild) || minimumBuild < 1)) {
+            throw new Error('Enter the build number allowed to connect, or switch the gate off.');
           }
           await api.put('/api/v1/admin/settings/client', { minimumBuild });
           toast(minimumBuild > 0
             ? `Builds below ${minimumBuild} can no longer connect`
-            : 'Client version gate disabled');
+            : 'Client version gate off — every build may connect');
           await load();
         } catch (err) {
           error.textContent = err.message || 'Save failed';
@@ -72,18 +90,27 @@ export async function settingsView(api) {
         }
       },
     },
+      h('label', { class: 'switch', for: 'client-version-gate' },
+        enforce,
+        h('span', { class: 'switch-track' }, h('span', { class: 'switch-knob' })),
+        h('span', { class: 'switch-text' },
+          h('strong', {}, 'Gate client versions'),
+          h('span', { class: 'muted small' },
+            'Off: every build may connect. On: only builds at or above the minimum get tunnel credentials.'),
+        ),
+      ),
       field('Minimum build that may connect', min0,
-        published?.buildNumber
-          ? `Published build: ${published.buildNumber}${published.version ? ` (v${published.version})` : ''}. 0 or blank allows every build.`
-          : 'No build is published yet. 0 or blank allows every build.'),
+        publishedBuild
+          ? `Published build: ${publishedBuild}${published.version ? ` (v${published.version})` : ''}. Used only while the switch is on.`
+          : 'No build is published yet. Set the minimum to a build users can actually install.'),
       h('div', { class: 'actions' }, save, error),
     );
 
     return h('div', { class: 'panel' },
       h('header', {},
         h('h3', {}, 'Client version'),
-        h('span', { class: gate?.enabled ? 'badge active' : 'badge offline' },
-          gate?.enabled ? `Minimum build ${gate.minimumBuild}` : 'All builds allowed'),
+        h('span', { class: enabled ? 'badge active' : 'badge offline' },
+          enabled ? `Minimum build ${gate.minimumBuild}` : 'All builds allowed'),
       ),
       h('div', { class: 'form-grid' }, form),
       h('p', { class: 'muted small' },
