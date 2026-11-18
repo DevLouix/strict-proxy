@@ -224,10 +224,23 @@ export const nodeCredentials = pgTable(
     revoked: boolean('revoked').notNull().default(false),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * The install that owns this credential.
+     *
+     * Credentials used to be unique per (user, node), so two devices on one
+     * account shared a single identity: revoking one revoked both, and "one
+     * session per account" could not be enforced. They are now per (user, node,
+     * device) so the newest install can take the session and the previous one's
+     * credentials can be revoked on their own.
+     */
+    deviceId: text('device_id'),
     /** Bandwidth accounting for the current period (bytes), updated by nodes. */
     bytesUsed: bigint('bytes_used', { mode: 'number' }).notNull().default(0),
   },
-  (t) => [uniqueIndex('node_credentials_user_node_uq').on(t.userId, t.nodeId), uniqueIndex('node_credentials_uuid_uq').on(t.uuid)],
+  (t) => [
+    uniqueIndex('node_credentials_user_node_device_uq').on(t.userId, t.nodeId, t.deviceId),
+    uniqueIndex('node_credentials_uuid_uq').on(t.uuid),
+  ],
 );
 
 /** Interval-based bandwidth rollups reported by nodes (per credential). */
@@ -321,6 +334,62 @@ export const adminAuditLog = pgTable(
     index('admin_audit_log_actor_idx').on(t.actorId),
     index('admin_audit_log_target_idx').on(t.targetType, t.targetId),
   ],
+);
+
+/**
+ * The one active proxy session per account.
+ *
+ * The proxy cannot close a TCP connection a client already holds, so "one
+ * session per account" is enforced in two halves: this row names the winning
+ * install and which session id it holds, and credential provisioning revokes
+ * every other install's node credentials. The losing client also polls this
+ * row, so it can shut its own tunnel down instead of sitting connected with
+ * credentials the node no longer accepts.
+ */
+export const vpnSessions = pgTable(
+  'vpn_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Client-generated install id that currently owns the session. */
+    deviceId: text('device_id').notNull(),
+    /** Opaque id the winning client presents; a losing client's id stops matching. */
+    sessionId: text('session_id').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('vpn_sessions_user_uq').on(t.userId), index('vpn_sessions_device_idx').on(t.deviceId)],
+);
+
+/**
+ * Operator-published links to sites protected by the Gatekeeper.
+ *
+ * The operator gates the site itself (Gatekeeper middleware, `requiredTier`),
+ * then records it here so registered users can find it. `required_tier` is the
+ * same minimum plan the Gatekeeper enforces; the app only uses it to explain
+ * what the account can and cannot open. Access URLs are minted per request with
+ * a short-lived ticket, so a link pasted into another browser never carries a
+ * standing credential.
+ */
+export const gatedLinks = pgTable(
+  'gated_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    title: text('title').notNull(),
+    url: text('url').notNull(),
+    description: text('description'),
+    /** Minimum plan the protected site accepts: 'standard' | 'pro'. */
+    requiredTier: text('required_tier').notNull().default('standard'),
+    active: boolean('active').notNull().default(true),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('gated_links_url_uq').on(t.url), index('gated_links_active_idx').on(t.active)],
 );
 
 /** JWT ID set for access-token revocation lists (post-logout invalidation). */

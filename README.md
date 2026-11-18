@@ -146,6 +146,30 @@ only `pro`; `free` and lapsed plans are refused. Tokens default to five minutes
 one token lifetime even without a controller call. On success the verified
 identity is available to the site as `req.strictProxy` (`userId`, `email`, `tier`).
 
+A browser following a link cannot set a header, so the same token is also read
+from `?sp_ticket=<token>` (what the client's Links screen opens) and from the
+`sp_entitlement` cookie. Both are short-lived bearer credentials and neither
+replaces the fleet-IP check.
+
+### Links, published by plan
+
+An operator gates a site with the Gatekeeper, then publishes it from **Admin →
+Links** with the same `requiredTier` (`standard` or `pro`). Every registered
+account sees the published list at `GET /api/v1/links`: links above its plan are
+returned locked and without a URL, plus the cheapest plan that unlocks more, so
+the app can say "Standard unlocks 3 more" instead of hiding the catalogue. Each
+unlocked link carries a freshly minted `sp_ticket`, which is why a ticket left
+in browser history expires with its token.
+
+### One proxy session per account
+
+Connecting claims the account's single session (`POST /api/v1/network/session`).
+The newest install wins: every other install's node credentials are revoked in
+the same request that mints the new ones, so a node stops accepting the previous
+device on its next sync, and the previous client's session poll sees
+`current: false` and closes its own tunnel. Reconnecting from the same install
+keeps its session, so an ordinary reconnect does not churn credentials.
+
 ## API surface
 
 | Route | Auth | Purpose |
@@ -155,8 +179,10 @@ identity is available to the site as `req.strictProxy` (`userId`, `email`, `tier
 | `DELETE /api/v1/me` | JWT + password | Self-service account deletion |
 | `GET /api/v1/me` | JWT | Profile + device seats |
 | `GET /api/v1/network/config` | JWT + active sub | Signed dynamic VLESS+REALITY bundle per user |
+| `POST` / `GET /api/v1/network/session` | JWT | Claim or check the account's single proxy session |
 | `GET /api/v1/network/nodes/public-ips` | public (signed) | Ed25519-signed fleet IP list for Gatekeeper |
 | `GET /api/v1/entitlement` | JWT | Short-lived Ed25519-signed plan token for Gatekeeper sites |
+| `GET /api/v1/links` | JWT | Operator-published gated links, locked above the account's plan |
 | `GET /api/v1/billing/catalog` / `subscription` / `usage` | JWT | Price catalog, plan state (including `autoRenew`), bandwidth usage |
 | `POST /api/v1/billing/checkout` | JWT | Open a hosted OpenPay checkout (saves the card) |
 | `POST /api/v1/billing/recurring/activate` | JWT | Attach the saved card to the monthly subscription |

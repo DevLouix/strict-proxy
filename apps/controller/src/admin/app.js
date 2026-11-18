@@ -8,6 +8,7 @@ import { overviewView, usersView, nodesView, enrollmentsView, paymentsView, usag
 import { settingsView } from './settings-view.js';
 import { plansView, subscriptionsView } from './billing-ops-view.js';
 import { couponsView } from './coupons-view.js';
+import { linksView } from './links-view.js';
 import { clientAppsView } from './client-apps-view.js';
 import { disputesView } from './disputes-view.js';
 import { auditView } from './audit-view.js';
@@ -27,6 +28,7 @@ const VIEWS = [
   { id: 'usage', label: 'Usage', render: usageView },
   { id: 'plans', label: 'Plans', render: plansView },
   { id: 'coupons', label: 'Coupons', render: couponsView },
+  { id: 'links', label: 'Links', render: linksView },
   { id: 'subscriptions', label: 'Subscriptions', render: subscriptionsView },
   { id: 'client-apps', label: 'Client apps', render: clientAppsView },
   { id: 'backup', label: 'Backup', render: backupView },

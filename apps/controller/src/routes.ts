@@ -1,7 +1,8 @@
 /**
  * HTTP route wiring for the Central Controller.
  *
- * Public API (JWT):        /api/v1/auth/*, /api/v1/me, /api/v1/network/config
+ * Public API (JWT):        /api/v1/auth/*, /api/v1/me, /api/v1/network/config,
+ *                          /api/v1/network/session, /api/v1/links
  * Gatekeeper (Ed25519):    /api/v1/network/nodes/public-ips
  * Node internal (HMAC):    /internal/v1/node/*
  * Payments (HMAC webhook): /webhooks/payments
@@ -13,7 +14,7 @@ import { eq, sql, and, asc, desc, inArray, isNull, isNotNull, lte, or } from 'dr
 import { generateEd25519Keypair, signJson, loadSigningPrivateKey, isPublicIpAddress, normalizeIpAddress } from '@strict-proxy/types';
 import type { PublicIpsResponse, SubscriptionTier, UserPublic } from '@strict-proxy/types';
 import type { Db } from './db/client.js';
-import { billingCheckouts, devices, nodeEnrollments, nodes, nodeCredentials, paymentEvents, refreshTokens, subscriptions, usageRollups, users } from './db/schema.js';
+import { billingCheckouts, devices, gatedLinks, nodeEnrollments, nodes, nodeCredentials, paymentEvents, refreshTokens, subscriptions, usageRollups, users, vpnSessions } from './db/schema.js';
 import type { ControllerConfig } from './env.js';
 import type { Redis } from 'ioredis';
 import {
@@ -31,6 +32,8 @@ import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
 import { asyncHandler, requireAdmin, requireJwt, requireNodeHmac } from './middleware.js';
 import { mintEntitlementToken } from './services/entitlements.js';
+import { claimVpnSession, currentVpnSession } from './services/sessions.js';
+import { buildLinksCatalog, normalizeLinkInput, type LinkInput } from './services/links.js';
 import { auditActor, listAuditEntries, recordAudit } from './services/audit.js';
 
 interface Ctx {
@@ -797,7 +800,162 @@ export function buildRouter(ctx: Ctx): Router {
     });
     res.json({ entries });
   }));
+  // -- admin: gated links -----------------------------------------------------
+  // A link is a site an operator has already put behind the Gatekeeper. This
+  // records it so registered users can find it, and names the plan the site
+  // requires so the app can explain what the account can and cannot open.
+  router.get('/api/v1/admin/links', ...requireAdministrator, asyncHandler(async (_req, res) => {
+    const rows = await ctx.db.select().from(gatedLinks).orderBy(asc(gatedLinks.sortOrder), asc(gatedLinks.title));
+    res.json({ links: rows });
+  }));
+
+  router.post('/api/v1/admin/links', ...requireAdministrator, asyncHandler(async (req, res) => {
+    let input: Partial<LinkInput>;
+    try {
+      input = normalizeLinkInput(req.body);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message, code: 'VALIDATION' });
+      return;
+    }
+    const [created] = await ctx.db
+      .insert(gatedLinks)
+      .values({
+        title: input.title!,
+        url: input.url!,
+        description: input.description ?? null,
+        requiredTier: input.requiredTier!,
+        active: input.active ?? true,
+        sortOrder: input.sortOrder ?? 0,
+        createdBy: req.auth!.sub,
+      })
+      .onConflictDoNothing({ target: gatedLinks.url })
+      .returning();
+    if (!created) {
+      res.status(409).json({ error: 'a link with this URL already exists', code: 'DUPLICATE_LINK' });
+      return;
+    }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'link.created',
+      targetType: 'link',
+      targetId: created.id,
+      summary: `Link "${created.title}" published for ${created.requiredTier}`,
+      metadata: { url: created.url, requiredTier: created.requiredTier },
+    });
+    res.status(201).json({ link: created });
+  }));
+
+  router.patch('/api/v1/admin/links/:id', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const linkId = req.params.id;
+    if (typeof linkId !== 'string' || linkId.length === 0) {
+      res.status(400).json({ error: 'linkId is required', code: 'VALIDATION' });
+      return;
+    }
+    let input: Partial<LinkInput>;
+    try {
+      input = normalizeLinkInput(req.body, { partial: true });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message, code: 'VALIDATION' });
+      return;
+    }
+    if (Object.keys(input).length === 0) {
+      res.status(400).json({ error: 'nothing to update', code: 'VALIDATION' });
+      return;
+    }
+    const [updated] = await ctx.db
+      .update(gatedLinks)
+      .set({ ...input, updatedAt: new Date() })
+      .where(eq(gatedLinks.id, linkId))
+      .returning();
+    if (!updated) {
+      res.status(404).json({ error: 'link not found', code: 'NOT_FOUND' });
+      return;
+    }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'link.updated',
+      targetType: 'link',
+      targetId: updated.id,
+      summary: `Link "${updated.title}" updated`,
+      metadata: { requiredTier: updated.requiredTier, active: updated.active },
+    });
+    res.json({ link: updated });
+  }));
+
+  router.delete('/api/v1/admin/links/:id', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const linkId = req.params.id;
+    if (typeof linkId !== 'string' || linkId.length === 0) {
+      res.status(400).json({ error: 'linkId is required', code: 'VALIDATION' });
+      return;
+    }
+    const [removed] = await ctx.db.delete(gatedLinks).where(eq(gatedLinks.id, linkId)).returning({ id: gatedLinks.id, title: gatedLinks.title });
+    if (!removed) {
+      res.status(404).json({ error: 'link not found', code: 'NOT_FOUND' });
+      return;
+    }
+    await recordAudit(ctx.db, {
+      ...auditActor(req),
+      action: 'link.deleted',
+      targetType: 'link',
+      targetId: removed.id,
+      summary: `Link "${removed.title}" deleted`,
+    });
+    res.json({ ok: true });
+  }));
+
   // -- network (client) ------------------------------------------------------
+
+  /**
+   * Claims the account's single proxy session for the calling install.
+   *
+   * The newest install wins: a different device taking the slot revokes the
+   * previous device's node credentials. Repeating the call from the same install
+   * is a no-op, so a reconnect does not churn credentials.
+   */
+  router.post(
+    '/api/v1/network/session',
+    requireAuth,
+    asyncHandler(async (req, res) => {
+      const body = (req.body ?? {}) as { deviceId?: string };
+      const deviceId = (typeof body.deviceId === 'string' ? body.deviceId : req.header('x-device-id') ?? '').trim();
+      if (deviceId.length === 0 || deviceId.length > 200) {
+        res.status(400).json({ error: 'deviceId is required', code: 'VALIDATION' });
+        return;
+      }
+      const claim = await claimVpnSession(ctx.db, { userId: req.auth!.sub, deviceId });
+      if (claim.superseded) {
+        await recordAudit(ctx.db, {
+          ...auditActor(req),
+          action: 'session.superseded',
+          targetType: 'user',
+          targetId: req.auth!.sub,
+          summary: `Proxy session moved to a newer device; ${claim.superseded.deviceId} was revoked`,
+          metadata: { deviceId, supersededDeviceId: claim.superseded.deviceId },
+        });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(claim);
+    }),
+  );
+
+  /** Whether the presented session id still owns the account's proxy session. */
+  router.get(
+    '/api/v1/network/session',
+    requireAuth,
+    asyncHandler(async (req, res) => {
+      const session = await currentVpnSession(ctx.db, req.auth!.sub);
+      const presented = req.header('x-session-id') ?? '';
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        current: session ? session.sessionId === presented : true,
+        sessionId: session?.sessionId ?? null,
+        deviceId: session?.deviceId ?? null,
+        startedAt: session?.startedAt ? session.startedAt.toISOString() : null,
+        lastSeenAt: session?.lastSeenAt ? session.lastSeenAt.toISOString() : null,
+      });
+    }),
+  );
+
   router.get(
     '/api/v1/network/config',
     requireAuth,
@@ -824,7 +982,21 @@ export function buildRouter(ctx: Ctx): Router {
           return;
         }
       }
-      const bundle = await buildSignedConfigBundle(ctx.db, ctx.cfg, { userId: claims.sub, tier: sub.tier });
+      // One live proxy session per account. A request carrying an older
+      // session id is refused rather than handed credentials that would
+      // silently displace the device the account is actually using.
+      const session = await currentVpnSession(ctx.db, claims.sub);
+      const presented = req.header('x-session-id');
+      if (session && presented && presented !== session.sessionId) {
+        res.status(409).json({
+          error: 'this account is connected on another device',
+          code: 'SESSION_SUPERSEDED',
+        });
+        return;
+      }
+      const deviceId = session?.deviceId ?? req.header('x-device-id') ?? 'unknown-device';
+      const bundle = await buildSignedConfigBundle(ctx.db, ctx.cfg, { userId: claims.sub, tier: sub.tier, deviceId });
+      res.setHeader('Cache-Control', 'no-store');
       res.json(bundle);
     }),
   );
@@ -836,6 +1008,41 @@ export function buildRouter(ctx: Ctx): Router {
     asyncHandler(async (req, res) => {
       res.setHeader('Cache-Control', 'no-store, must-revalidate');
       res.json(await mintEntitlementToken(ctx.db, ctx.cfg, req.auth!.sub));
+    }),
+  );
+
+  // -- gated links (client) ---------------------------------------------------
+  /**
+   * The account's link feed.
+   *
+   * Registered accounts see every active link, but items above their plan are
+   * returned locked and without a URL. The upgrade hint is computed here so the
+   * app, a third-party client and tests all state the same thing.
+   */
+  router.get(
+    '/api/v1/links',
+    requireAuth,
+    asyncHandler(async (req, res) => {
+      const claims = req.auth!;
+      const sub = await getSubscription(ctx.db, claims.sub);
+      const live = sub.status === 'active' && isPaidTier(sub.tier) && (!sub.currentPeriodEnd || sub.currentPeriodEnd > new Date());
+      const tier: SubscriptionTier = live ? sub.tier : 'free';
+      const rows = await ctx.db
+        .select({
+          id: gatedLinks.id,
+          title: gatedLinks.title,
+          url: gatedLinks.url,
+          description: gatedLinks.description,
+          requiredTier: gatedLinks.requiredTier,
+        })
+        .from(gatedLinks)
+        .where(eq(gatedLinks.active, true))
+        .orderBy(asc(gatedLinks.sortOrder), asc(gatedLinks.title));
+      // A ticket per request: a link shared or left in browser history stops
+      // working when the short-lived token expires.
+      const ticket = live ? (await mintEntitlementToken(ctx.db, ctx.cfg, claims.sub)).token : null;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ tier, ...buildLinksCatalog(rows, tier, ticket) });
     }),
   );
 

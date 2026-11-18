@@ -92,6 +92,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               switch (conn) {
                 EngineStateIdle() => 'Disconnected',
                 EngineStateConnecting() => 'Connecting…',
+                EngineStateDisconnecting() => 'Disconnecting…',
                 EngineStateConnected(:final node) => 'Connected · ${node.region}',
                 EngineStateError() => 'Not connected',
               },
@@ -129,9 +130,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               Text(auth.email!, style: theme.textTheme.bodySmall),
             ],
             const SizedBox(height: 32),
-            FilledButton.tonal(
-              onPressed: () => Navigator.of(context).pushNamed('/servers'),
-              child: const Text('Choose server'),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                FilledButton.tonal(
+                  onPressed: () => Navigator.of(context).pushNamed('/servers'),
+                  child: const Text('Choose server'),
+                ),
+                FilledButton.tonal(
+                  onPressed: () => Navigator.of(context).pushNamed('/links'),
+                  child: const Text('Links'),
+                ),
+              ],
             ),
             const SizedBox(height: 20),
             PlanStrip(
@@ -337,12 +349,14 @@ class _ConnectButtonState extends State<ConnectButton>
     final color = switch (state) {
       EngineStateConnected() => StatusColors.connected,
       EngineStateConnecting() => StatusColors.pending,
+      EngineStateDisconnecting() => StatusColors.pending,
       EngineStateError() => StatusColors.failed,
       _ => StatusColors.idle,
     };
     final label = switch (state) {
       EngineStateConnected() => 'Disconnect',
       EngineStateConnecting() => 'Cancel connection attempt',
+      EngineStateDisconnecting() => 'Disconnecting',
       _ => 'Connect',
     };
     final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;

@@ -4,6 +4,9 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -30,7 +33,18 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
     companion object {
         private const val CHANNEL = "strict_proxy/libbox"
         private const val VPN_PERMISSION_REQUEST = 48117
+
+        /**
+         * How long a stop may take before it is reported as failed.
+         *
+         * Android destroys the service (and with it the tun) in milliseconds;
+         * this only has to cover a busy main thread. Waiting instead of
+         * answering immediately is what makes the app's "Disconnected" true.
+         */
+        private const val STOP_CONFIRM_TIMEOUT_MS = 4000L
     }
+
+    private val main = Handler(Looper.getMainLooper())
 
     private var channel: MethodChannel? = null
     private var activity: Activity? = null
@@ -119,13 +133,49 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
                     startService(config, result)
                 }
             }
-            "stop" -> {
-                val context = appContext ?: activity?.applicationContext
-                if (context != null) LibboxVpnService.stop(context)
-                result.success(null)
-            }
+            "stop" -> stopAndConfirm(result)
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Stops the tunnel and only answers once the service is actually gone.
+     *
+     * The old handler returned success as soon as `stopService` was called,
+     * even when there was no context to call it on. The UI then showed
+     * "Disconnected" while the VPN key stayed in the status bar and all traffic
+     * stayed routed into a tunnel whose engine had already stopped. A stop that
+     * cannot be confirmed is now an error the user can act on.
+     */
+    private fun stopAndConfirm(result: MethodChannel.Result) {
+        val context = appContext ?: activity?.applicationContext
+        if (context == null) {
+            result.error("activity_unavailable", "The VPN service cannot be stopped without a context", null)
+            return
+        }
+        LibboxVpnService.stop(context)
+        val deadline = SystemClock.uptimeMillis() + STOP_CONFIRM_TIMEOUT_MS
+
+        fun confirm() {
+            if (!BoxStatus.isActive) {
+                result.success(null)
+                return
+            }
+            if (SystemClock.uptimeMillis() >= deadline) {
+                // A second request, then the truth: the app must not claim the
+                // tunnel is down while the interface is still up.
+                LibboxVpnService.stop(context)
+                result.error(
+                    "vpn_stop_failed",
+                    "The VPN did not shut down. Turn StrictProxy off in Android settings, then reconnect.",
+                    null,
+                )
+                return
+            }
+            main.postDelayed({ confirm() }, 50)
+        }
+
+        confirm()
     }
 
     private fun startService(config: String, result: MethodChannel.Result) {

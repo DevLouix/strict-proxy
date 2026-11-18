@@ -7,7 +7,7 @@
  */
 import type { Db } from '../db/client.js';
 import { nodeCredentials, nodes, users } from '../db/schema.js';
-import { and, eq, gt, inArray, notInArray, or } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, ne, notInArray, or } from 'drizzle-orm';
 import { loadSigningPrivateKey, signJson } from '@strict-proxy/types';
 import type { NodeEndpoint, SignedConfigBundle, SubscriptionTier, VlessRealityClientConfig } from '@strict-proxy/types';
 import type { ControllerConfig } from '../env.js';
@@ -43,8 +43,23 @@ export function rankNodesForAssignment<T extends { id: string; loadScore: number
 export async function buildSignedConfigBundle(
   db: Db,
   cfg: ControllerConfig,
-  params: { userId: string; tier: SubscriptionTier },
+  params: { userId: string; tier: SubscriptionTier; deviceId: string },
 ): Promise<SignedConfigBundle> {
+  // One proxy session per account: whichever install is fetching this bundle is
+  // the winner, so every other install's credentials are revoked here. A node
+  // stops accepting the old device on its next credential sync, and the old
+  // client's own session poll closes its tunnel.
+  await db
+    .update(nodeCredentials)
+    .set({ revoked: true, revokedAt: new Date() })
+    .where(
+      and(
+        eq(nodeCredentials.userId, params.userId),
+        eq(nodeCredentials.revoked, false),
+        or(isNull(nodeCredentials.deviceId), ne(nodeCredentials.deviceId, params.deviceId)),
+      ),
+    );
+
   // Provision per-node credentials for this user before rendering configs,
   // so a fresh user immediately gets working VLESS UUIDs on every node.
   const activeNodes = await db
@@ -57,12 +72,19 @@ export async function buildSignedConfigBundle(
   const maxNodes = Math.min(tierDefinition(params.tier).maxNodes, activeNodes.length);
   const allowedNodeIds = rankNodesForAssignment(activeNodes).slice(0, maxNodes).map((node) => node.id);
   for (const nodeId of allowedNodeIds) {
-    await ensureUserCredential(db, params.userId, nodeId);
+    await ensureUserCredential(db, params.userId, nodeId, params.deviceId);
   }
   await db
     .update(nodeCredentials)
     .set({ revoked: true, revokedAt: new Date() })
-    .where(and(eq(nodeCredentials.userId, params.userId), notInArray(nodeCredentials.nodeId, allowedNodeIds), eq(nodeCredentials.revoked, false)));
+    .where(
+      and(
+        eq(nodeCredentials.userId, params.userId),
+        eq(nodeCredentials.deviceId, params.deviceId),
+        notInArray(nodeCredentials.nodeId, allowedNodeIds),
+        eq(nodeCredentials.revoked, false),
+      ),
+    );
 
   const rows = await db
     .select({
@@ -83,7 +105,12 @@ export async function buildSignedConfigBundle(
     .from(nodes)
     .leftJoin(
       nodeCredentials,
-      and(eq(nodeCredentials.nodeId, nodes.id), eq(nodeCredentials.userId, params.userId), eq(nodeCredentials.revoked, false)),
+      and(
+        eq(nodeCredentials.nodeId, nodes.id),
+        eq(nodeCredentials.userId, params.userId),
+        eq(nodeCredentials.deviceId, params.deviceId),
+        eq(nodeCredentials.revoked, false),
+      ),
     )
     .where(and(inArray(nodes.status, ['online', 'degraded']), inArray(nodes.id, allowedNodeIds)));
 

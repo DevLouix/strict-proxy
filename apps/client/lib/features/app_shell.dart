@@ -6,6 +6,7 @@ import 'auth/presentation/login_screen.dart';
 import 'auth/presentation/password_reset_screen.dart';
 import 'home/presentation/home_screen.dart';
 import 'servers/presentation/servers_screen.dart';
+import 'links/presentation/links_screen.dart';
 import 'billing/presentation/account_screen.dart';
 import 'billing/presentation/subscription_gate.dart';
 
@@ -33,6 +34,10 @@ Route<dynamic>? onGenerateRoute(RouteSettings settings) {
     case '/servers':
       // A deep link must not skip the entitlement check the home screen has.
       return MaterialPageRoute(builder: (_) => const SubscriptionGate(child: ServersScreen()));
+    case '/links':
+      // Deliberately not behind [SubscriptionGate]: a free account must see the
+      // locked links and the upsell, which is the point of publishing them.
+      return MaterialPageRoute(builder: (_) => const LinksScreen());
     case '/account':
       return MaterialPageRoute(builder: (_) => const AccountScreen());
     case '/reset-password':

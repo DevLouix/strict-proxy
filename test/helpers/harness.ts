@@ -127,6 +127,8 @@ export async function createHarness(options: TestEnvOverrides = {}): Promise<Har
         client_crash_reports,
         client_release_artifacts,
         client_releases,
+        gated_links,
+        vpn_sessions,
         usage_rollups,
         node_credentials,
         payment_events,

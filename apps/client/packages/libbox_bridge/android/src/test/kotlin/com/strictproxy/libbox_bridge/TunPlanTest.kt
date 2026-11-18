@@ -21,8 +21,25 @@ class TunPlanTest {
     }
 
     @Test
-    fun `blank DNS servers are dropped instead of added`() {
-        assertTrue(TunPlan.dnsServers(listOf("", "   ", "%wlan0")).isEmpty())
+    fun `no usable DNS servers fall back to the hijacked-in-tunnel resolver`() {
+        // An interface with no DNS server resolves nothing on the device, even
+        // though the tunnel itself is up. The fallback addresses are delivered
+        // into the tun and hijacked there.
+        assertEquals(TunPlan.fallbackDnsServers, TunPlan.dnsServers(listOf("", "   ", "%wlan0")))
+    }
+
+    @Test
+    fun `a custom fallback replaces the default one`() {
+        assertEquals(listOf("9.9.9.9"), TunPlan.dnsServers(emptyList(), listOf("9.9.9.9")))
+    }
+
+    @Test
+    fun `the engine MTU is capped to the phone path MTU`() {
+        // sing-box defaults to 9000, which no phone radio can carry.
+        assertEquals(1400, TunPlan.mtu(9000))
+        assertEquals(1400, TunPlan.mtu(0))
+        assertEquals(1350, TunPlan.mtu(1350))
+        assertEquals(1280, TunPlan.mtu(1200))
     }
 
     @Test

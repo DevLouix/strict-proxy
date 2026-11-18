@@ -17,7 +17,7 @@ class _FakeApi implements ControllerApi {
   int calls = 0;
 
   @override
-  Future<Map<String, dynamic>> networkConfig() async {
+  Future<Map<String, dynamic>> networkConfig({String? sessionId}) async {
     calls++;
     return _bundle;
   }

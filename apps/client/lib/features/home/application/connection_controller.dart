@@ -15,13 +15,22 @@ import '../../engine/libbox_engine.dart';
 import '../../engine/linux_singbox_engine.dart';
 import 'connect_recovery.dart';
 
+/// TUN MTU used on every device.
+///
+/// sing-box's own default is 9000. A phone's radio is 1500, path-MTU discovery
+/// cannot work from inside a VPN, and the segments an app builds for a
+/// 9000-byte interface never fit the physical link — so TCP connections (the
+/// DoH resolver included) stall while the tunnel still reports `connected`.
+/// 1400 stays under the IPv4/IPv6 overhead of a normal cellular or Wi-Fi path.
+const int tunMtu = 1400;
+
 /// Converts the controller's compact VLESS+REALITY descriptor into a complete
 /// sing-box client configuration with a system TUN inbound.
 ///
 /// [compat] switches to the conservative datapath used after the engine has
-/// crashed on this device: the userspace (gVisor) stack instead of the Android
-/// system stack, no `strict_route` (which OEM VPN implementations mishandle),
-/// and a smaller MTU so oversized packets cannot abort the session.
+/// crashed on this device: the userspace (gVisor) stack, no `strict_route`
+/// (which OEM VPN implementations mishandle), and no `sniff` dependency in the
+/// datapath.
 Map<String, dynamic> buildSingBoxTunConfig(
   Map<String, dynamic> endpoint, {
   bool compat = false,
@@ -51,7 +60,7 @@ Map<String, dynamic> buildSingBoxTunConfig(
           'auto_route': true,
           'strict_route': !compat,
           'stack': compat ? 'gvisor' : 'mixed',
-          if (compat) 'mtu': 1400,
+          'mtu': tunMtu,
         },
       ],
       'outbounds': [
@@ -87,9 +96,14 @@ Map<String, dynamic> buildSingBoxTunConfig(
         // two rules every app on the device times out on its first lookup while
         // the tunnel still reports connected. `sniff` is what lets the
         // `protocol: dns` matcher below recognise a query at all.
+        // QUIC is rejected explicitly rather than left to fail inside the
+        // VLESS Vision outbound, which carries no general UDP: a silently
+        // dropped handshake makes browsers wait on a dead connection before
+        // falling back to TCP, which reads as "no internet" on the device.
         'rules': [
           {'action': 'sniff'},
           {'protocol': 'dns', 'action': 'hijack-dns'},
+          {'network': 'udp', 'port': 443, 'action': 'reject'},
         ],
         'final': 'proxy',
       },
@@ -106,6 +120,15 @@ class EngineStateIdle extends ConnState {
 
 class EngineStateConnecting extends ConnState {
   const EngineStateConnecting();
+}
+
+/// The engine has been asked to stop and the tunnel/interface may still be up.
+///
+/// This state exists so the UI never says "Disconnected" before the platform
+/// has actually torn the VPN down — the exact gap that left the VPN key in the
+/// status bar after a disconnect that had only changed the app's own state.
+class EngineStateDisconnecting extends ConnState {
+  const EngineStateDisconnecting();
 }
 
 class EngineStateConnected extends ConnState {
@@ -194,7 +217,24 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   /// real reason instead of attempting a session the build cannot support.
   String? _engineError;
 
+  /// The account-level proxy session this install owns, minted by the
+  /// controller on connect. A newer install claiming the same account gets a
+  /// different id, which is how this one learns it has been superseded.
+  String? _sessionId;
+
+  /// Polls the controller while connected so an install that lost its session
+  /// closes its own tunnel instead of sitting "connected" with revoked
+  /// credentials and no working traffic.
+  Timer? _sessionWatch;
+
+  /// How often a connected client re-checks that it still owns the account's
+  /// single proxy session.
+  static const sessionCheckInterval = Duration(seconds: 45);
+
   ServerNode? _selected;
+
+  /// The session id the config request must present, when one was claimed.
+  String? get sessionId => _sessionId;
 
   Future<void> _initializeEngine(VpnEngine engine) async {
     try {
@@ -218,11 +258,12 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _watchdog?.cancel();
         _failed = false;
         unawaited(_recovery.endAttempt());
+        _startSessionWatch();
         final node = _selected;
         if (node != null) state = EngineStateConnected(node);
       case EngineState.disconnecting:
         _watchdog?.cancel();
-        if (!_failed) state = const EngineStateIdle();
+        if (!_failed) state = const EngineStateDisconnecting();
       case EngineState.disconnected:
         _watchdog?.cancel();
         if (!_failed) state = const EngineStateIdle();
@@ -243,6 +284,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
   Future<void> toggle() async {
     final s = state;
+    if (s is EngineStateDisconnecting) return;
     if (s is EngineStateConnected || s is EngineStateConnecting) {
       // While connecting this is a cancel, not a disconnect; the UI says so.
       await disconnect();
@@ -267,8 +309,14 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _fail(_engineError!);
         return;
       }
+      // Claim the account's single proxy session before any credentials are
+      // fetched: the newest install wins, and the previous one's credentials
+      // stop being valid server-side.
+      _sessionId = await _claimSession();
+      if (attempt != _attempt) return;
+
       if (node != null) _selected = node;
-      _selected ??= await pickBestNode();
+      _selected ??= await pickBestNode(sessionId: _sessionId);
       if (attempt != _attempt) return;
       if (_selected == null) {
         _fail('No servers are available right now. Try again shortly.');
@@ -293,7 +341,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
       // Every bundle is verified by the loader before it is used; nothing else
       // is allowed to fetch and trust raw credentials.
-      final bundle = await _ref.read(configBundleLoaderProvider).load();
+      final bundle = await _ref.read(configBundleLoaderProvider).load(sessionId: _sessionId);
       if (attempt != _attempt) return;
       final nodeConfig = bundle.rawConfigs[_selected!.id];
       if (nodeConfig is! Map<String, dynamic>) {
@@ -350,6 +398,8 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         return 'You have used your data allowance. Upgrade to reconnect.';
       case 'NO_NODES_AVAILABLE':
         return 'No servers are available right now. Try again shortly.';
+      case 'SESSION_SUPERSEDED':
+        return 'Your account connected on another device, so this session was closed.';
       case 'TOKEN_REVOKED':
       case 'UNAUTHENTICATED':
       case 'INVALID_REFRESH':
@@ -364,14 +414,67 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     }
   }
 
+  /// Claims the account's single proxy session for this install.
+  ///
+  /// Returns null when the install has no device identity yet: the controller
+  /// then falls back to the previous per-account behaviour instead of refusing
+  /// to connect over a locally missing id.
+  Future<String?> _claimSession() async {
+    final api = _ref.read(apiProvider);
+    final deviceId = await api.tokens.deviceId;
+    if (deviceId == null || deviceId.trim().isEmpty) return null;
+    final claim = await api.claimSession(deviceId);
+    final claimed = claim['sessionId'];
+    return claimed is String && claimed.isNotEmpty ? claimed : null;
+  }
+
+  void _startSessionWatch() {
+    _sessionWatch?.cancel();
+    _sessionWatch = Timer.periodic(
+      sessionCheckInterval,
+      (_) => unawaited(_checkSession()),
+    );
+  }
+
+  /// True when the controller says this install still owns the account session.
+  Future<void> _checkSession() async {
+    final session = _sessionId;
+    if (session == null || state is! EngineStateConnected) return;
+    try {
+      final status = await _ref.read(apiProvider).sessionStatus(session);
+      if (status['current'] == false) await _closeSupersededSession();
+    } on ApiException {
+      // Most likely the tunnel itself is the reason the controller is
+      // unreachable; the next interval tries again.
+    } catch (_) {
+      // Never let a background check take the app down.
+    }
+  }
+
+  /// Ends this install's tunnel because another device took the session.
+  Future<void> _closeSupersededSession() async {
+    _sessionWatch?.cancel();
+    _sessionWatch = null;
+    await disconnect();
+    _failed = true;
+    state = const EngineStateError(
+      'Your account connected on another device, so this session was closed.',
+    );
+  }
+
   Future<void> disconnect() async {
     // Invalidate any attempt still in flight before stopping the engine.
     _attempt++;
     _watchdog?.cancel();
+    _sessionWatch?.cancel();
+    _sessionWatch = null;
     _failed = false;
     unawaited(_recovery.endAttempt());
     try {
       await _engineReady;
+      // The engine reports `disconnecting` and only reports `disconnected`
+      // once the platform has torn the interface down; a stop that could not be
+      // confirmed surfaces as an error instead of a false "Disconnected".
       await _engine.disconnect();
       state = const EngineStateIdle();
     } catch (error) {
@@ -382,12 +485,14 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   @override
   void dispose() {
     _watchdog?.cancel();
+    _sessionWatch?.cancel();
     _subscription?.cancel();
     super.dispose();
   }
 
-  Future<ServerNode?> pickBestNode() async {
-    final bundleJson = await _ref.read(apiProvider).networkConfig();
+  Future<ServerNode?> pickBestNode({String? sessionId}) async {
+    final bundleJson =
+        await _ref.read(apiProvider).networkConfig(sessionId: sessionId);
     final bundle = ConfigBundle.fromJson(bundleJson);
     if (bundle.nodes.isEmpty) return null;
     final results = await measureLatencies(bundle.nodes);

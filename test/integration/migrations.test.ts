@@ -20,6 +20,7 @@ const EXPECTED_TABLES = [
   'client_releases',
   'coupon_redemptions',
   'coupons',
+  'gated_links',
   'platform_settings',
   'password_reset_tokens',
   'devices',
@@ -32,6 +33,7 @@ const EXPECTED_TABLES = [
   'subscriptions',
   'usage_rollups',
   'users',
+  'vpn_sessions',
 ];
 
 let h: Harness;
@@ -78,7 +80,7 @@ test('critical unique constraints exist after migrating', async () => {
     'users_email_uq',
     'password_reset_tokens_hash_uq',
     'refresh_tokens_hash_uq',
-    'node_credentials_user_node_uq',
+    'node_credentials_user_node_device_uq',
     'node_credentials_uuid_uq',
     'node_enrollments_token_hash_uq',
     'billing_checkouts_reference_uq',

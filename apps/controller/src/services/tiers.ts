@@ -18,6 +18,14 @@ export function isKnownTier(tier: string): tier is SubscriptionTier {
   return tier in TIERS;
 }
 
+/** Tier hierarchy used by gated links: pro includes everything standard has. */
+export const TIER_RANK: Record<SubscriptionTier, number> = { free: 0, standard: 1, pro: 2 };
+
+/** True when `actual` meets or exceeds the plan `required`. */
+export function tierSatisfies(actual: SubscriptionTier, required: SubscriptionTier): boolean {
+  return TIER_RANK[actual] >= TIER_RANK[required];
+}
+
 /**
  * Tiers that entitle a customer to the tunnel.
  *

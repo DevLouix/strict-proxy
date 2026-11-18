@@ -47,9 +47,13 @@ class ConfigBundleLoader {
 
   /// Fetches, parses and verifies a bundle.
   ///
+  /// [sessionId] identifies the caller's account session, so a device that has
+  /// been superseded by a newer one is refused instead of handed credentials
+  /// that would displace the new session.
+  ///
   /// Throws [BundleVerificationException] when the bundle cannot be trusted.
-  Future<ConfigBundle> load() async {
-    final json = await _api.networkConfig();
+  Future<ConfigBundle> load({String? sessionId}) async {
+    final json = await _api.networkConfig(sessionId: sessionId);
     final bundle = ConfigBundle.fromJson(json);
 
     if (bundle.isExpired) {

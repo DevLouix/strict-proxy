@@ -146,8 +146,10 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         if (prepare(this) != null) error("android: missing vpn permission")
 
         val builder = Builder().setSession("StrictProxy")
-        val mtu = options.getMTU()
-        if (mtu > 0) builder.setMtu(mtu)
+        // Always pin the MTU: the engine's default (9000) exceeds the phone's
+        // path MTU, which silently drops oversized segments and stalls every
+        // TCP connection while the tunnel still reports connected.
+        builder.setMtu(TunPlan.mtu(options.getMTU()))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
         val inet4 = prefixes { options.getInet4Address() }
@@ -157,7 +159,9 @@ class LibboxVpnService : VpnService(), PlatformInterface {
 
         if (options.getAutoRoute()) {
             // The generated DNS getter throws when the engine has DNS disabled,
-            // which is why its iterator is collected defensively.
+            // which is why its iterator is collected defensively. A tunnel with
+            // no DNS server on its interface resolves nothing on the device, so
+            // TunPlan substitutes a hijacked-in-tunnel fallback.
             for (server in TunPlan.dnsServers(strings { options.getDNSServerAddress() })) {
                 builder.addDnsServer(server)
             }

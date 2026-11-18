@@ -172,18 +172,19 @@ internal class BoxRunner(
     /**
      * User asked to disconnect, from the app or the notification.
      *
-     * The visible teardown happens before and independently of the engine: the
-     * notification and the service have to go away even if closing the engine is
-     * slow or stuck. The engine is closed by [destroy] when the service stops,
-     * rather than before `stopSelf`, so a close that never returns cannot keep
-     * the tunnel (and the device's traffic) up.
+     * Only [DISCONNECTING] is published here: the tunnel and its interface are
+     * still up until the service is destroyed and [destroy] runs. Announcing
+     * "disconnected" at this point is what left the VPN key in the status bar
+     * while the device had no working traffic.
      */
     fun stop() {
         stopRequested = true
+        running = false
         lastConfig = null
         main.post {
+            publish(BoxStatus.DISCONNECTING)
+            // The notification must go even if closing the engine is slow.
             leaveForeground()
-            publish(BoxStatus.DISCONNECTED)
             service.stopSelf()
         }
     }
@@ -209,7 +210,6 @@ internal class BoxRunner(
         running = false
         // Main-thread work first: the notification must not outlive the stop.
         leaveForeground()
-        publish(BoxStatus.DISCONNECTED)
         // Closing the engine can wait on the Go side, and blocking `onDestroy` is
         // an ANR at exactly the moment the tunnel is supposed to disappear. The
         // worker is drained instead of interrupted so the queued close still runs.
@@ -219,13 +219,16 @@ internal class BoxRunner(
         commandServer = null
         runCatching {
             worker.execute {
-                runCatching { closing?.closeService() }
-                    .onFailure { Log.w(TAG, "libbox closeService failed", it) }
+                closeEngineService(closing)
                 runCatching { closing?.close() }
                     .onFailure { Log.w(TAG, "libbox command server close failed", it) }
             }
             worker.shutdown()
         }
+        // The service is going away, so the tun (and the VPN key) go with it.
+        // This is the only place a teardown is reported as complete, which is
+        // what lets the plugin answer Disconnect truthfully.
+        publish(BoxStatus.DISCONNECTED)
     }
 
     /**
@@ -234,7 +237,11 @@ internal class BoxRunner(
      */
     private fun closeService() {
         running = false
-        runCatching { commandServer?.closeService() }
+        closeEngineService(commandServer)
+    }
+
+    private fun closeEngineService(server: CommandServer?) {
+        runCatching { server?.closeService() }
             .onFailure { Log.w(TAG, "libbox closeService failed", it) }
     }
 

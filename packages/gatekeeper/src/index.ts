@@ -42,6 +42,15 @@ export interface GatekeeperOptions {
    * `x-strict-proxy-entitlement`.
    */
   entitlementHeader?: string;
+  /**
+   * Query parameter carrying the same token. Defaults to `sp_ticket`. This is
+   * how a browser following a link from the desktop app presents its plan: a
+   * navigation cannot set a header. The token is short-lived, so the URL is a
+   * bearer credential only for its TTL.
+   */
+  entitlementQueryParam?: string;
+  /** Cookie carrying the token. Defaults to `sp_entitlement`. */
+  entitlementCookie?: string;
   /** Clock skew allowed when checking token issue/expiry. Defaults to 30s. */
   entitlementLeewaySeconds?: number;
   /**
@@ -97,6 +106,43 @@ export interface EntitlementVerification {
   ok: boolean;
   entitlement?: VerifiedEntitlement;
   reason?: EntitlementFailure;
+}
+
+/**
+ * Finds the entitlement token on a request.
+ *
+ * Order matters only for priority: the header is set by an API client and is
+ * the strongest signal, then the short-lived query ticket used by links, then
+ * the cookie a browser may carry between visits.
+ */
+export function entitlementTokenOf(
+  req: Request,
+  headerName = 'x-strict-proxy-entitlement',
+  opts: { queryParam?: string; cookieName?: string } = {},
+): string | undefined {
+  const header = req.header(headerName);
+  if (header) return header;
+
+  const queryParam = opts.queryParam ?? 'sp_ticket';
+  const query = (req.query ?? {}) as Record<string, unknown>;
+  const fromQuery = query[queryParam];
+  if (typeof fromQuery === 'string' && fromQuery.length > 0) return fromQuery;
+
+  const cookieName = opts.cookieName ?? 'sp_entitlement';
+  const cookie = req.header('cookie');
+  if (!cookie) return undefined;
+  for (const part of cookie.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== cookieName) continue;
+    const raw = part.slice(eq + 1).trim();
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return undefined;
 }
 
 function isClaims(value: unknown): value is EntitlementClaims {
@@ -269,7 +315,10 @@ export function createGatekeeperMiddleware(options: GatekeeperOptions): RequestH
       }
 
       if (options.requiredTier) {
-        const token = req.header(entitlementHeader);
+        const token = entitlementTokenOf(req, entitlementHeader, {
+          queryParam: options.entitlementQueryParam,
+          cookieName: options.entitlementCookie,
+        });
         const verified = verifyEntitlementToken(token, options.publicKeys, {
           leewaySeconds: options.entitlementLeewaySeconds,
         });

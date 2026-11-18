@@ -77,9 +77,38 @@ void main() {
 
     expect(inbound['stack'], 'gvisor');
     expect(inbound['strict_route'], isFalse);
-    expect(inbound['mtu'], 1400);
+    expect(inbound['mtu'], tunMtu);
     expect(inbound['auto_route'], isTrue, reason: 'the tunnel still has to capture traffic');
     expect(inbound['address'], hasLength(2), reason: 'IPv6 must stay in the tunnel, not leak');
+  });
+
+  // sing-box's own default MTU is 9000; a phone radio carries 1500. Segments
+  // built for a 9000-byte interface are dropped, PMTUD cannot recover from
+  // inside a VPN, and every TCP connection hangs while the tunnel says
+  // connected. The MTU is therefore pinned in both datapaths.
+  test('the tunnel MTU stays under the phone path MTU', () {
+    for (final compat in [false, true]) {
+      final inbound =
+          (buildSingBoxTunConfig(endpoint(), compat: compat)['inbounds'] as List).first
+              as Map<String, dynamic>;
+      expect(inbound['mtu'], 1400, reason: 'compat=$compat');
+    }
+  });
+
+  // A silently dropped QUIC handshake stalls browsers for seconds; rejecting it
+  // tells them to use TCP immediately. The Vision outbound carries no general
+  // UDP, so there is nothing to gain by letting it through.
+  test('rejects QUIC instead of dropping it inside the outbound', () {
+    final route = buildSingBoxTunConfig(endpoint())['route'] as Map<String, dynamic>;
+    final rules = (route['rules'] as List).cast<Map<String, dynamic>>();
+
+    expect(
+      rules.any((rule) =>
+          rule['network'] == 'udp' &&
+          rule['port'] == 443 &&
+          rule['action'] == 'reject'),
+      isTrue,
+    );
   });
 
   // The device's DNS arrives at the tunnel as plain UDP:53, which the VLESS
@@ -111,6 +140,6 @@ void main() {
 
     expect(inbound['stack'], 'mixed');
     expect(inbound['strict_route'], isTrue);
-    expect(inbound.containsKey('mtu'), isFalse);
+    expect(inbound['mtu'], isNotNull, reason: 'the MTU is never left to the engine default');
   });
 }

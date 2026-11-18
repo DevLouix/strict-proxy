@@ -37,9 +37,9 @@ class _ServersScreenState extends ConsumerState<ServersScreen> {
     });
     try {
       final api = ref.read(apiProvider);
-      final json = await api.networkConfig();
-      final bundle = ConfigBundle.fromJson(json);
       final notifier = ref.read(connectionStateProvider.notifier);
+      final json = await api.networkConfig(sessionId: notifier.sessionId);
+      final bundle = ConfigBundle.fromJson(json);
       final latencies = await notifier.measureLatencies(bundle.nodes);
       if (!mounted) return;
       setState(() {

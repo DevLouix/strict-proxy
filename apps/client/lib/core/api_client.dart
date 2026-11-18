@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import 'billing_models.dart';
 import 'config.dart';
+import 'link_models.dart';
 import 'storage/token_store.dart';
 
 class ApiException implements Exception {
@@ -202,9 +203,41 @@ class ControllerApi {
         ));
   }
 
+  /// Claims the account's one proxy session for this install.
+  ///
+  /// A different install claiming the same account supersedes this one: its
+  /// node credentials are revoked, and [sessionStatus] starts reporting
+  /// `current: false` so the losing device can close its own tunnel.
+  Future<Map<String, dynamic>> claimSession(String deviceId) => _send(() => _client.post(
+        _uri('/api/v1/network/session'),
+        headers: _headers(),
+        body: jsonEncode({'deviceId': deviceId}),
+      ));
+
+  /// Whether [sessionId] still owns the account's proxy session.
+  Future<Map<String, dynamic>> sessionStatus(String sessionId) => _send(
+        () => _client.get(
+          _uri('/api/v1/network/session'),
+          headers: {..._headers(), 'x-session-id': sessionId},
+        ),
+      );
+
   /// Signed dynamic sing-box config bundle (per-node VLESS+REALITY).
-  Future<Map<String, dynamic>> networkConfig() =>
-      _send(() => _client.get(_uri('/api/v1/network/config'), headers: _headers()));
+  Future<Map<String, dynamic>> networkConfig({String? sessionId}) => _send(
+        () => _client.get(
+          _uri('/api/v1/network/config'),
+          headers: {
+            ..._headers(),
+            if (sessionId != null) 'x-session-id': sessionId,
+          },
+        ),
+      );
+
+  /// Gated links visible to the signed-in account, with tier locks resolved.
+  Future<LinksCatalog> links() async {
+    final body = await _send(() => _client.get(_uri('/api/v1/links'), headers: _headers()));
+    return LinksCatalog.fromJson(body);
+  }
 
   /// Purchasable tiers and their prices.
   Future<BillingCatalog> billingCatalog() async {

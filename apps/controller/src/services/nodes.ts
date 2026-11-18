@@ -187,18 +187,32 @@ export async function applyObservedNodeIp(
   return { changed: true, publicIp: normalized };
 }
 
-/** Ensures a VLESS credential exists for (user, node). */
-export async function ensureUserCredential(db: Db, userId: string, nodeId: string): Promise<{ uuid: string; shortId: string; flow: string }> {
+/**
+ * Ensures a VLESS credential exists for (user, node, install).
+ *
+ * The install is part of the identity so that "one session per account" can
+ * revoke the previous device on its own; a per-account credential was shared by
+ * every device, which made that impossible.
+ */
+export async function ensureUserCredential(
+  db: Db,
+  userId: string,
+  nodeId: string,
+  deviceId: string,
+): Promise<{ uuid: string; shortId: string; flow: string }> {
   const [existing] = await db
     .select({ uuid: nodeCredentials.uuid, shortId: nodeCredentials.shortId, flow: nodeCredentials.flow, revoked: nodeCredentials.revoked })
     .from(nodeCredentials)
-    .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId)))
+    .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId), eq(nodeCredentials.deviceId, deviceId)))
     .limit(1);
 
   if (existing && !existing.revoked) return existing;
 
   if (existing && existing.revoked) {
-    await db.update(nodeCredentials).set({ revoked: false, revokedAt: null }).where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId)));
+    await db
+      .update(nodeCredentials)
+      .set({ revoked: false, revokedAt: null })
+      .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId), eq(nodeCredentials.deviceId, deviceId)));
     return { uuid: existing.uuid, shortId: existing.shortId, flow: existing.flow };
   }
 
@@ -210,8 +224,11 @@ export async function ensureUserCredential(db: Db, userId: string, nodeId: strin
 
   const [created] = await db
     .insert(nodeCredentials)
-    .values({ userId, nodeId, uuid: randomUUID(), shortId, flow: 'xtls-rprx-vision' })
-    .onConflictDoUpdate({ target: [nodeCredentials.userId, nodeCredentials.nodeId], set: { revoked: false, revokedAt: null } })
+    .values({ userId, nodeId, deviceId, uuid: randomUUID(), shortId, flow: 'xtls-rprx-vision' })
+    .onConflictDoUpdate({
+      target: [nodeCredentials.userId, nodeCredentials.nodeId, nodeCredentials.deviceId],
+      set: { revoked: false, revokedAt: null },
+    })
     .returning({ uuid: nodeCredentials.uuid, shortId: nodeCredentials.shortId, flow: nodeCredentials.flow });
 
   if (!created) throw new Error('failed_to_provision_credential');
