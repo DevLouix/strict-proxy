@@ -106,6 +106,9 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     private val defaultInterfaceCallbacks =
         HashMap<InterfaceUpdateListener, ConnectivityManager.NetworkCallback>()
 
+    /** The physical network last reported to each listener. */
+    private val reportedDefaultNetworks = HashMap<InterfaceUpdateListener, Network>()
+
     override fun onCreate() {
         super.onCreate()
         runner = BoxRunner(this, this)
@@ -331,6 +334,10 @@ class LibboxVpnService : VpnService(), PlatformInterface {
                 reportDefaultInterface(manager, network, listener)
 
             override fun onLost(network: Network) {
+                // A VPN network going away must not wipe the physical interface
+                // the engine is dialling through.
+                if (reportedDefaultNetworks[listener] != network) return
+                reportedDefaultNetworks.remove(listener)
                 listener.updateDefaultInterface("", 0, false, false)
             }
         }
@@ -343,8 +350,11 @@ class LibboxVpnService : VpnService(), PlatformInterface {
      * Tells the engine which interface and index the default network uses.
      *
      * The metered flag matters: the engine avoids expensive paths for its own
-     * connections when it can. A network announced without a name is skipped
-     * rather than reported as an empty interface the engine would bind to.
+     * connections when it can. The VPN flag matters more: without it, the tun
+     * Android makes default is treated as a physical upstream and the engine
+     * loops its own node connection back into the tunnel. A network announced
+     * without a name is skipped rather than reported as an empty interface the
+     * engine would bind to.
      */
     private fun reportDefaultInterface(
         manager: ConnectivityManager,
@@ -354,14 +364,22 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         runCatching {
             val link = manager.getLinkProperties(network) ?: return
             val name = link.interfaceName ?: return
+            val capabilities = manager.getNetworkCapabilities(network)
+            val isVpn = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
             val index = AndroidNetworkInterface.getByName(name)?.index ?: 0
-            val metered = manager.getNetworkCapabilities(network)
-                ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
-            listener.updateDefaultInterface(name, index, metered, false)
+            val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
+            // The last argument is "this is a VPN". Reporting the tun with it
+            // unset let the engine adopt its own tunnel as the upstream NIC,
+            // because an Android VPN is only accepted as upstream when the
+            // config asks for it (`route.override_android_vpn`). The result was
+            // a connected tunnel that carried nothing on every app.
+            listener.updateDefaultInterface(name, index, metered, isVpn)
+            reportedDefaultNetworks[listener] = network
         }.onFailure { Log.w(TAG, "could not report the default interface", it) }
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
+        reportedDefaultNetworks.remove(listener)
         val callback = defaultInterfaceCallbacks.remove(listener) ?: return
         runCatching { connectivityManager.unregisterNetworkCallback(callback) }
             .onFailure { Log.w(TAG, "could not stop the default network monitor", it) }
