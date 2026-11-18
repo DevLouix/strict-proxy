@@ -290,7 +290,11 @@ export async function upsertArtifact(
       set: { fileName, sizeBytes: input.bytes.length, sha256 },
     });
 
-  const [stored] = await db
+  // Every artifact of the build, not one arbitrary row: the upload response
+  // reports the stored hash for the ABI just written, so a single-row read
+  // returned null for the second ABI of a split build and the release pipeline
+  // treated a successful upload as broken.
+  const stored = await db
     .select()
     .from(clientReleaseArtifacts)
     .where(eq(clientReleaseArtifacts.releaseId, release.id));
@@ -304,7 +308,7 @@ export async function upsertArtifact(
     source: 'database',
     createdAt: release.createdAt,
     publishedAt: release.publishedAt,
-    artifacts: toArtifacts(cfg, stored ? [stored] : []),
+    artifacts: toArtifacts(cfg, stored),
   };
 }
 

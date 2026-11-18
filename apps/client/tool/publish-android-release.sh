@@ -145,7 +145,7 @@ release = json.load(sys.stdin)
 print((release.get("artifact") or {}).get("sha256") or "")
 ')"
   if [[ -z "$SERVER_SHA" ]]; then
-    echo 'error: unexpected upload response:' >&2
+    echo "error: unexpected upload response (HTTP ${CODE}):" >&2
     echo "$RESPONSE" >&2
     exit 1
   fi

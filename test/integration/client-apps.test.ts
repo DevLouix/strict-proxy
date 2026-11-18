@@ -234,3 +234,22 @@ test('deleting a build removes it from the feed', async () => {
   );
   assert.equal((await h.request('GET', '/api/v1/app/android')).status, 404);
 });
+
+test('every ABI of a split build is reported back after upload', async () => {
+  const admin = await h.adminToken();
+
+  const arm64 = await upload(admin, 12, 'arm64-v8a', APK('arm'));
+  assert.equal(arm64.status, 201);
+  assert.match(arm64.body.artifact.sha256, /^[0-9a-f]{64}$/);
+
+  // The second upload used to come back with a null hash, because only one
+  // artifact row was read back and it was not necessarily the new one.
+  const v7 = await upload(admin, 12, 'armeabi-v7a', APK('v7'));
+  assert.equal(v7.status, 201);
+  assert.match(v7.body.artifact.sha256, /^[0-9a-f]{64}$/);
+  assert.notEqual(v7.body.artifact.sha256, arm64.body.artifact.sha256);
+  assert.deepEqual(
+    v7.body.release.artifacts.map((artifact: any) => artifact.abi).sort(),
+    ['arm64-v8a', 'armeabi-v7a'],
+  );
+});
