@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
+# Docker initialises a named volume as root:root, but the controller runs as
+# `strictproxy`. Without this the first APK upload fails with EACCES and the
+# dashboard (and the release pipeline) only see "internal error". Repair the
+# release directory as root, then run the rest of the entrypoint unprivileged.
+if [ "$(id -u)" = "0" ]; then
+  storage="${CLIENT_ANDROID_STORAGE_DIR:-/var/lib/strict-proxy/client-releases}"
+  mkdir -p "$storage"
+  chown strictproxy:strictproxy "$storage"
+  exec gosu strictproxy "$0" "$@"
+fi
+
 /usr/local/bin/validate-controller-env
 
 # Apply the committed schema migrations.
