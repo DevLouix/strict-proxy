@@ -31,6 +31,7 @@ import {
   isMailConfigured,
   validateSmtpSettings,
   sendMail,
+  verifyMailSettings,
   invalidateMailTransport,
   passwordResetEmail,
   subscriptionLapsedEmail,
@@ -170,13 +171,28 @@ export function buildMailRouter(ctx: Ctx): Router {
         return;
       }
 
+      // Prove the connection and credentials before composing a message, so a
+      // transport failure is reported as one and not as an unexplained send
+      // failure. Nodemailer's verify carries the server's own reply.
+      const verified = await verifyMailSettings(ctx.db, ctx.cfg);
+      if (!verified.ok) {
+        res.status(verified.reason === 'not_configured' ? 503 : 502).json({
+          error: verified.reason === 'not_configured'
+            ? 'mail is not configured'
+            : 'could not connect to the mail server',
+          code: verified.reason === 'not_configured' ? 'MAIL_NOT_CONFIGURED' : 'MAIL_CONNECTION_FAILED',
+          detail: verified.detail,
+        });
+        return;
+      }
+
       const result = await sendMail(ctx.db, ctx.cfg, {
         to,
         subject: 'StrictProxy mail configuration test',
         text: 'This is a test message confirming your StrictProxy mail settings work.',
       });
       if (result.sent) {
-        res.json({ ok: true, messageId: result.messageId });
+        res.json({ ok: true, verified: true, messageId: result.messageId });
         return;
       }
       // 503 for "not configured", 502 for "configured but the send failed" —

@@ -11,6 +11,7 @@
  * down, and it must not silently appear to have worked. `sendMail` therefore
  * reports what happened, and each caller decides how loudly to complain.
  */
+import { createHash } from 'node:crypto';
 import nodemailer, { type Transporter } from 'nodemailer';
 import type { Db } from '../db/client.js';
 import type { ControllerConfig } from '../env.js';
@@ -94,18 +95,18 @@ export async function loadSmtpSettings(db: Db, cfg: ControllerConfig): Promise<S
     );
   }
 
-  if (!host || !fromAddress) return null;
+  if (!host?.trim() || !fromAddress?.trim()) return null;
   return {
-    host,
+    host: host.trim(),
     port: port ? Number.parseInt(port, 10) : 587,
     // Port 465 is implicit TLS; anything else defaults to STARTTLS. The stored
     // flag wins when explicitly set, so an operator can use implicit TLS on an
     // unusual port.
     secure: secure === null ? Number.parseInt(port ?? '587', 10) === 465 : secure === 'true',
-    username: username ?? '',
+    username: username?.trim() ?? '',
     password: password ?? '',
-    fromAddress,
-    fromName: fromName || cfg.openpayPlatformName || 'StrictProxy',
+    fromAddress: fromAddress.trim(),
+    fromName: fromName?.trim() || cfg.openpayPlatformName || 'StrictProxy',
   };
 }
 
@@ -131,7 +132,17 @@ export interface MailMessage {
 let cachedTransport: { key: string; transport: Transporter } | null = null;
 
 function transportFor(s: SmtpSettings): Transporter {
-  const key = JSON.stringify([s.host, s.port, s.secure, s.username, s.password.length, s.fromAddress]);
+  // Hash the password instead of hashing its length: a rotation to another
+  // password of the same length would otherwise keep the old transport, and
+  // every send would keep authenticating with the stale credential.
+  const key = JSON.stringify([
+    s.host,
+    s.port,
+    s.secure,
+    s.username,
+    createHash('sha256').update(s.password).digest('hex'),
+    s.fromAddress,
+  ]);
   if (cachedTransport?.key === key) return cachedTransport.transport;
 
   const transport = nodemailer.createTransport({
@@ -156,6 +167,32 @@ function transportFor(s: SmtpSettings): Transporter {
 /** Drops the cached transport; call after settings change. */
 export function invalidateMailTransport(): void {
   cachedTransport = null;
+}
+
+/**
+ * Checks that the saved settings can reach and authenticate with the SMTP
+ * server, without sending a message.
+ *
+ * This is the difference between "mail is configured" (host and from address
+ * are present) and "mail is connected". Nodemailer's verify reports DNS, TLS,
+ * certificate and authentication failures here, with the server's own reply,
+ * instead of leaving the operator to guess from a failed send.
+ */
+export type VerifyResult =
+  | { ok: true }
+  | { ok: false; reason: 'not_configured' | 'failed'; detail?: string };
+
+export async function verifyMailSettings(db: Db, cfg: ControllerConfig): Promise<VerifyResult> {
+  const settings = await loadSmtpSettings(db, cfg);
+  if (!isMailConfigured(settings)) return { ok: false, reason: 'not_configured' };
+  try {
+    await transportFor(settings).verify();
+    return { ok: true };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[controller] mail connection check failed: ${detail}`);
+    return { ok: false, reason: 'failed', detail };
+  }
 }
 
 /** Sends one message. Never throws. */

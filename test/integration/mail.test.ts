@@ -242,7 +242,9 @@ test('a test send against an unreachable server fails without leaking the passwo
     body: { to: 'ops@example.com' },
   });
   assert.equal(res.status, 502, 'configured but unreachable is a different failure from unconfigured');
-  assert.equal(res.body.code, 'MAIL_SEND_FAILED');
+  assert.equal(res.body.code, 'MAIL_CONNECTION_FAILED');
+  assert.equal(typeof res.body.detail, 'string', 'the operator needs the underlying reason');
+  assert.ok(res.body.detail.length > 0);
   assert.ok(!JSON.stringify(res.body).includes('sup3r-s3cret-value'), 'the error must not carry credentials');
 });
 

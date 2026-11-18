@@ -13,6 +13,10 @@ export class ApiError extends Error {
     super(body?.error || `Request failed (${status})`);
     this.status = status;
     this.code = body?.code ?? null;
+    // SMTP failures put the server's own reply here ("Invalid login: 535", TLS
+    // errors). Showing only the generic `error` hid the one line that explains
+    // why a correctly-filled form still would not send.
+    this.detail = body?.detail ?? null;
     this.body = body;
   }
 }

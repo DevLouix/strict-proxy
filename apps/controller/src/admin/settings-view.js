@@ -113,32 +113,49 @@ export async function settingsView(api) {
     const clearBtn = h('button', { class: 'btn danger', type: 'button' }, 'Disable mail');
 
     const formError = h('p', { class: 'muted small', style: 'min-height:18px' });
+    const testError = h('p', { class: 'muted small', style: 'min-height:18px' });
+
+    // 465 is implicit TLS; 587 and 25 negotiate STARTTLS. A mismatch here is
+    // indistinguishable from a bad password in the server's reply, so keep the
+    // checkbox honest when the operator picks one of those ports.
+    port0.addEventListener('input', () => {
+      const port = Number.parseInt(port0.value, 10);
+      if (port === 465) secure0.checked = true;
+      else if (port === 587 || port === 25) secure0.checked = false;
+    });
+
+    /** Saves the form. Returns false and reports the reason on failure. */
+    async function saveSettings({ refresh = true } = {}) {
+      formError.textContent = '';
+      save.disabled = true;
+      try {
+        // The password is only sent when typed, so a blank field leaves the
+        // stored one alone instead of clearing it by accident.
+        const body = {
+          host: host0.value.trim(),
+          port: Number.parseInt(port0.value, 10),
+          secure: secure0.checked,
+          fromAddress: from0.value.trim(),
+        };
+        if (user0.value.trim()) body.username = user0.value.trim();
+        if (name0.value.trim()) body.fromName = name0.value.trim();
+        if (pass0.value) body.password = pass0.value;
+        await api.put('/api/v1/admin/settings/email', body);
+        pass0.value = '';
+        toast('Mail settings saved');
+        if (refresh) await load();
+        return true;
+      } catch (err) {
+        formError.textContent = err.detail ? `${err.message}: ${err.detail}` : (err.message || 'Save failed');
+        save.disabled = false;
+        return false;
+      }
+    }
 
     const form = h('form', {
       onSubmit: async (e) => {
         e.preventDefault();
-        formError.textContent = '';
-        save.disabled = true;
-        try {
-          // The password is only sent when typed, so a blank field leaves the
-          // stored one alone instead of clearing it by accident.
-          const body = {
-            host: host0.value.trim(),
-            port: Number.parseInt(port0.value, 10),
-            secure: secure0.checked,
-            fromAddress: from0.value.trim(),
-          };
-          if (user0.value.trim()) body.username = user0.value.trim();
-          if (name0.value.trim()) body.fromName = name0.value.trim();
-          if (pass0.value) body.password = pass0.value;
-          await api.put('/api/v1/admin/settings/email', body);
-          pass0.value = '';
-          toast('Mail settings saved');
-          await load();
-        } catch (err) {
-          formError.textContent = err.message || 'Save failed';
-          save.disabled = false;
-        }
+        await saveSettings();
       },
     },
       field('SMTP host', host0),
@@ -165,12 +182,24 @@ export async function settingsView(api) {
         toast('Enter an address to send the test to', 'error');
         return;
       }
+      testError.textContent = '';
       testBtn.disabled = true;
       try {
+        // The endpoint tests what is stored, not what is typed. Saving first is
+        // what an operator means by "send a test" after filling the form; skip
+        // the reload so the error below stays inside the Test panel.
+        if (!(await saveSettings({ refresh: false }))) {
+          testError.textContent = 'Fix the settings above before sending a test.';
+          return;
+        }
         await api.post('/api/v1/admin/settings/email/test', { to });
         toast(`Test message sent to ${to}`);
+        await load();
       } catch (err) {
-        toast(err.message || 'Test message failed', 'error');
+        // Nodemailer's reply names the actual failure (535 auth, TLS, DNS).
+        const detail = err.detail ? `${err.message}: ${err.detail}` : (err.message || 'Test message failed');
+        testError.textContent = detail;
+        toast(detail, 'error');
       } finally {
         testBtn.disabled = false;
       }
@@ -218,6 +247,7 @@ export async function settingsView(api) {
             h('div', { style: 'flex:1' }, testTo0),
             testBtn,
           ),
+          testError,
         ),
       ),
       h('div', { class: 'panel' },
