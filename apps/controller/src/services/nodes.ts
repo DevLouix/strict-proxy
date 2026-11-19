@@ -103,12 +103,29 @@ export async function registerNode(
     hmacSecret?: string;
   },
 ): Promise<{ nodeId: string; hmacSecret: string }> {
+  // Re-registering an existing hostname must not silently replace the node's
+  // REALITY identity. The agent pulls its private key from bootstrap, and every
+  // signed bundle already issued pins the matching public key: a fresh keypair
+  // here rejects every client that still holds one (the node logs `REALITY:
+  // processed invalid connection`) until that client refetches. A new keypair is
+  // generated only for a new node, and an existing one is replaced only when the
+  // caller pins the key explicitly, which is a deliberate rotation.
   let priv = params.realityPrivateKey;
   let pub = params.realityPublicKey;
   if (!priv || !pub) {
-    const kp = generateRealityKeypair();
-    priv = kp.privateKeyB64;
-    pub = kp.publicKeyB64;
+    const [existing] = await db
+      .select({ privateKey: nodes.realityPrivateKey, publicKey: nodes.realityPublicKey })
+      .from(nodes)
+      .where(eq(nodes.hostname, params.hostname))
+      .limit(1);
+    if (existing) {
+      priv = existing.privateKey;
+      pub = existing.publicKey;
+    } else {
+      const kp = generateRealityKeypair();
+      priv = kp.privateKeyB64;
+      pub = kp.publicKeyB64;
+    }
   }
 
   const hmacSecret = params.hmacSecret ?? randomBytes(32).toString('base64url');
@@ -206,21 +223,37 @@ export async function ensureUserCredential(
     .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId), eq(nodeCredentials.deviceId, deviceId)))
     .limit(1);
 
-  if (existing && !existing.revoked) return existing;
-
-  if (existing && existing.revoked) {
-    await db
-      .update(nodeCredentials)
-      .set({ revoked: false, revokedAt: null })
-      .where(and(eq(nodeCredentials.userId, userId), eq(nodeCredentials.nodeId, nodeId), eq(nodeCredentials.deviceId, deviceId)));
-    return { uuid: existing.uuid, shortId: existing.shortId, flow: existing.flow };
-  }
-
   const [node] = await db.select({ shortIds: nodes.realityShortIds }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
   if (!node) throw new Error('node_not_found');
   const pool = node.shortIds;
   if (!pool || pool.length === 0) throw new Error('node_short_id_pool_empty');
-  const shortId = pool[Math.floor(Math.random() * pool.length)]!;
+  const pickShortId = () => pool[Math.floor(Math.random() * pool.length)]!;
+
+  if (existing) {
+    // The node only accepts the short ids in its current pool. A credential
+    // issued against an older pool can never complete a REALITY handshake — the
+    // node logs `processed invalid connection` and the client shows a tunnel
+    // that carries nothing — so move the row onto the current pool instead of
+    // keeping an install permanently unable to connect. The UUID is preserved:
+    // usage accounting and session revocation key off it, not the short id.
+    const shortId = pool.includes(existing.shortId) ? existing.shortId : pickShortId();
+    const identity = and(
+      eq(nodeCredentials.userId, userId),
+      eq(nodeCredentials.nodeId, nodeId),
+      eq(nodeCredentials.deviceId, deviceId),
+    );
+    if (existing.revoked) {
+      await db
+        .update(nodeCredentials)
+        .set({ revoked: false, revokedAt: null, shortId })
+        .where(identity);
+    } else if (shortId !== existing.shortId) {
+      await db.update(nodeCredentials).set({ shortId }).where(identity);
+    }
+    return { uuid: existing.uuid, shortId, flow: existing.flow };
+  }
+
+  const shortId = pickShortId();
 
   const [created] = await db
     .insert(nodeCredentials)

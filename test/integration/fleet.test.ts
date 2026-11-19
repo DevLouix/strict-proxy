@@ -411,3 +411,59 @@ test('re-enrolling a hostname that already exists is an actionable conflict, not
   });
   assert.equal(retried.status, 201);
 });
+
+test('re-registering a node keeps the REALITY identity its clients pinned', async () => {
+  // A fresh keypair here is invisible to the node (it re-bootstraps the one the
+  // controller stores) but fatal to every client holding a signed bundle: the
+  // node logs `REALITY: processed invalid connection` and the tunnel comes up
+  // carrying nothing. Registration may only rotate when a key is pinned.
+  const admin = await h.adminToken();
+  const node = await h.seedNode({ hostname: 'stable.test' });
+  const [before] = await h.query<any>(`SELECT reality_public_key, reality_private_key FROM nodes WHERE id = '${node.id}'`);
+
+  const identity = {
+    hostname: 'stable.test',
+    region: 'eu-central',
+    publicIp: '203.0.113.99',
+    tunnelPort: 443,
+    realityServerName: 'www.microsoft.com',
+    realityShortIds: ['0011223344556677'],
+  };
+  assert.equal((await h.request('POST', '/api/v1/admin/nodes', { token: admin, body: identity })).status, 201);
+  const [after] = await h.query<any>(`SELECT reality_public_key, reality_private_key FROM nodes WHERE id = '${node.id}'`);
+  assert.equal(after.reality_public_key, before.reality_public_key, 'an issued bundle must keep verifying against the node');
+  assert.equal(after.reality_private_key, before.reality_private_key);
+
+  // A pinned keypair is a deliberate rotation and still replaces the identity.
+  const { generateRealityKeypair } = await import('@strict-proxy/types');
+  const rotated = generateRealityKeypair();
+  const pinned = await h.request('POST', '/api/v1/admin/nodes', {
+    token: admin,
+    body: { ...identity, realityPrivateKey: rotated.privateKeyB64, realityPublicKey: rotated.publicKeyB64 },
+  });
+  assert.equal(pinned.status, 201);
+  const [replaced] = await h.query<any>(`SELECT reality_public_key FROM nodes WHERE id = '${node.id}'`);
+  assert.equal(replaced.reality_public_key, rotated.publicKeyB64);
+});
+
+test('a credential from an older short-id pool is moved onto the current one', async () => {
+  const node = await h.seedNode({ hostname: 'pool.test' });
+  const user = await h.seedUser('pool@example.test');
+  await h.setTier(user.id, 'pro');
+  const tokens = await h.login(user.email, user.password, 'device-1');
+
+  const first = await h.request('GET', '/api/v1/network/config', { token: tokens.accessToken });
+  assert.equal(first.status, 200);
+  const issued = first.body.configs[node.id];
+  assert.ok(issued, 'the seeded node is offered');
+  assert.ok(['0011223344556677', '8899aabbccddeeff'].includes(issued.shortId));
+
+  // What a replaced pool looks like (rebuilt VPS, re-registration): the stored
+  // short id is one the node will never accept, so the handshake fails forever.
+  await h.query(`UPDATE nodes SET reality_short_ids = '["aaaa111122223333"]'::jsonb WHERE id = '${node.id}'`);
+  const second = await h.request('GET', '/api/v1/network/config', { token: tokens.accessToken });
+  assert.equal(second.status, 200);
+  const healed = second.body.configs[node.id];
+  assert.equal(healed.shortId, 'aaaa111122223333', 'the credential follows the node\u2019s current pool');
+  assert.equal(healed.uuid, issued.uuid, 'healing keeps the uuid: usage accounting and revocation key off it');
+});
