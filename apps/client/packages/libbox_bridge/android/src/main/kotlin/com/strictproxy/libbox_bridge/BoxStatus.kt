@@ -31,6 +31,18 @@ internal object BoxStatus {
     var message: String? = null
         private set
 
+    /**
+     * The last reason an attempt failed, kept after later state changes.
+     *
+     * [message] is per-update: publishing `connected` clears it. A failure that
+     * then arrives without its own message left the app with nothing to show,
+     * which is how every engine crash turned into "The VPN engine reported an
+     * error." This field survives those overwrites.
+     */
+    @Volatile
+    var lastError: String? = null
+        private set
+
     private val listeners = CopyOnWriteArraySet<(String, String?) -> Unit>()
 
     /** Whether a tunnel is up or being brought up. */
@@ -40,6 +52,7 @@ internal object BoxStatus {
     fun update(state: String, message: String? = null) {
         this.state = state
         this.message = message
+        if (state == ERROR && !message.isNullOrBlank()) lastError = message
         for (listener in listeners) {
             runCatching { listener(state, message) }
         }

@@ -324,7 +324,9 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _failed = true;
         final wasConnected = state is EngineStateConnected;
         state = EngineStateError(
-          _engine.lastErrorMessage ?? 'The VPN engine reported an error.',
+          _engine.lastErrorMessage ??
+              'The VPN engine stopped without reporting a reason '
+                  '(device log tag StrictProxyLibbox).',
         );
         // The engine runs in its own process now, so losing it while the tunnel
         // was up is survivable — and worth learning from before the next try.

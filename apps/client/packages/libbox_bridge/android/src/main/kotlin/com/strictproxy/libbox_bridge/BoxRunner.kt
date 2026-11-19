@@ -123,12 +123,25 @@ internal class BoxRunner(
             publish(BoxStatus.CONNECTED)
         } catch (error: Throwable) {
             lastConfig = null
-            val cause = generateSequence(error) { it.cause }.last()
-            Log.e(TAG, "libbox failed to start", cause)
+            Log.e(TAG, "libbox failed to start", error)
             closeService()
-            fail(cause.message ?: "libbox failed to start")
+            fail(describeFailure(error))
         }
     }
+
+    /**
+     * The whole exception chain, from the thrown type down to the root cause.
+     *
+     * Reporting only `cause.message` produced "libbox failed to start" for
+     * every exception whose message was null (an `UnsatisfiedLinkError`, a bare
+     * `IllegalStateException`), which is indistinguishable from having no
+     * information at all. The type name at least says what broke.
+     */
+    private fun describeFailure(error: Throwable): String =
+        generateSequence(error) { it.cause }
+            .map { cause -> cause.message?.takeIf { it.isNotBlank() } ?: cause.javaClass.simpleName }
+            .joinToString(" <- ")
+            .ifBlank { "libbox failed to start" }
 
     /**
      * Creates the process-wide command server and starts its control listener.

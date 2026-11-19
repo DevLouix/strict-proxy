@@ -11,10 +11,16 @@ name: client-emulator
 #
 # This is deliberately not part of a release: it costs a full gomobile link and
 # produces nothing a user installs. Run it on demand (`gh workflow run
-# client-emulator`), or push a commit whose message contains [x64-emulator].
+# client-emulator`), push a commit whose message contains [x64-emulator], or
+# wait for the nightly run, which also boots the emulator and captures the
+# connect flow (see the `emulator-smoke` job).
 
 on:
   workflow_dispatch:
+  # Nightly, so an engine or bridge regression shows up without a push. The
+  # smoke job is the only place the real client is executed on a device in CI.
+  schedule:
+    - cron: '0 3 * * *'
   push:
     branches:
       - main
@@ -43,7 +49,7 @@ jobs:
     # A normal push must not pay for a full native link, and there is no release
     # to publish. The marker makes the trigger explicit; the release workflow
     # does not watch this file, so a marker commit cannot start a release.
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[x64-emulator]')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.head_commit.message, '[x64-emulator]')
     runs-on: ubuntu-24.04
     # The signing secrets live on this environment; a job that does not name it
     # sees them empty and fails the release-configuration check.
@@ -180,3 +186,56 @@ jobs:
           retention-days: 7
 
 # Emulator build marker: 1
+
+  emulator-smoke:
+    name: Boot an emulator and capture the connect flow
+    # The emulator executes what this workflow just built. It runs the shipped
+    # Dart and the shipped native engine, which is the only CI coverage of the
+    # client as a process rather than as unit tests.
+    needs: emulator-apk
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: strict-proxy-emulator-x86_64
+          path: dist
+
+      # Without KVM the emulator falls back to software execution and the boot
+      # takes longer than the job's budget. The rule makes /dev/kvm usable by
+      # the runner user instead of root.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The runner action owns the emulator lifecycle and gives the script a
+      # booted device. SwiftShader keeps the GPU out of the equation.
+      - name: Run the app on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          # Optional: when both are set the script also signs in and taps
+          # Connect, which is what makes the captured log worth reading. When
+          # they are absent it still proves the APK installs, launches and
+          # loads its native engine.
+          CLIENT_E2E_EMAIL: ${{ secrets.CLIENT_E2E_EMAIL }}
+          CLIENT_E2E_PASSWORD: ${{ secrets.CLIENT_E2E_PASSWORD }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: ./apps/client/tool/emulator-smoke.sh dist/*.apk
+
+      - name: Upload the device log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-smoke-logs
+          path: build/emulator-smoke
+          if-no-files-found: ignore
+          retention-days: 7

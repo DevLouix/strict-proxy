@@ -196,7 +196,19 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
     }
 
     private fun emit(state: String, message: String?) {
-        val payload: Any = if (message == null) state else mapOf("state" to state, "message" to message)
+        // An error must carry a reason. A bare `error` string reached Dart as
+        // `EngineState.error` with no message, and the app could only say "The
+        // VPN engine reported an error." — the reason the engine died was
+        // unknowable from the screen. Report the last known one instead, and
+        // name where to look when even that is missing.
+        val reason = if (state == BoxStatus.ERROR) {
+            message?.takeIf { it.isNotBlank() }
+                ?: BoxStatus.lastError
+                ?: "The VPN engine stopped without a reason (device log tag StrictProxyLibbox)."
+        } else {
+            message
+        }
+        val payload: Any = if (reason == null) state else mapOf("state" to state, "message" to reason)
         channel?.invokeMethod("state", payload)
     }
 }

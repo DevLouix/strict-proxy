@@ -45,6 +45,9 @@ class LibboxEngine implements VpnEngine {
     if (singBoxConfigJson.trim().isEmpty) {
       throw const FormatException('libbox configuration cannot be empty');
     }
+    // A new attempt starts from no error: whatever the previous one reported
+    // must not be shown for this one.
+    _lastErrorMessage = null;
     _setState(EngineState.connecting);
     try {
       await _channel.invokeMethod<void>('start', {'config': singBoxConfigJson});
@@ -91,7 +94,10 @@ class LibboxEngine implements VpnEngine {
       'disconnected' => EngineState.disconnected,
       _ => EngineState.error,
     };
-    if (next == EngineState.connected) _lastErrorMessage = null;
+    // The reason is deliberately kept across `connected`: an error that arrives
+    // after the interface came up is still this attempt's failure, and clearing
+    // it here is what turned it into a bare "engine error". Only a new connect
+    // clears it.
     _setState(next);
   }
 
