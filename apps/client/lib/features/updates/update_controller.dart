@@ -341,7 +341,8 @@ class UpdateController extends StateNotifier<UpdateState> {
         // are not a prefix of it. Throw them away and fetch the whole file.
         await res.stream.drain<void>();
         await file.delete();
-        return _downloadInto(file, uri, offset: 0, expectedBytes: expectedBytes);
+        await _downloadInto(file, uri, offset: 0, expectedBytes: expectedBytes);
+        return;
       }
       if (res.statusCode >= 400) {
         await res.stream.drain<void>();
