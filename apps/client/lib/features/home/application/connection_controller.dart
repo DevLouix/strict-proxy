@@ -261,6 +261,20 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
   ServerNode? _selected;
 
+  /// True once this attempt asked the engine to start, so a failure knows there
+  /// may be a tunnel to take down.
+  bool _engineStarted = false;
+
+  /// The per-node config from the last bundle, kept so the compat fallback can
+  /// reload the engine without another round trip.
+  ///
+  /// Retrying through `connect()` re-claimed the session and re-fetched the
+  /// bundle over the tunnel that had just failed its probe, so the fallback
+  /// itself died with "cannot reach the controller" and left the dead tunnel
+  /// up. The endpoint is already signed and verified; only datapath options
+  /// change.
+  Map<String, dynamic>? _activeEndpoint;
+
   /// The session id the config request must present, when one was claimed.
   String? get sessionId => _sessionId;
 
@@ -284,6 +298,12 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         }
       case EngineState.connected:
         _watchdog?.cancel();
+        // A start that finishes after the attempt was already failed must not
+        // revive the tunnel: `_fail` has taken it down and the screen says so.
+        if (_failed) {
+          unawaited(_stopEngineAfterFailure());
+          return;
+        }
         _failed = false;
         unawaited(_recovery.endAttempt());
         _startSessionWatch();
@@ -335,9 +355,21 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       _ref.read(compatModeProvider.notifier).state = true;
       if (attempt != _attempt || state is! EngineStateConnected) return;
       // Reloading the engine in place applies the compat datapath without
-      // tearing down the session the controller just minted.
-      await connect();
-      return;
+      // tearing down the session the controller just minted — and without a
+      // network round trip. Going back through connect() re-claimed the session
+      // and re-fetched the bundle through the tunnel that had just carried
+      // nothing, so the fallback itself failed with "cannot reach the
+      // controller" and left a dead tunnel up on the device.
+      final endpoint = _activeEndpoint;
+      if (endpoint != null) {
+        try {
+          await _engine.connect(jsonEncode(buildSingBoxTunConfig(endpoint, compat: true)));
+          return;
+        } catch (error) {
+          _fail(_engine.lastErrorMessage ?? _describeError(error));
+          return;
+        }
+      }
     }
 
     await disconnect();
@@ -463,6 +495,8 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _fail('The selected server configuration is unavailable. Pick another server.');
         return;
       }
+      _activeEndpoint = nodeConfig;
+      _engineStarted = true;
       await _engine.connect(jsonEncode(buildSingBoxTunConfig(
         nodeConfig,
         compat: _ref.read(compatModeProvider),
@@ -491,11 +525,34 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
   /// Records a failed attempt. Cancels the watchdog and keeps later
   /// `disconnected` events from wiping the reason off the screen.
+  ///
+  /// A failure after the engine was started also takes the tunnel down: a tun
+  /// with no datapath blocks every app on the device, and leaving it running
+  /// while the screen says "not connected" left the user with no way back
+  /// except the notification or another VPN app.
   void _fail(String message) {
+    final tunnelUp = _engineStarted;
     _watchdog?.cancel();
+    _sessionWatch?.cancel();
+    _sessionWatch = null;
     _failed = true;
     unawaited(_recovery.endAttempt());
     state = EngineStateError(message);
+    if (tunnelUp) unawaited(_stopEngineAfterFailure());
+  }
+
+  /// Stops an engine left running by a failed attempt.
+  ///
+  /// The failure message stays on screen: `_failed` is already set, so the
+  /// engine's `disconnecting`/`disconnected` events cannot overwrite it.
+  Future<void> _stopEngineAfterFailure() async {
+    try {
+      await _engine.disconnect();
+    } catch (_) {
+      // Nothing left to stop; the failure message is what the user needs.
+    } finally {
+      _engineStarted = false;
+    }
   }
 
   /// Turns an engine error into text a person can read.
@@ -606,6 +663,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       // once the platform has torn the interface down; a stop that could not be
       // confirmed surfaces as an error instead of a false "Disconnected".
       await _engine.disconnect();
+      _engineStarted = false;
       state = const EngineStateIdle();
     } catch (error) {
       state = EngineStateError(_describeError(error));
