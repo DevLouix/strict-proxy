@@ -32,4 +32,34 @@ void main() {
       isFalse,
     );
   });
+
+  test('a failed probe says which stage died', () {
+    expect(
+      ConnectionNotifier.describeProbeError(SocketException('Failed host lookup: example.invalid')),
+      'the name could not be resolved',
+    );
+    expect(
+      ConnectionNotifier.describeProbeError(SocketException('Connection refused')),
+      'the server refused the connection',
+    );
+    expect(
+      ConnectionNotifier.describeProbeError(SocketException('Connection timed out')),
+      'the connection timed out',
+    );
+    expect(
+      ConnectionNotifier.describeProbeError(HandshakeException('bad certificate')),
+      'the secure handshake failed',
+    );
+  });
+
+  test('the probe hands the failure to the caller', () async {
+    final reasons = <String>[];
+    final reachable = await ConnectionNotifier.probeDataPath(
+      urls: [Uri.parse('http://127.0.0.1:1/generate_204')],
+      timeout: const Duration(milliseconds: 700),
+      onError: (error) => reasons.add(ConnectionNotifier.describeProbeError(error)),
+    );
+    expect(reachable, isFalse);
+    expect(reasons, isNotEmpty, reason: 'the screen needs a reason, not just false');
+  });
 }

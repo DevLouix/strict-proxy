@@ -322,7 +322,8 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     // Routes and the DNS hijack settle a moment after the interface comes up.
     await Future<void>.delayed(const Duration(seconds: 2));
     if (attempt != _attempt || state is! EngineStateConnected) return;
-    if (await probeDataPath()) {
+    String? reason;
+    if (await probeDataPath(onError: (error) => reason ??= describeProbeError(error))) {
       _autoCompatTried = false;
       return;
     }
@@ -341,9 +342,28 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
     await disconnect();
     _fail(
-      'The tunnel is up but no traffic is getting through it. Try another '
-      'server, or contact support if every server does this.',
+      'The tunnel is up but no traffic is getting through it'
+      '${reason == null ? '' : ' ($reason)'}. Try another server, or contact '
+      'support if every server does this.',
     );
+  }
+
+  /// A short reason for a failed data-path probe.
+  ///
+  /// The three ways a probe dies mean different things: a name that cannot be
+  /// resolved points at the DNS hijack, a refused connection at the node's
+  /// tunnel port, a failed handshake at the node's REALITY credentials. Saying
+  /// "no traffic" for all three is what made this failure unactionable.
+  @visibleForTesting
+  static String describeProbeError(Object error) {
+    if (error is HandshakeException) return 'the secure handshake failed';
+    final text = error.toString().toLowerCase();
+    if (text.contains('failed host lookup') || text.contains('no address associated')) {
+      return 'the name could not be resolved';
+    }
+    if (text.contains('connection refused')) return 'the server refused the connection';
+    if (text.contains('timed out') || text.contains('timeout')) return 'the connection timed out';
+    return 'the request failed';
   }
 
   /// True when at least one probe endpoint answers through the tunnel.
@@ -351,6 +371,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   static Future<bool> probeDataPath({
     Iterable<Uri>? urls,
     Duration timeout = dataPathProbeTimeout,
+    void Function(Object error)? onError,
   }) async {
     final targets = (urls ?? dataPathProbes).toList(growable: false);
     if (targets.isEmpty) return true;
@@ -363,7 +384,8 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
           final response = await request.close().timeout(timeout);
           await response.drain<void>().timeout(timeout);
           return response.statusCode >= 200 && response.statusCode < 400;
-        } catch (_) {
+        } catch (error) {
+          onError?.call(error);
           return false;
         }
       }));
@@ -445,7 +467,6 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         nodeConfig,
         compat: _ref.read(compatModeProvider),
       )));
-      await _verifyTraffic(attempt);
     } on BundleVerificationException catch (e) {
       _fail(e.reason);
     } on ApiException catch (e) {
@@ -461,23 +482,12 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     }
   }
 
-  /// Proves the tunnel carries traffic before the UI claims success.
-  ///
-  /// A connected engine only means the tun exists. When the node's tunnel port
-  /// is closed, or a web server holds it, the tunnel comes up and carries
-  /// nothing — which read as "connected, no internet" until this probe.
-  Future<void> _verifyTraffic(int attempt) async {
-    try {
-      await _ref.read(apiProvider).health().timeout(const Duration(seconds: 8));
-    } catch (_) {
-      if (attempt != _attempt) return;
-      await _engine.disconnect();
-      _fail(
-        'The VPN connected, but no traffic is getting through. The server is '
-        'not reachable — check that its tunnel port is open, then try again.',
-      );
-    }
-  }
+  // There used to be a second check here that called the controller's health
+  // endpoint through the shared API client. That client keeps connections
+  // alive, so the request could travel over a socket opened *before* the tunnel
+  // existed: it answered 200 with the tunnel carrying nothing, which is the one
+  // false "connected" the probe below exists to prevent. A fresh-socket probe
+  // (`probeDataPath`) is the check that means something.
 
   /// Records a failed attempt. Cancels the watchdog and keeps later
   /// `disconnected` events from wiping the reason off the screen.
