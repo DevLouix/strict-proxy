@@ -9,6 +9,17 @@ import '../../core/api_client.dart';
 import '../../core/app_version.dart';
 import '../../core/config.dart';
 import '../../core/device_info.dart';
+import 'apk_cache.dart';
+
+/// A download that could not be finished, with a message fit to show the user.
+class UpdateDownloadException implements Exception {
+  const UpdateDownloadException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
 
 /// One APK of a published build, for a specific CPU architecture.
 class AppArtifact {
@@ -185,6 +196,9 @@ class UpdateController extends StateNotifier<UpdateState> {
 
   bool _checked = false;
 
+  /// Guards against a second tap starting a second write to the same file.
+  bool _downloading = false;
+
   Future<void> check({bool force = false}) async {
     if (state.checking || (_checked && !force)) return;
     _checked = true;
@@ -241,6 +255,13 @@ class UpdateController extends StateNotifier<UpdateState> {
 
   /// Downloads the published APK and opens the system installer.
   ///
+  /// The APK is kept in the app's cache under its build and ABI, so a second
+  /// tap does not pay for the download twice. That matters most on Android
+  /// 8+: the first tap sends the user to allow "install unknown apps", and
+  /// returning from that screen used to start the ~100 MB download again. Now
+  /// a finished file goes straight to the installer and a partial one is
+  /// resumed with a range request.
+  ///
   /// Returns a message to show the user, or null when the installer was opened.
   Future<String?> downloadAndInstall() async {
     final release = state.release;
@@ -250,58 +271,123 @@ class UpdateController extends StateNotifier<UpdateState> {
     if (artifact == null) {
       return 'This update was not built for your device\'s CPU.';
     }
+    if (_downloading) return 'The update is already downloading.';
 
-    state = state.copyWith(progress: 0.0, error: null);
-    File? file;
+    _downloading = true;
+    state = state.copyWith(error: null);
     try {
       final dir = Directory('${await _cacheDir()}/updates');
       await dir.create(recursive: true);
-      file = File('${dir.path}/strict-proxy-${release.buildNumber}-${artifact.abi}.apk');
+      final file = File('${dir.path}/${apkFileName(release.buildNumber, artifact.abi)}');
+      final expected = artifact.sizeBytes;
 
-      final uri = Uri.parse(artifact.url).isAbsolute
-          ? Uri.parse(artifact.url)
-          : Uri.parse(AppConfig.controllerUrl).resolve(artifact.url);
-      final client = http.Client();
-      try {
-        final res = await client.send(http.Request('GET', uri));
-        if (res.statusCode >= 400) {
-          state = state.copyWith(progress: null);
-          return 'Download failed (HTTP ${res.statusCode})';
-        }
-        final total = res.contentLength ?? artifact.sizeBytes;
-        var received = 0;
-        final sink = file.openWrite();
-        try {
-          await for (final chunk in res.stream) {
-            sink.add(chunk);
-            received += chunk.length;
-            if (total > 0) {
-              state = state.copyWith(progress: (received / total).clamp(0.0, 1.0).toDouble());
-            }
+      // An APK cached for a different build can never be installed now, and
+      // each one is ~100 MB; only this update's file is kept.
+      await for (final entry in dir.list()) {
+        if (entry is File && entry.path != file.path && entry.path.endsWith('.apk')) {
+          try {
+            await entry.delete();
+          } catch (_) {
+            // A leftover file in the cache is harmless.
           }
-        } finally {
-          await sink.close();
         }
-      } finally {
-        client.close();
       }
 
+      final cached = await file.exists() ? await file.length() : 0;
+      if (!isCompleteDownload(cached, expected)) {
+        final offset = resumeOffset(cached, expected);
+        if (offset == 0 && cached > 0) await file.delete();
+        if (expected > 0) {
+          state = state.copyWith(progress: offset / expected);
+        }
+        final uri = Uri.parse(artifact.url).isAbsolute
+            ? Uri.parse(artifact.url)
+            : Uri.parse(AppConfig.controllerUrl).resolve(artifact.url);
+        await _downloadInto(file, uri, offset: offset, expectedBytes: expected);
+      }
+
+      state = state.copyWith(progress: null, error: null);
       final opened = await _channel.invokeMethod<bool>('install', {'path': file.path}) ?? false;
-      state = state.copyWith(progress: null, handedToInstaller: opened);
+      state = state.copyWith(handedToInstaller: opened);
       if (!opened) {
-        return 'Allow StrictProxy to install apps, then tap update again.';
+        return 'Allow StrictProxy to install apps, then tap update again — the download is kept.';
       }
       return null;
     } catch (error) {
-      if (file != null && await file.exists()) {
-        try {
-          await file.delete();
-        } catch (_) {
-          // A leftover file in the cache is harmless.
-        }
-      }
+      // The file is deliberately left in place: a partial download is exactly
+      // what the next tap resumes.
       state = state.copyWith(progress: null, error: '$error');
       return 'Update failed: $error';
+    } finally {
+      _downloading = false;
+    }
+  }
+
+  /// Streams [uri] into [file], continuing from [offset] bytes already on disk.
+  Future<void> _downloadInto(
+    File file,
+    Uri uri, {
+    required int offset,
+    required int expectedBytes,
+  }) async {
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', uri);
+      if (offset > 0) request.headers['range'] = 'bytes=$offset-';
+      final res = await client.send(request);
+
+      if (res.statusCode == 416) {
+        // The controller says the APK is not this long, so the cached bytes
+        // are not a prefix of it. Throw them away and fetch the whole file.
+        await res.stream.drain<void>();
+        await file.delete();
+        return _downloadInto(file, uri, offset: 0, expectedBytes: expectedBytes);
+      }
+      if (res.statusCode >= 400) {
+        await res.stream.drain<void>();
+        throw UpdateDownloadException('Download failed (HTTP ${res.statusCode})');
+      }
+
+      // 206 means the range was honoured and the body continues our file. A
+      // 200 means it was ignored and the body starts at byte zero, so the
+      // file must be rewritten rather than appended to.
+      final resuming = offset > 0 && res.statusCode == 206;
+      if (!resuming && await file.exists()) await file.delete();
+
+      var received = resuming ? offset : 0;
+      final remaining = res.contentLength;
+      final total = remaining != null
+          ? received + remaining
+          : expectedBytes > 0
+              ? expectedBytes
+              : 0;
+
+      final sink = file.openWrite(mode: resuming ? FileMode.append : FileMode.write);
+      try {
+        await for (final chunk in res.stream) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (total > 0) {
+            state = state.copyWith(progress: (received / total).clamp(0.0, 1.0).toDouble());
+          }
+        }
+      } finally {
+        await sink.close();
+      }
+
+      final size = await file.length();
+      if (expectedBytes > 0 && size < expectedBytes) {
+        // Keep the partial file so the next tap continues from here.
+        throw UpdateDownloadException(
+          'the download stopped at $size of $expectedBytes bytes; tap update to resume',
+        );
+      }
+      if (expectedBytes > 0 && size > expectedBytes) {
+        await file.delete();
+        throw UpdateDownloadException('the download was longer than the published APK; tap update to try again');
+      }
+    } finally {
+      client.close();
     }
   }
 
