@@ -145,18 +145,21 @@ echo "== engine log lines"
 grep -E "StrictProxyLibbox|libbox\.so|libbox failed|Fatal signal|SIGILL" "$OUT/logcat.txt" || echo "(none)"
 
 status=0
-if ! grep -q "libbox\.so" "$OUT/logcat.txt"; then
-  # A build without the engine also reports "not available" in the app; either
-  # way the artifact is unusable on this device.
-  echo "error: the APK never loaded libbox.so" >&2
+# Whether the engine is bundled is a property of the artifact, so read it from
+# the artifact: a successful load prints nothing, and an earlier version of this
+# script grepped the log for "libbox.so" and failed every run for that reason.
+ENTRIES="$(unzip -l "$APK")" || { echo "error: unzip could not read $APK" >&2; status=1; ENTRIES=""; }
+if [[ -n "$ENTRIES" ]] && ! grep -q 'lib/x86_64/libbox\.so' <<<"$ENTRIES"; then
+  echo "error: the APK carries no x86_64 libbox.so" >&2
   status=1
 fi
 if grep -qE "Fatal signal|SIGILL|FATAL EXCEPTION" "$OUT/logcat.txt"; then
   echo "error: the app crashed on the emulator" >&2
   status=1
 fi
-if grep -q "libbox native artifact is unavailable" "$OUT/logcat.txt"; then
-  echo "error: the APK was built without a usable native engine" >&2
+# What the log can say is that the packaged engine did not load here.
+if grep -qE "UnsatisfiedLinkError|dlopen failed|libbox native artifact is unavailable" "$OUT/logcat.txt"; then
+  echo "error: the native engine did not load on this device" >&2
   status=1
 fi
 
