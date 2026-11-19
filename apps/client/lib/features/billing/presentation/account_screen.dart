@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/app_version.dart';
 import '../../../core/billing_models.dart';
 import '../../../core/checkout_launcher.dart';
 import '../../../core/diagnostics.dart';
@@ -9,6 +10,7 @@ import '../../../core/widgets/password_field.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../../diagnostics/presentation/diagnostics_screen.dart';
 import '../../home/application/connection_controller.dart';
+import '../../updates/update_controller.dart';
 import '../application/billing_controller.dart';
 
 /// Account and subscription screen: current plan, limits, bandwidth usage and
@@ -124,6 +126,11 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
               ),
             ),
             const SizedBox(height: 16),
+            _AppInfoCard(
+              update: ref.watch(updateProvider),
+              onCheck: _checkForUpdates,
+            ),
+            const SizedBox(height: 16),
             _DangerZone(onDelete: _confirmDelete),
           ],
         ),
@@ -150,6 +157,21 @@ class _AccountScreenState extends ConsumerState<AccountScreen> {
 
   /// Confirms with the account password, because deletion is irreversible and an
   /// unprotected tap (or a stolen access token) must not be enough.
+  /// Answers "which version am I on?" from the version baked into the APK, and
+  /// says whether the controller is offering anything newer.
+  Future<void> _checkForUpdates() async {
+    await ref.read(updateProvider.notifier).check(force: true);
+    if (!mounted) return;
+    final update = ref.read(updateProvider);
+    _showMessage(
+      update.error ??
+          (update.hasUpdate
+              ? 'Version ${update.release!.version} '
+                  '(build ${update.release!.buildNumber}) is available.'
+              : 'You are on the latest build.'),
+    );
+  }
+
   Future<void> _confirmDelete() async {
     final password = await showDialog<String>(
       context: context,
@@ -859,6 +881,65 @@ class _Notice extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(text, style: theme.textTheme.bodySmall),
+    );
+  }
+}
+
+/// The build identity of the installed APK.
+///
+/// The version is only knowable from inside the app: the store listing is not
+/// the source of truth here, and a sideloaded update can lag the published
+/// build. Read from the dart-defines the release build baked in, not from the
+/// update feed, which describes what is *available*, not what is installed.
+class _AppInfoCard extends StatelessWidget {
+  const _AppInfoCard({required this.update, required this.onCheck});
+
+  final UpdateState update;
+  final Future<void> Function() onCheck;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final offered = update.hasUpdate ? update.release : null;
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Text('App info', style: theme.textTheme.labelMedium),
+          ),
+          ListTile(
+            title: const Text('Installed version'),
+            subtitle: Text(
+              offered == null
+                  ? 'Version ${AppVersion.name} (build ${AppVersion.buildNumber})'
+                  : 'Version ${AppVersion.name} (build ${AppVersion.buildNumber})'
+                      ' \u00b7 build ${offered.buildNumber} is available',
+            ),
+            trailing: update.checking
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : TextButton(
+                    onPressed: () => onCheck(),
+                    child: const Text('Check'),
+                  ),
+          ),
+          if (update.error != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: Text(
+                'Could not check for updates: ${update.error}',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: StatusColors.failed),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
