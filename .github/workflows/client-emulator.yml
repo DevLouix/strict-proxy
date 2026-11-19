@@ -160,7 +160,13 @@ jobs:
           STRICT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
           STRICT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
           APP_VERSION: '0.1.0'
-          APP_BUILD_NUMBER: ${{ github.run_number }}
+          # Deliberately not this workflow's run number: that counts 1, 2, 3 and
+          # the controller refuses any build below its minimum client build
+          # ("this build can no longer connect"), so an emulator artifact would
+          # be gated out on its first run. Raise this if the minimum ever passes
+          # it; installed emulators are throwaway devices, so the value only has
+          # to clear the gate.
+          APP_BUILD_NUMBER: '1000'
           SKIP_LIBBOX: '1'
           TARGET_PLATFORMS: android-x64
         run: ./apps/client/tool/build-release-android.sh
