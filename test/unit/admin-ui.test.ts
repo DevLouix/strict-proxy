@@ -494,3 +494,50 @@ test('the client version gate switch sits on Client apps and can be turned off',
   assert.ok(put, 'flipping the switch should update the gate');
   assert.equal(put[2].minimumBuild, 0, 'off clears the minimum so every build may connect');
 });
+
+test('money uses the currency\'s own minor digits', async () => {
+  const { money, currencyDigits, amountToMinor, minorToAmount } = await import('../../apps/controller/src/admin/dom.js');
+
+  assert.equal(currencyDigits('JPY'), 0, 'yen has no minor unit');
+  assert.equal(currencyDigits('USD'), 2);
+  assert.match(money(500, 'JPY'), /500/);
+  assert.ok(!/5[.,]00/.test(money(500, 'JPY')), '¥500 must not render as ¥5.00');
+  assert.equal(amountToMinor('12.50', 'USD'), 1250);
+  assert.equal(amountToMinor('500', 'JPY'), 500);
+  assert.equal(minorToAmount(1250, 'USD'), 12.5);
+  assert.equal(minorToAmount(500, 'JPY'), 500);
+});
+
+test('the create-user dialog marks its email field for keyboards and autofill', async () => {
+  globalThis.document.body.replaceChildren();
+
+  const api = stubApi();
+  const node = await views.usersView(api, () => {});
+  [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Create user').dispatch('click');
+
+  const dialog = globalThis.document.body.children.find((c: any) => c.tagName === 'DIALOG');
+  const email = [...dialog.walk()].find((el: any) => el.tagName === 'INPUT');
+  assert.equal(email.attributes.type, 'email');
+  assert.equal(email.attributes.inputmode, 'email');
+  assert.equal(email.attributes.autocapitalize, 'none');
+  assert.equal(email.attributes.autocorrect, 'off');
+  assert.equal(email.attributes.spellcheck, 'false');
+  assert.equal(email.attributes.maxlength, '254');
+});
+
+test('the plans view prices in the catalog currency and calls out currency drift', async () => {
+  const { plansView } = await import('../../apps/controller/src/admin/billing-ops-view.js');
+  const api = stubApi();
+  const node = await plansView(api);
+  const text = node.text();
+
+  assert.ok(text.includes('Pricing'));
+  assert.ok(text.includes('currency drift'), 'a USD plan under a JPY catalog is drift, not a price match');
+  assert.ok(!text.includes('price drift'), 'the amounts match numerically; only the currency differs');
+
+  // A yen price has no decimal places, so the inline editor must not offer
+  // hundredths the provider cannot accept.
+  const amounts = [...node.walk()].filter((el: any) => el.tagName === 'INPUT' && el.className === 'price-input');
+  assert.ok(amounts.length >= 1, 'the pricing panel needs an amount input');
+  assert.equal(amounts[0].attributes.step, '1');
+});

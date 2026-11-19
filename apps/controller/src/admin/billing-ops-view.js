@@ -9,7 +9,17 @@
  * plan changes what existing subscribers are billed, so that is never an
  * automatic action.
  */
-import { h, mount, toast, money, badge, date } from './dom.js';
+import {
+  h,
+  mount,
+  toast,
+  money,
+  badge,
+  date,
+  currencyDigits,
+  amountToMinor,
+  minorToAmount,
+} from './dom.js';
 
 export async function plansView(api) {
   const host = h('div', {});
@@ -152,25 +162,29 @@ export async function plansView(api) {
       }
     });
 
+    // The currency decides the input's step and how the stored minor units are
+    // shown: a JPY amount has no decimal places, so a 0.01 step would suggest
+    // prices the provider cannot accept.
+    const digits = currencyDigits(state.currency);
     const rows = (state.tiers ?? []).map((t) => {
       const input = h('input', {
         type: 'number',
         min: '0',
-        step: '0.01',
+        step: String(10 ** -digits),
+        inputmode: 'decimal',
         class: 'price-input',
-        value: (t.amountMinor / 100).toFixed(2),
+        value: minorToAmount(t.amountMinor, state.currency).toFixed(digits),
         title: `Amount in ${state.currency}`,
       });
       const save = h('button', { class: 'btn sm primary' }, 'Save');
       save.addEventListener('click', async () => {
-        const major = Number(input.value);
-        if (!Number.isFinite(major) || major <= 0) {
+        const minor = amountToMinor(input.value, state.currency);
+        if (!Number.isFinite(minor) || minor <= 0) {
           toast('Enter an amount greater than zero', 'err');
           return;
         }
         save.disabled = true;
         try {
-          const minor = Math.round(major * 100);
           const result = await api.put('/api/v1/admin/billing/settings', { amounts: { [t.tier]: minor } });
           toast(result.note || `${t.label} set to ${money(minor, result.currency)}`);
           await load();
@@ -184,7 +198,10 @@ export async function plansView(api) {
         h('td', {},
           t.label,
           t.overridden
-            ? h('div', { class: 'muted small' }, `default ${money(t.configuredAmountMinor, state.currency)}`)
+            // The configured default is stored in the deployment's currency,
+            // which is not necessarily the one being edited; formatting it with
+            // the current currency would invent a price.
+            ? h('div', { class: 'muted small' }, `default ${money(t.configuredAmountMinor, t.configuredCurrency ?? state.currency)}`)
             : null,
         ),
         h('td', {}, money(t.amountMinor, state.currency)),
@@ -275,7 +292,11 @@ export async function plansView(api) {
             )),
             h('tbody', {}, ...(state?.tiers ?? []).map((t) => {
               const plan = byTier.get(t.tier);
-              const mismatch = plan && plan.amount !== t.expectedAmountMinor;
+              // An amount only means something in its own currency: 500 USD and
+              // 500 JPY are not the same price, so a plan billing in another
+              // currency is drift even when the digits happen to match.
+              const currencyDrift = Boolean(plan && plan.currency && plan.currency !== t.currency);
+              const mismatch = Boolean(plan && !currencyDrift && plan.amount !== t.expectedAmountMinor);
               return h('tr', {},
                 h('td', {},
                   t.label,
@@ -283,7 +304,7 @@ export async function plansView(api) {
                   // legible as a deliberate choice rather than the only price
                   // this deployment has ever had.
                   t.overridden
-                    ? h('div', { class: 'muted small' }, `configured default ${money(t.configuredAmountMinor, t.currency)}`)
+                    ? h('div', { class: 'muted small' }, `configured default ${money(t.configuredAmountMinor, t.configuredCurrency ?? t.currency)}`)
                     : null,
                 ),
                 h('td', {}, money(t.expectedAmountMinor, t.currency)),
@@ -297,9 +318,11 @@ export async function plansView(api) {
                       // history references it — it cannot be subscribed to, and
                       // syncing now creates a replacement for it.
                       ? h('span', { class: 'badge failed', title: 'Kept by the provider for billing history, but it cannot be subscribed to. Syncing creates a replacement from the catalog price.' }, plan.status)
-                      : mismatch
-                        ? h('span', { class: 'badge degraded', title: 'The provider price does not match the catalog. Repricing a live plan would change what subscribers are billed, so this is not fixed automatically — use the Price control to change it deliberately.' }, 'price drift')
-                        : h('span', { class: 'badge active' }, 'in sync'),
+                      : currencyDrift
+                        ? h('span', { class: 'badge degraded', title: `The provider plan bills in ${plan.currency} while this tier is priced in ${t.currency}. The amounts are not comparable across currencies, and a live plan is never repriced automatically — create a plan in the catalog currency before selling it.` }, 'currency drift')
+                        : mismatch
+                          ? h('span', { class: 'badge degraded', title: 'The provider price does not match the catalog. Repricing a live plan would change what subscribers are billed, so this is not fixed automatically — use the Price control to change it deliberately.' }, 'price drift')
+                          : h('span', { class: 'badge active' }, 'in sync'),
                 ),
                 h('td', {}, priceControl(t)),
               );
@@ -362,7 +385,7 @@ export async function plansView(api) {
     cell.append(change);
 
     if (t.overridden) {
-      const reset = h('button', { class: 'btn sm', title: `Back to the configured ${money(t.configuredAmountMinor, t.currency)}` }, 'Reset');
+      const reset = h('button', { class: 'btn sm', title: `Back to the configured ${money(t.configuredAmountMinor, t.configuredCurrency ?? t.currency)}` }, 'Reset');
       reset.addEventListener('click', async () => {
         reset.disabled = true;
         try {
@@ -380,19 +403,21 @@ export async function plansView(api) {
   }
 
   function openEditor(t, cell) {
+    const digits = currencyDigits(t.currency);
     const input = h('input', {
       type: 'number',
       min: '0',
-      step: '0.01',
+      step: String(10 ** -digits),
+      inputmode: 'decimal',
       class: 'price-input',
-      value: (t.expectedAmountMinor / 100).toFixed(2),
+      value: minorToAmount(t.expectedAmountMinor, t.currency).toFixed(digits),
     });
     const save = h('button', { class: 'btn sm primary' }, 'Save');
     const cancel = h('button', { class: 'btn sm' }, 'Cancel');
 
     save.addEventListener('click', async () => {
-      const major = Number(input.value);
-      if (!Number.isFinite(major) || major <= 0) {
+      const minor = amountToMinor(input.value, t.currency);
+      if (!Number.isFinite(minor) || minor <= 0) {
         toast('Enter an amount greater than zero', 'error');
         return;
       }
@@ -400,7 +425,7 @@ export async function plansView(api) {
       try {
         const result = await api.put('/api/v1/admin/billing/plans/price', {
           tier: t.tier,
-          amountMinor: Math.round(major * 100),
+          amountMinor: minor,
         });
         toast(result.note || 'Price updated');
         await load();
@@ -416,7 +441,7 @@ export async function plansView(api) {
       input,
       save,
       cancel,
-      h('p', { class: 'muted small' }, `${t.currency}. New customers are charged this amount. Whether a subscription already in flight is repriced is OpenPay's behaviour and cannot be checked from here — confirm it with OpenPay before relying on it.`),
+      h('p', { class: 'muted small' }, `${t.currency} · ${digits === 0 ? 'whole units only' : `${digits} decimal places`}. New customers are charged this amount. Whether a subscription already in flight is repriced is OpenPay's behaviour and cannot be checked from here — confirm it with OpenPay before relying on it.`),
     );
   }
 

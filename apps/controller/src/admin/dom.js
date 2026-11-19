@@ -28,6 +28,28 @@ export function mount(host, ...children) {
   return host;
 }
 
+/**
+ * An email input with every hint a browser, password manager or phone keyboard
+ * understands.
+ *
+ * `type="email"` alone is not enough: mobile keyboards switch on `inputmode`,
+ * password managers key off `autocomplete`, and a capitalised or autocorrected
+ * address fails server-side validation for a reason the user cannot see. The
+ * length cap matches what the controller accepts.
+ */
+export function emailInput(props = {}) {
+  return h('input', {
+    type: 'email',
+    inputmode: 'email',
+    autocomplete: 'email',
+    autocapitalize: 'none',
+    autocorrect: 'off',
+    spellcheck: 'false',
+    maxlength: '254',
+    ...props,
+  });
+}
+
 /** Formats a byte count for humans. */
 export function bytes(value) {
   const n = Number(value ?? 0);
@@ -40,17 +62,51 @@ export function bytes(value) {
 }
 
 /**
+ * How many decimal places a currency's minor unit has.
+ *
+ * Two for most, zero for JPY/KRW/VND, three for KWD. Guessing two is what made
+ * a ¥500 price render as ¥5.00, so `Intl` is asked and the answer is used
+ * everywhere an amount is shown or converted.
+ */
+export function currencyDigits(currency) {
+  try {
+    const resolved = new Intl.NumberFormat('en-US', { style: 'currency', currency: currency || 'USD' }).resolvedOptions();
+    return Number.isInteger(resolved.maximumFractionDigits) ? resolved.maximumFractionDigits : 2;
+  } catch {
+    return 2;
+  }
+}
+
+/** An input's major-unit text ("12.50") as the integer minor units the API stores. */
+export function amountToMinor(value, currency) {
+  return Math.round(Number(value) * 10 ** currencyDigits(currency));
+}
+
+/** Minor units as the major-unit number an amount input should display. */
+export function minorToAmount(amountMinor, currency) {
+  const n = Number(amountMinor ?? 0);
+  return Number.isFinite(n) ? n / 10 ** currencyDigits(currency) : 0;
+}
+
+/**
  * Formats a minor-unit amount (kobo/cents) as a major-unit string.
- * Intl handles the decimal placement so JPY (0 minor digits) stays correct.
+ * The currency decides the decimal count, so JPY (0 minor digits) and KWD (3)
+ * stay correct instead of being forced through a hundred.
  */
 export function money(amountMinor, currency) {
   const n = Number(amountMinor ?? 0);
   if (!Number.isFinite(n)) return '—';
+  const code = currency || 'USD';
+  const digits = currencyDigits(code);
   try {
-    const digits = 2;
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'USD', maximumFractionDigits: digits }).format(n / 10 ** digits);
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: code,
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(n / 10 ** digits);
   } catch {
-    return `${(n / 100).toFixed(2)} ${currency ?? ''}`.trim();
+    return `${(n / 10 ** digits).toFixed(digits)} ${code}`.trim();
   }
 }
 

@@ -6,7 +6,7 @@
  * which is not the same as clearing it — but must never be able to read it back
  * out of the dashboard. Clearing is an explicit action.
  */
-import { h, mount, toast } from './dom.js';
+import { h, mount, toast, emailInput } from './dom.js';
 import { passwordField } from './password-toggle.js';
 
 export async function settingsView(api) {
@@ -39,9 +39,9 @@ export async function settingsView(api) {
     // empty credential ("Missing credentials for PLAIN").
     const passInput = h('input', { type: 'password', placeholder: summary?.passwordSet ? '•••••••• (unchanged)' : 'not set', autocomplete: 'new-password' });
     const pass0 = passwordField(passInput);
-    const from0 = h('input', { type: 'email', value: summary?.fromAddress ?? '', placeholder: 'no-reply@example.com', spellcheck: 'false' });
+    const from0 = emailInput({ value: summary?.fromAddress ?? '', placeholder: 'no-reply@example.com' });
     const name0 = h('input', { type: 'text', value: summary?.fromName ?? '', placeholder: 'StrictProxy' });
-    const testTo0 = h('input', { type: 'email', placeholder: 'you@example.com', spellcheck: 'false' });
+    const testTo0 = emailInput({ placeholder: 'you@example.com' });
 
     const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save settings');
     const testBtn = h('button', { class: 'btn', type: 'button' }, 'Send test message');

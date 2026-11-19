@@ -130,7 +130,9 @@ function renderPage(options: { error?: string; email?: string } = {}): string {
       ${error}
       <form method="post" action="/setup" autocomplete="off">
         <label><span>Email</span>
-          <input type="email" name="email" value="${email}" required maxlength="${MAX_EMAIL_LENGTH}" autocomplete="username" />
+          <input type="email" name="email" value="${email}" required maxlength="${MAX_EMAIL_LENGTH}"
+            autocomplete="username" inputmode="email" autocapitalize="none"
+            autocorrect="off" spellcheck="false" placeholder="you@example.com" />
         </label>
         <label><span>Password</span>
           <input type="password" name="password" required minlength="${MIN_PASSWORD_LENGTH}" maxlength="${MAX_PASSWORD_LENGTH}" autocomplete="new-password" />

@@ -1,4 +1,5 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/billing_models.dart';
@@ -651,7 +652,10 @@ class _ChangeEmailDialogState extends State<_ChangeEmailDialog> {
           TextField(
             controller: _email,
             keyboardType: TextInputType.emailAddress,
+            autofillHints: const [AutofillHints.email],
             autocorrect: false,
+            enableSuggestions: false,
+            textCapitalization: TextCapitalization.none,
             decoration: const InputDecoration(labelText: 'New email'),
           ),
           const SizedBox(height: 12),

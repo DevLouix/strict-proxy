@@ -2,7 +2,7 @@
  * Admin dashboard shell: session bootstrap, navigation, view mounting.
  */
 import { ApiClient, getSession, clearSession, setUnauthorizedHandler } from './api.js';
-import { h, mount, toast } from './dom.js';
+import { h, mount, toast, emailInput } from './dom.js';
 import { createSidebar, navIcon } from './nav.js';
 import { passwordField } from './password-toggle.js';
 import { overviewView, usersView, nodesView, enrollmentsView, paymentsView, usageView } from './views.js';
@@ -37,7 +37,7 @@ const VIEWS = [
 ];
 
 function loginScreen() {
-  const email = h('input', { type: 'email', placeholder: 'admin@strict.local', autocomplete: 'username' });
+  const email = emailInput({ placeholder: 'admin@strict.local', autocomplete: 'username' });
   const password = h('input', { type: 'password', placeholder: '••••••••••', autocomplete: 'current-password' });
   const error = h('p', { class: 'muted small', style: 'min-height:18px' });
   const submit = h('button', { class: 'btn primary', type: 'submit' }, 'Sign in');

@@ -5,7 +5,7 @@
  * node, so the shell only has to swap the main region. Errors are surfaced as
  * toasts rather than blank screens.
  */
-import { h, mount, bytes, money, date, ago, badge, toast, confirmDialog, copyText } from './dom.js';
+import { h, mount, bytes, money, date, ago, badge, toast, confirmDialog, copyText, emailInput } from './dom.js';
 
 // ---------------------------------------------------------------------------
 // Overview
@@ -282,7 +282,7 @@ export async function usersView(api, rerender) {
    * it now rather than implying it can be read back later.
    */
   function createUserDialog() {
-    const email = h('input', { type: 'email', placeholder: 'user@example.com', autocomplete: 'off', spellcheck: 'false' });
+    const email = emailInput({ placeholder: 'user@example.com', autocomplete: 'off' });
     const password = h('input', { type: 'password', placeholder: 'at least 10 characters', autocomplete: 'new-password' });
     const role = h('select', {},
       h('option', { value: 'user' }, 'User'),

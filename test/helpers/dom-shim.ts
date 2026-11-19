@@ -261,6 +261,39 @@ export function stubApi() {
       ],
     },
     clientGate: { minimumBuild: 21, enabled: true },
+    plans: {
+      currency: 'JPY',
+      defaultCurrency: 'JPY',
+      currencyOverridden: false,
+      symbol: '¥',
+      currencies: [{ code: 'JPY', symbol: '¥' }, { code: 'USD', symbol: '$' }],
+      gateway: 'openpay',
+      merchantId: 'm1',
+      tiers: [
+        {
+          tier: 'standard',
+          label: 'Standard',
+          expectedAmountMinor: 500,
+          currency: 'JPY',
+          configuredAmountMinor: 500,
+          configuredCurrency: 'JPY',
+          overridden: false,
+        },
+      ],
+      // Billed in USD while the catalog prices in JPY: the numbers match, the
+      // prices do not. The view must report drift rather than "in sync".
+      providerPlans: [
+        { id: 'p1', name: 'Standard', amount: 500, currency: 'USD', interval: '1 month', status: 'active', tier: 'standard', usable: true },
+      ],
+    },
+    providers: {
+      currency: 'JPY',
+      health: { status: 'ok' },
+      providers: [
+        { provider: 'openpay', available: true, configured: true, key_mode: 'live', credentials: 'configured' },
+      ],
+      configs: [{ provider: 'openpay', connectionStatus: 'ok', checkedAt: '2026-03-01T00:00:00Z' }],
+    },
     crashes: {
       crashes: [
         {
@@ -300,6 +333,8 @@ export function stubApi() {
       if (path.startsWith('/api/v1/admin/client-apps/android/crashes')) return data.crashes;
       if (path.startsWith('/api/v1/admin/client-apps/android/releases')) return data.clientReleases;
       if (path.startsWith('/api/v1/admin/settings/client')) return data.clientGate;
+      if (path.startsWith('/api/v1/admin/billing/plans')) return data.plans;
+      if (path.startsWith('/api/v1/admin/billing/providers')) return data.providers;
       throw new Error(`unstubbed GET ${path}`);
     },
     async post(path, body) {
