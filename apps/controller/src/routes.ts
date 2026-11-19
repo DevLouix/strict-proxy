@@ -685,17 +685,47 @@ export function buildRouter(ctx: Ctx): Router {
       return;
     }
 
-    const enrolled = await enrollNode(ctx.db, {
-      token: body.token,
-      hostname: body.hostname,
-      label: body.label,
-      publicIp,
-      publicIpSource: supplied ? 'enrollment' : 'autodetect',
-      tunnelPort: Number(body.tunnelPort ?? 443),
-      realityServerName: body.realityServerName,
-      realityShortIds: body.realityShortIds,
-      engineVersion: body.engineVersion ?? 'unknown',
-    });
+    let enrolled: { nodeId: string; hmacSecret: string; region: string };
+    try {
+      enrolled = await enrollNode(ctx.db, {
+        token: body.token,
+        hostname: body.hostname,
+        label: body.label,
+        publicIp,
+        publicIpSource: supplied ? 'enrollment' : 'autodetect',
+        tunnelPort: Number(body.tunnelPort ?? 443),
+        realityServerName: body.realityServerName,
+        realityShortIds: body.realityShortIds,
+        engineVersion: body.engineVersion ?? 'unknown',
+      });
+    } catch (err) {
+      // Rebuilding a VPS (new volume, same NODE_HOSTNAME) leaves the old node
+      // row behind, and `nodes_hostname_uq` rejected the insert. That surfaced
+      // as a bare 500 that the agent could only echo, so an operator had no way
+      // to know a stale node was the problem. The whole enrollment transaction
+      // rolls back, which is why the token is still usable after this.
+      // Drizzle wraps driver errors in a DrizzleQueryError whose `cause` is the
+      // pg error, and drivers disagree on the field name (pg: `constraint`,
+      // postgres.js: `constraint_name`), so walk the chain for the real one.
+      type PgError = { code?: string; constraint?: string; constraint_name?: string; detail?: string; message?: string; cause?: unknown };
+      let pg: PgError | null = null;
+      for (let cur: unknown = err, depth = 0; cur && depth < 4; depth++) {
+        const node = cur as PgError;
+        if (node.code) { pg = node; break; }
+        cur = node.cause;
+      }
+      const conflict = `${pg?.constraint ?? pg?.constraint_name ?? ''} ${pg?.detail ?? ''} ${pg?.message ?? ''}`;
+      if (pg?.code === '23505' && conflict.includes('nodes_hostname')) {
+        res.status(409).json({
+          error:
+            `a node named "${body.hostname}" already exists; delete it in Admin -> Nodes (this also cascades its credentials), ` +
+            'then retry this enrollment with the same token, or set NODE_HOSTNAME to a different name',
+          code: 'NODE_HOSTNAME_IN_USE',
+        });
+        return;
+      }
+      throw err;
+    }
     res.status(201).json(enrolled);
   }));
 

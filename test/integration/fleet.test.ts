@@ -383,3 +383,31 @@ test('a node cannot report usage against another node’s credentials', async ()
   });
   assert.equal(res.body.applied, 0, 'node A must not be able to bill node B’s credential');
 });
+test('re-enrolling a hostname that already exists is an actionable conflict, not a 500', async () => {
+  // What a rebuilt VPS looks like: the volume (node identity) is gone, the
+  // controller still has the old row, and the agent presents the same
+  // NODE_HOSTNAME. `nodes_hostname_uq` used to surface as a bare INTERNAL 500.
+  const hostname = 'rebuilt.example.com';
+  const body = {
+    hostname,
+    publicIp: '203.0.113.40',
+    realityServerName: 'www.microsoft.com',
+    realityShortIds: REALITY_SHORT_IDS,
+  };
+  const first = await h.createEnrollment('eu-central');
+  assert.equal((await h.request('POST', '/api/v1/nodes/enroll', { body: { ...body, token: first } })).status, 201);
+
+  const second = await h.createEnrollment('eu-central');
+  const conflict = await h.request('POST', '/api/v1/nodes/enroll', { body: { ...body, token: second } });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.body.code, 'NODE_HOSTNAME_IN_USE');
+  assert.match(conflict.body.error, /already exists/);
+  assert.match(conflict.body.error, /Admin -> Nodes/);
+
+  // The failed enrollment rolled back with its transaction, so its token was
+  // never spent: the operator can retry the same token after deleting the node.
+  const retried = await h.request('POST', '/api/v1/nodes/enroll', {
+    body: { ...body, hostname: 'rebuilt-2.example.com', token: second },
+  });
+  assert.equal(retried.status, 201);
+});
