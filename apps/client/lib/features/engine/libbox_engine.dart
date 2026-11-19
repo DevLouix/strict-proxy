@@ -65,6 +65,11 @@ class LibboxEngine implements VpnEngine {
       await _channel.invokeMethod<void>('stop');
       _setState(EngineState.disconnected);
     } catch (error) {
+      // A stop the native side could not confirm carries the reason the user
+      // needs ("the VPN did not shut down, turn it off in Android settings").
+      // Publishing `error` without recording it is what made this path — the
+      // teardown after a compat reload — show the "no reason" fallback as well.
+      _lastErrorMessage = _describePlatformError(error);
       _setState(EngineState.error);
       throw StateError('libbox stop failed: $error');
     }
