@@ -178,7 +178,12 @@ export async function buildNodeSyncState(db: Db, nodeId: string) {
     })
     .from(nodeCredentials)
     .innerJoin(users, eq(users.id, nodeCredentials.userId))
-    .where(and(eq(nodeCredentials.nodeId, nodeId), or(eq(nodeCredentials.revoked, false), gt(nodeCredentials.revokedAt, cutoff))));
+    .where(and(eq(nodeCredentials.nodeId, nodeId), or(eq(nodeCredentials.revoked, false), gt(nodeCredentials.revokedAt, cutoff))))
+    // Usage reporting updates these rows every minute, which moves them in the
+    // table's heap order. Without a stable order the agent rendered a different
+    // config for the same users and restarted the engine, dropping every tunnel
+    // connection; the agent sorts too, so either side alone is enough.
+    .orderBy(nodeCredentials.uuid);
 
   return {
     credentials: rows.map((r) => ({

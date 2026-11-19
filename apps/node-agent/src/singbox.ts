@@ -18,7 +18,14 @@ export interface Credential {
 export function liveCredentials(all: Credential[]): Array<{ uuid: string; shortId: string; email: string }> {
   return all
     .filter((c) => !c.revoked)
-    .map((c) => ({ uuid: c.uuid, shortId: c.shortId, email: c.userEmail }));
+    .map((c) => ({ uuid: c.uuid, shortId: c.shortId, email: c.userEmail }))
+    // Order is part of the rendered config, and the controller's sync query has
+    // no ORDER BY: once usage reporting rewrites the credential rows, Postgres
+    // returns them in a new heap order. That alone changed the JSON, so the
+    // agent restarted sing-box about once a minute for an unchanged user set,
+    // dropping every live tunnel connection. Sorting makes the render, and the
+    // fingerprint derived from it, depend on the users rather than on row order.
+    .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
 }
 
 /** Renders a sing-box 1.10+ server config with VLESS + REALITY inbound. */

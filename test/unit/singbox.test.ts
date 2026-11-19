@@ -103,3 +103,14 @@ test('writeConfigAtomic leaves no temp file behind and round-trips the fingerpri
   assert.deepEqual(leftovers, []);
   await fs.rm(dir, { recursive: true, force: true });
 });
+test('the rendered user list does not depend on the order rows arrive in', () => {
+  // The controller's sync query had no ORDER BY and usage reporting rewrites the
+  // credential rows every minute, so a user set that had not changed arrived in
+  // a different order. The render differed, the agent restarted sing-box, and
+  // every live tunnel connection died with it.
+  const a = { uuid: '00000000-0000-4000-8000-00000000000a', shortId: 'aaaaaaaa', userEmail: 'a@example.com', expiresAt: null, revoked: false };
+  const b = { uuid: '00000000-0000-4000-8000-00000000000b', shortId: 'bbbbbbbb', userEmail: 'b@example.com', expiresAt: null, revoked: false };
+
+  assert.deepEqual(liveCredentials([b, a]), liveCredentials([a, b]));
+  assert.deepEqual(liveCredentials([b, a]).map((u) => u.uuid), [a.uuid, b.uuid]);
+});
