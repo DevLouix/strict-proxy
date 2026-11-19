@@ -42,6 +42,15 @@ LABEL="$(sed -n "s/^application-label:'\(.*\)'$/\1/p" <<<"$BADGING" | head -1)"
 [[ -n "$LABEL" ]] || fail 'the APK has no launcher label'
 [[ "$LABEL" != strict_proxy_client ]] || fail "launcher label is still the raw project name ($LABEL); run tool/configure-android-host.sh"
 
+# The engine cannot read the default route itself on Android: it asks the host
+# for the interface that currently carries traffic, and binds its node
+# connection there. Without ACCESS_NETWORK_STATE that callback throws, the
+# engine never gets a default interface, and the tunnel connects while no
+# request leaves the device. The system grants this at install, so an APK that
+# does not declare it can never work — and nothing else in the build fails.
+grep -q "uses-permission: name='android.permission.ACCESS_NETWORK_STATE'" <<<"$BADGING" \
+  || fail 'the APK does not declare ACCESS_NETWORK_STATE; the tunnel would connect and carry nothing'
+
 # The engine must actually be packaged, not merely present in the plugin source
 # tree: AGP silently drops what it cannot see. A split APK only contains its own
 # ABI, so check that every ABI present has the engine — and that at least one
