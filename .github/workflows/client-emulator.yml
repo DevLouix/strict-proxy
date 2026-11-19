@@ -1,0 +1,176 @@
+name: client-emulator
+
+# An installable APK for emulator end-to-end checks.
+#
+# The release pipeline builds only the ARM ABIs, because those are what phones
+# run. An x86_64 emulator executes an ARM APK through Android's NDK translation
+# layer, and sing-box's Go engine hits an instruction that translator cannot
+# decode: the app dies with SIGILL the moment libbox.so loads, before a tunnel
+# exists. A native x86_64 build is the only way to exercise the client in a
+# simulator, so it is produced here instead.
+#
+# This is deliberately not part of a release: it costs a full gomobile link and
+# produces nothing a user installs. Run it on demand (`gh workflow run
+# client-emulator`), or push a commit whose message contains [x64-emulator].
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/client/**'
+      - '.github/workflows/client-emulator.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.9'
+  CLIENT_ENV: production
+  # A real host, not a placeholder: the point of this artifact is to reach the
+  # controller from the emulator. check-release-config.sh fails loudly when the
+  # variable is unset, so a build cannot bake a dead URL.
+  CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+
+jobs:
+  emulator-apk:
+    name: Build x86_64 emulator APK
+    # A normal push must not pay for a full native link, and there is no release
+    # to publish. The marker makes the trigger explicit; the release workflow
+    # does not watch this file, so a marker commit cannot start a release.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[x64-emulator]')
+    runs-on: ubuntu-24.04
+    # The signing secrets live on this environment; a job that does not name it
+    # sees them empty and fails the release-configuration check.
+    environment: Strict Proxy
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require release configuration
+        run: ./apps/client/tool/check-release-config.sh
+
+      # Keyed apart from the release engine cache: that AAR binds the ARM ABIs
+      # only, and restoring it here would silently produce an APK without an
+      # x86_64 libbox.so — exactly the build this workflow exists to avoid.
+      - name: Cache the x86_64 engine build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            apps/client/.cache/sing-box-libbox
+            apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          key: libbox-emulator-${{ hashFiles('apps/client/libbox.ref', 'apps/client/tool/build-libbox.sh') }}
+
+      - name: Check for the native engine
+        id: engine
+        run: |
+          if [ -f apps/client/packages/libbox_bridge/android/libs/libbox.aar ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+            echo 'libbox.aar is present; skipping the engine build'
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.engine.outputs.present != 'true'
+        with:
+          go-version: '1.25.5'
+          cache: false
+
+      # Same NDK as the release job: sing-box 1.14 links libcronet.a, whose
+      # objects the runner's preinstalled NDK 27 lld rejects.
+      - name: Install the Android NDK
+        if: steps.engine.outputs.present != 'true'
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          sudo rm -rf "$SDK/ndk/27.3.13750724" "$SDK/system-images" "$SDK/emulator" \
+            /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          MANAGER="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$MANAGER" "ndk;28.0.13004108" >/dev/null 2>&1 || true
+          test -d "$SDK/ndk/28.0.13004108"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$SDK/ndk/28.0.13004108" >> "$GITHUB_ENV"
+
+      - name: Build libbox for x86_64
+        if: steps.engine.outputs.present != 'true'
+        env:
+          LIBBOX_ANDROID_PLATFORMS: android/amd64
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          ./apps/client/tool/build-libbox.sh --android-only
+
+      # An AAR without this entry builds fine and then dies in the emulator, so
+      # check the ABI before spending ten minutes on the APK.
+      - name: Verify the engine carries x86_64
+        run: |
+          AAR=apps/client/packages/libbox_bridge/android/libs/libbox.aar
+          test -f "$AAR"
+          unzip -l "$AAR" | grep -q 'jni/x86_64/libbox.so'
+          echo "libbox.aar has jni/x86_64/libbox.so"
+
+      - name: Reclaim the engine build space
+        if: steps.engine.outputs.present != 'true'
+        run: |
+          go clean -modcache || true
+          go clean -cache || true
+          rm -rf apps/client/.cache/sing-box-libbox "$HOME/go/bin"
+          df -h /
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Check APK signing tools
+        run: command -v zip
+
+      - name: Cache Gradle and pub packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.pub-cache
+          key: gradle-emulator-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.yaml', 'apps/client/tool/configure-android-host.sh') }}
+          restore-keys: |
+            gradle-emulator-${{ runner.os }}-
+
+      - name: Decode the release keystore
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+
+      - name: Build the x86_64 APK
+        env:
+          STRICT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL }}
+          STRICT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+          APP_VERSION: '0.1.0'
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+          SKIP_LIBBOX: '1'
+          TARGET_PLATFORMS: android-x64
+        run: ./apps/client/tool/build-release-android.sh
+
+      - name: Upload the emulator APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: strict-proxy-emulator-x86_64
+          path: apps/client/build/dist/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+# Emulator build marker: 1
