@@ -76,6 +76,31 @@ test('renderSingBoxConfig stays valid with zero users (all revoked)', () => {
   assert.deepEqual(rendered.experimental.v2ray_api.stats.users, []);
 });
 
+test('the rendered log level follows the agent LOG_LEVEL', () => {
+  // sing-box at `warn` says nothing about a connection that succeeded, so a node
+  // log could not tell "the phone never reached us" from "the phone connected
+  // and the traffic died behind us". The agent reads LOG_LEVEL (default `info`)
+  // and the renderer used to ignore it, pinning sing-box to `warn`.
+  const atInfo = renderSingBoxConfig({
+    ...baseParams,
+    cfg: { ...cfg, logLevel: 'info' },
+    users: [],
+  }) as any;
+  assert.equal(atInfo.log.level, 'info');
+
+  const atWarn = renderSingBoxConfig({
+    ...baseParams,
+    cfg: { ...cfg, logLevel: 'warn' },
+    users: [],
+  }) as any;
+  assert.equal(atWarn.log.level, 'warn');
+
+  // A config object without the field keeps the quiet default rather than
+  // writing `undefined` into the sing-box config.
+  const unset = renderSingBoxConfig({ ...baseParams, users: [] }) as any;
+  assert.equal(unset.log.level, 'warn');
+});
+
 test('renderSingBoxConfig is deterministic for the same input', () => {
   const users = [{ uuid: 'u1', shortId: 'aa', email: 'a@example.test' }];
   assert.equal(JSON.stringify(renderSingBoxConfig({ ...baseParams, users })), JSON.stringify(renderSingBoxConfig({ ...baseParams, users })));

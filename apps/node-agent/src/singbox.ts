@@ -38,7 +38,13 @@ export function renderSingBoxConfig(params: {
 }): object {
   const { cfg, realityPrivateKey, shortIds, serverName, users } = params;
   return {
-    log: { level: 'warn', timestamp: true },
+    // The agent's LOG_LEVEL (default `info`) also sets sing-box's own level.
+    // While traffic was dying behind a `connected` tunnel the node log showed
+    // only failed handshakes, because a successful REALITY connection logs
+    // nothing at `warn` — so "the phone never arrived" and "the phone connected
+    // and the traffic died behind us" looked identical. `warn` stays the
+    // fallback for a config object that predates the field.
+    log: { level: cfg.logLevel ?? 'warn', timestamp: true },
     inbounds: [
       {
         type: 'vless',

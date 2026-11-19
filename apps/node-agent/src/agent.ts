@@ -244,12 +244,13 @@ class Agent {
     const fp = fingerprint(this.credentials);
     const applied = await loadAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`);
 
+    const live = liveCredentials(this.credentials);
     const rendered = JSON.stringify(renderSingBoxConfig({
       cfg: this.cfg,
       realityPrivateKey: this.realityPrivateKey,
       shortIds: this.realityShortIds,
       serverName: this.realityServerName,
-      users: liveCredentials(this.credentials),
+      users: live,
     }), null, 2);
 
     const configChanged = await needsApply(this.cfg.singBoxConfigPath, rendered);
@@ -258,7 +259,15 @@ class Agent {
         await writeConfigAtomic(this.cfg.singBoxConfigPath, rendered);
         if (!(await validateSingBoxConfig(this.cfg.singBoxBinaryPath, this.cfg.singBoxConfigPath))) return;
         await restartSingBox(this.cfg, this.managedSingBox);
-        log('info', `applied ${liveCredentials(this.credentials).length} credential(s), sing-box restarted`);
+        // Names the users this node now accepts. sing-box at `info` logs a
+        // successful inbound connection without saying which user it was, so
+        // without this line the credential the app holds cannot be matched to
+        // the list the node applied — the first check when a tunnel is up but
+        // carries nothing.
+        const appliedUsers = live
+          .map((u) => `${u.email} uuid=${u.uuid.slice(0, 8)} short_id=${u.shortId}`)
+          .join(', ');
+        log('info', `applied ${live.length} credential(s), sing-box restarted${appliedUsers ? `: ${appliedUsers}` : ''}`);
       }
       await saveAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`, fp);
     }

@@ -335,15 +335,50 @@ jobs:
           done
 
       - name: Install Linux build dependencies
-        timeout-minutes: 15
+        timeout-minutes: 25
         # libsecret-1-dev is required by flutter_secure_storage_linux's CMake
         # check (libsecret-1>=0.18.4); without it the Linux build fails while
         # configuration runs, before any Dart code is compiled.
+        #
+        # This step was the only failure in this job: a throttled mirror made
+        # `apt-get install` sit for the whole cap, even though the runner already
+        # ships clang, cmake, ninja, pkg-config and the GTK headers. So skip what
+        # is installed, retry the index fetch instead of trusting one attempt,
+        # and give the one package that is usually missing room to download
+        # slowly rather than timing out at 15 minutes.
         run: |
-          APT_OPTIONS=(-o Acquire::ForceIPv4=true -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
-          sudo apt-get update "${APT_OPTIONS[@]}"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_OPTIONS[@]}" \
-            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev
+          APT_OPTIONS=(
+            -o Acquire::ForceIPv4=true
+            -o Acquire::Retries=5
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+            -o Dpkg::Lock::Timeout=120
+          )
+          missing=()
+          for pkg in clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libsecret-1-dev; do
+            if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+              missing+=("$pkg")
+            fi
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo 'all Linux build dependencies are already installed'
+            exit 0
+          fi
+          echo "installing: ${missing[*]}"
+          # A failed index fetch is not fatal on its own: apt keeps the lists the
+          # runner image came with, which cover the packages above.
+          for attempt in 1 2 3; do
+            sudo apt-get update "${APT_OPTIONS[@]}" && break
+            echo "apt-get update attempt ${attempt} failed; retrying"
+            sleep $((attempt * 10))
+          done
+          for attempt in 1 2 3; do
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_OPTIONS[@]}" "${missing[@]}" && exit 0
+            echo "apt-get install attempt ${attempt} failed; retrying"
+            sleep $((attempt * 10))
+          done
+          echo 'could not install the Linux build dependencies' >&2
+          exit 1
       - name: Verify the controller URL answers
         if: vars.CLIENT_CONTROLLER_URL != ''
         env:
@@ -731,23 +766,42 @@ jobs:
         if: github.ref == 'refs/heads/main'
         env:
           CONTROLLER_URL: ${{ env.CLIENT_CONTROLLER_URL }}
-          ADMIN_EMAIL: ${{ secrets.CLIENT_PUBLISH_ADMIN_EMAIL }}
+          # Falls back to a repository variable: storing the email on the
+          # "Variables" tab instead of "Secrets" is an easy slip, and it must
+          # not leave installed apps without the build.
+          ADMIN_EMAIL: ${{ secrets.CLIENT_PUBLISH_ADMIN_EMAIL || vars.CLIENT_PUBLISH_ADMIN_EMAIL }}
           ADMIN_PASSWORD: ${{ secrets.CLIENT_PUBLISH_ADMIN_PASSWORD }}
           APP_VERSION: '0.1.0'
           APP_BUILD_NUMBER: ${{ github.run_number }}
         run: |
+          # This runs after every APK was built, verified and attached, so a
+          # half-configured secret pair must not turn a good release red. Both
+          # halves are reported as a warning that names what to set, and the run
+          # stays green with the update feed simply not published.
           if [ -z "$ADMIN_PASSWORD" ]; then
             echo "::warning::CLIENT_PUBLISH_ADMIN_PASSWORD is not set, so build ${APP_BUILD_NUMBER} was not published to ${CONTROLLER_URL} and installed apps will not be offered it. Set CLIENT_PUBLISH_ADMIN_EMAIL and CLIENT_PUBLISH_ADMIN_PASSWORD to enable this."
             exit 0
           fi
           if [ -z "$ADMIN_EMAIL" ]; then
-            echo 'error: CLIENT_PUBLISH_ADMIN_PASSWORD is set but CLIENT_PUBLISH_ADMIN_EMAIL is not.' >&2
-            exit 1
+            echo "::warning::CLIENT_PUBLISH_ADMIN_PASSWORD is set but CLIENT_PUBLISH_ADMIN_EMAIL is not, so build ${APP_BUILD_NUMBER} was not published to ${CONTROLLER_URL}. Set CLIENT_PUBLISH_ADMIN_EMAIL to the administrator account's email address (the one that signs in to the admin dashboard) to enable this."
+            exit 0
           fi
+          # Not the value, only whether it arrived: a secret with an empty value
+          # and a typo in the secret's name look identical from inside the step.
+          echo "CLIENT_PUBLISH_ADMIN_EMAIL: $([ -n "$ADMIN_EMAIL" ] && echo present || echo missing)"
+          echo "CLIENT_PUBLISH_ADMIN_PASSWORD: $([ -n "$ADMIN_PASSWORD" ] && echo present || echo missing)"
           # Installed apps show these notes in the update prompt, and the admin
           # upload route caps them at 2000 characters.
           NOTES="$(head -c 1900 "$RUNNER_TEMP/changes.md" 2>/dev/null || true)"
           export NOTES
-          ./apps/client/tool/publish-android-release.sh dist-android
+          # The APKs are already attached to the release, so a lost request or a
+          # controller restart must not leave the update feed without them.
+          for attempt in 1 2 3; do
+            ./apps/client/tool/publish-android-release.sh dist-android && exit 0
+            echo "publish attempt ${attempt} failed; retrying"
+            sleep $((attempt * 5))
+          done
+          echo 'error: the build was not published to the update feed' >&2
+          exit 1
 
 

@@ -1113,6 +1113,17 @@ export function buildRouter(ctx: Ctx): Router {
       }
       const deviceId = session?.deviceId ?? req.header('x-device-id') ?? 'unknown-device';
       const bundle = await buildSignedConfigBundle(ctx.db, ctx.cfg, { userId: claims.sub, tier: sub.tier, deviceId });
+      // One line per issued bundle, because neither the device nor the database
+      // is reachable from here: with this and the node agent's applied-user
+      // line, the credential the app is dialling with can be matched against the
+      // users the node accepts. Only a prefix of each UUID is logged.
+      console.log(
+        `[controller] config bundle issued user=${claims.sub} device=${deviceId} ` +
+          `nodes=${bundle.nodes.map((n) => n.id).join(',') || 'none'} ` +
+          `credentials=${Object.values(bundle.configs)
+            .map((c) => `${c.uuid.slice(0, 8)}/${c.shortId}`)
+            .join(',') || 'none'} expires=${bundle.expiresAt}`,
+      );
       res.setHeader('Cache-Control', 'no-store');
       res.json(bundle);
     }),
