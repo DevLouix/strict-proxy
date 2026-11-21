@@ -610,6 +610,31 @@ function showRotatedNodeSecret({ hostname, secret, previousValidUntil }) {
  * chosen grace window so the operator can update the agent and restart it
  * without the node going offline in between; zero is for a leaked secret.
  */
+function nodeLogsDialog(api, node) {
+  const body = h('div', { class: 'dlg-body' }, h('p', { class: 'muted small' }, 'Asking the node for its recent log lines…'));
+  const dlg = h('dialog', { class: 'wide' },
+    h('div', { class: 'dlg-head' }, h('h3', {}, `Logs: ${node.hostname}`)),
+    body,
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+  api.get(`/api/v1/admin/nodes/${encodeURIComponent(node.id)}/logs`)
+    .then((data) => {
+      const lines = data.lines || [];
+      body.replaceChildren(lines.length === 0
+        ? h('div', { class: 'empty' }, 'The node sent no log lines.')
+        : h('pre', { class: 'mono small logs' },
+          lines.map((l) => `${l.at} [${l.level}] ${l.msg}`).join('\n')));
+    })
+    .catch((err) => {
+      body.replaceChildren(h('p', { class: 'muted small' }, err.message || 'Could not fetch the node logs.'));
+    });
+}
+
 function rotateNodeSecretDialog(api, node, onRotated) {
   const grace = h('input', { type: 'number', min: '0', max: '168', value: '24' });
   const submit = h('button', { class: 'btn danger' }, 'Rotate secret');
@@ -740,6 +765,8 @@ export async function nodesView(api) {
                         : h('span', { class: 'badge online', title: `Checked ${date(n.engineHealthCheckedAt)}` }, 'healthy'),
                 ),
                 h('td', { class: 'actions' },
+                  h('button', { class: 'btn sm', onClick: () => nodeLogsDialog(api, n) }, 'Logs'),
+                  ' ',
                   h('button', { class: 'btn sm', onClick: () => editNodeDialog(api, n, load) }, 'Edit'),
                   ' ',
                   h('button', { class: 'btn sm', onClick: () => rotateNodeSecretDialog(api, n, load) }, 'Rotate secret'),

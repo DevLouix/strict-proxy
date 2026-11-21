@@ -768,6 +768,40 @@ export function buildRouter(ctx: Ctx): Router {
     res.status(201).json(registered);
   }));
 
+  // Admin requests for a node's log lines, waiting for its next heartbeat.
+  // Held in memory only; a node that does not answer within the timeout gets an error.
+  const pendingNodeLogs = new Map<string, { resolve: (lines: Array<{ at: string; level: string; msg: string }>) => void }>();
+
+  router.get('/api/v1/admin/nodes/:nodeId/logs', ...requireAdministrator, asyncHandler(async (req, res) => {
+    const nodeId = String(req.params.nodeId);
+    const [node] = await ctx.db.select({ id: nodes.id }).from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+    if (!node) {
+      res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
+      return;
+    }
+    if (pendingNodeLogs.has(nodeId)) {
+      res.status(409).json({ error: 'a log request for this node is already waiting', code: 'CONFLICT' });
+      return;
+    }
+    const lines = await new Promise<Array<{ at: string; level: string; msg: string }> | null>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingNodeLogs.delete(nodeId);
+        resolve(null);
+      }, 20_000);
+      pendingNodeLogs.set(nodeId, {
+        resolve: (l) => {
+          clearTimeout(timer);
+          resolve(l);
+        },
+      });
+    });
+    if (!lines) {
+      res.status(504).json({ error: 'the node did not answer in time; it may be offline', code: 'TIMEOUT' });
+      return;
+    }
+    res.json({ lines });
+  }));
+
   router.patch('/api/v1/admin/nodes/:nodeId', ...requireAdministrator, asyncHandler(async (req, res) => {
     const nodeId = req.params.nodeId;
     if (typeof nodeId !== 'string' || nodeId.length === 0) {
@@ -1300,7 +1334,32 @@ export function buildRouter(ctx: Ctx): Router {
         console.warn(`[controller] node ${nodeId} public IP auto-updated to ${ipChange.publicIp}`);
       }
 
-      res.json({ ok: true, controllerTime: new Date().toISOString() });
+      res.json({
+        ok: true,
+        controllerTime: new Date().toISOString(),
+        // Tells the agent to post its buffered lines to /internal/v1/node/logs.
+        sendLogs: pendingNodeLogs.has(nodeId),
+      });
+    }),
+  );
+
+  router.post(
+    '/internal/v1/node/logs',
+    requireNode,
+    asyncHandler(async (req, res) => {
+      const nodeId = req.node!.nodeId;
+      const body = req.body as { logs?: Array<{ at: string; level: string; msg: string }> };
+      const waiter = pendingNodeLogs.get(nodeId);
+      if (waiter && Array.isArray(body.logs)) {
+        pendingNodeLogs.delete(nodeId);
+        waiter.resolve(
+          body.logs
+            .filter((l) => l && typeof l.msg === 'string')
+            .slice(-200)
+            .map((l) => ({ at: String(l.at), level: String(l.level), msg: String(l.msg).slice(0, 500) })),
+        );
+      }
+      res.json({ ok: true, delivered: Boolean(waiter) });
     }),
   );
 

@@ -32,9 +32,16 @@ const execFileP = promisify(execFile);
 /** Touched on every tick; the container healthcheck compares its mtime. */
 const HEALTH_PATH = process.env.AGENT_HEALTH_PATH?.trim() || '/tmp/agent-healthy';
 
+/** Recent agent log lines, sent to the controller so the admin console can show them. */
+const RECENT_LOG_LIMIT = 200;
+const recentLogs: Array<{ at: string; level: string; msg: string }> = [];
+
 function log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ...rest: unknown[]): void {
   if (level === 'debug' && process.env.LOG_LEVEL !== 'debug') return;
-  console.log(`[${new Date().toISOString()}][${level}] ${msg}`, ...rest);
+  const at = new Date().toISOString();
+  console.log(`[${at}][${level}] ${msg}`, ...rest);
+  recentLogs.push({ at, level, msg: [msg, ...rest.map(String)].join(' ').slice(0, 500) });
+  if (recentLogs.length > RECENT_LOG_LIMIT) recentLogs.splice(0, recentLogs.length - RECENT_LOG_LIMIT);
 }
 
 async function validateSingBoxConfig(binary: string, configPath: string): Promise<boolean> {
@@ -157,7 +164,7 @@ class Agent {
           'A web server (nginx/Caddy/Traefik) or another VPN may hold the port; free it or change NODE_TUNNEL_PORT.',
       );
     }
-    await this.client.heartbeat({
+    const reply = await this.client.heartbeat({
       cpuPercent: Number((cpu.currentLoad ?? 0).toFixed(2)),
       memoryPercent: Number((mem.active / Math.max(1, mem.total) * 100).toFixed(2)),
       bandwidthBytes: Math.round(bandwidthBytes),
@@ -173,6 +180,10 @@ class Agent {
       ...(observedPublicIp ? { observedPublicIp } : {}),
     });
     log('debug', 'heartbeat sent');
+    // Lines go out only when an admin asked for them; they are not kept on the controller.
+    if (reply.sendLogs) {
+      await this.client.postLogs(recentLogs.splice(0, recentLogs.length));
+    }
   }
 
   /**
