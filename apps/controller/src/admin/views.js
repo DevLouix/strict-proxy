@@ -611,7 +611,7 @@ function showRotatedNodeSecret({ hostname, secret, previousValidUntil }) {
  * without the node going offline in between; zero is for a leaked secret.
  */
 function nodeLogsDialog(api, node) {
-  const body = h('div', { class: 'dlg-body' }, h('p', { class: 'muted small' }, 'Asking the node for its recent log lines…'));
+  const body = h('div', { class: 'dlg-body' }, h('p', { class: 'muted small' }, 'Asking the node for its recent log lines. The node answers on its next heartbeat, so this can take up to a minute.'));
   const dlg = h('dialog', { class: 'wide' },
     h('div', { class: 'dlg-head' }, h('h3', {}, `Logs: ${node.hostname}`)),
     body,

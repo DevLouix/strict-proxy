@@ -180,9 +180,81 @@ class Agent {
       ...(observedPublicIp ? { observedPublicIp } : {}),
     });
     log('debug', 'heartbeat sent');
-    // Lines go out only when an admin asked for them; they are not kept on the controller.
+    // Lines go out only when an admin asked for them; they are never stored on
+    // the controller. The buffer is copied rather than drained, so a second
+    // click still shows what happened instead of an empty panel.
     if (reply.sendLogs) {
-      await this.client.postLogs(recentLogs.splice(0, recentLogs.length));
+      await this.client.postLogs(await this.logsForAdmin());
+    }
+  }
+
+  /**
+   * What an operator gets when they click Logs.
+   *
+   * The buffer alone cannot explain a client that will not connect: in steady
+   * state the agent logs almost nothing, and a refused REALITY connection is
+   * reported by the engine, not by this process. So the answer is the buffered
+   * lines plus a live snapshot of the tunnel, and — when the engine is not this
+   * process's child — the engine's own recent output.
+   */
+  private async logsForAdmin(): Promise<Array<{ at: string; level: string; msg: string }>> {
+    const at = new Date().toISOString();
+    const engine = this.managedSingBox.current;
+    const engineState =
+      this.cfg.singBoxRestartMode === 'managed'
+        ? engine && engine.exitCode === null
+          ? `managed, pid ${engine.pid ?? 'unknown'}`
+          : 'managed, no live process'
+        : 'systemd';
+    const listening = await this.tunnelPortListening();
+    const snapshot = [
+      `mode ${this.cfg.singBoxRestartMode}; engine ${engineState}`,
+      `tunnel port ${this.cfg.tunnelPort}: ${listening ? 'listening' : 'NOT listening — clients cannot connect'}`,
+      `live user(s) ${liveCredentials(this.credentials).length}; config ${this.cfg.singBoxConfigPath}`,
+      `controller ${this.cfg.controllerBaseUrl}; advertised ip ${this.cfg.publicIp ?? 'detected'}`,
+    ].map((msg) => ({ at, level: 'info' as const, msg }));
+    return [...recentLogs, ...snapshot, ...(await this.engineLogTail())].slice(-200);
+  }
+
+  /**
+   * The engine's own recent lines when the agent does not own its output.
+   *
+   * A managed child's stderr already lands in the agent buffer as `[sing-box]`
+   * lines. A systemd-managed engine logs to the journal instead, and that is
+   * the only place a refused client appears: sing-box says nothing about an
+   * unknown UUID in the agent's own output.
+   */
+  private async engineLogTail(): Promise<Array<{ at: string; level: string; msg: string }>> {
+    if (this.cfg.singBoxRestartMode === 'managed') return [];
+    try {
+      const { stdout } = await execFileP(
+        'journalctl',
+        ['-u', 'sing-box.service', '-n', '120', '--no-pager', '-o', 'short-iso'],
+        { timeout: 5_000 },
+      );
+      return stdout
+        .split('\n')
+        .filter((line) => line.trim() !== '' && !line.includes('-- No entries --'))
+        .slice(-120)
+        .map((line) => {
+          const token = line.split(' ')[0] ?? '';
+          // journalctl writes `+0000`, which Date.parse does not accept.
+          const stamp = Date.parse(token.replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+          return {
+            at: Number.isNaN(stamp) ? new Date().toISOString() : new Date(stamp).toISOString(),
+            level: /error|refus|invalid|fail/i.test(line) ? 'warn' : 'info',
+            msg: `[sing-box] ${line}`.slice(0, 500),
+          };
+        });
+    } catch (err) {
+      log('debug', 'engine log tail unavailable:', err instanceof Error ? err.message : err);
+      return [
+        {
+          at: new Date().toISOString(),
+          level: 'warn',
+          msg: 'could not read the sing-box journal (journalctl unavailable); showing agent lines only',
+        },
+      ];
     }
   }
 

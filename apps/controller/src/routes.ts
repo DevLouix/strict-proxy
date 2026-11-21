@@ -783,11 +783,15 @@ export function buildRouter(ctx: Ctx): Router {
       res.status(409).json({ error: 'a log request for this node is already waiting', code: 'CONFLICT' });
       return;
     }
+    // Longer than one heartbeat interval (30s by default) on purpose: the node
+    // can only answer the request on its next heartbeat, so a shorter wait
+    // gave an operator a 504 most of the time and made the button look broken.
+    // Still under the 60s a default Traefik read timeout allows.
     const lines = await new Promise<Array<{ at: string; level: string; msg: string }> | null>((resolve) => {
       const timer = setTimeout(() => {
         pendingNodeLogs.delete(nodeId);
         resolve(null);
-      }, 20_000);
+      }, 55_000);
       pendingNodeLogs.set(nodeId, {
         resolve: (l) => {
           clearTimeout(timer);

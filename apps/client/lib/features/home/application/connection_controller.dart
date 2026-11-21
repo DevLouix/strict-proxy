@@ -492,6 +492,22 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       // is allowed to fetch and trust raw credentials.
       final bundle = await _ref.read(configBundleLoaderProvider).load(sessionId: _sessionId);
       if (attempt != _attempt) return;
+      // The node picked by a previous attempt can be absent from this bundle —
+      // it went offline, its engine was reported down, or the tier's node cap
+      // moved it out. Holding on to it made every retry fail with "the selected
+      // server configuration is unavailable", including the Try again button,
+      // with no way back from this screen. Fall back to a node the bundle
+      // actually carries instead of refusing to connect at all.
+      if (_selected == null || bundle.rawConfigs[_selected!.id] is! Map<String, dynamic>) {
+        final usable = bundle.nodes
+            .where((node) => bundle.rawConfigs[node.id] is Map<String, dynamic>)
+            .toList(growable: false);
+        if (usable.isEmpty) {
+          _fail('No servers are available right now. Try again shortly.');
+          return;
+        }
+        _selected = usable.first;
+      }
       final nodeConfig = bundle.rawConfigs[_selected!.id];
       if (nodeConfig is! Map<String, dynamic>) {
         _fail('The selected server configuration is unavailable. Pick another server.');
