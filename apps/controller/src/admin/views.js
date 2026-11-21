@@ -631,7 +631,19 @@ function nodeLogsDialog(api, node) {
           lines.map((l) => `${l.at} [${l.level}] ${l.msg}`).join('\n')));
     })
     .catch((err) => {
-      body.replaceChildren(h('p', { class: 'muted small' }, err.message || 'Could not fetch the node logs.'));
+      body.replaceChildren(
+        h('p', { class: 'muted small' }, err.message || 'Could not fetch the node logs.'),
+        // A 55s wait that ends in a dead end is what made this button feel
+        // broken; the same request is worth one more tap once the cause named
+        // above has been dealt with.
+        h('button', {
+          class: 'btn sm',
+          onClick: () => {
+            dlg.close();
+            nodeLogsDialog(api, node);
+          },
+        }, 'Try again'),
+      );
     });
 }
 

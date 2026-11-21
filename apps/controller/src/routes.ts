@@ -769,8 +769,16 @@ export function buildRouter(ctx: Ctx): Router {
   }));
 
   // Admin requests for a node's log lines, waiting for its next heartbeat.
-  // Held in memory only; a node that does not answer within the timeout gets an error.
-  const pendingNodeLogs = new Map<string, { resolve: (lines: Array<{ at: string; level: string; msg: string }>) => void }>();
+  // Held in memory only; a node that does not answer within the timeout gets an
+  // error that names which of the two possible reasons it is.
+  const pendingNodeLogs = new Map<
+    string,
+    {
+      /** Heartbeats the node reported while this request was waiting. */
+      heartbeats: number;
+      resolve: (lines: Array<{ at: string; level: string; msg: string }>) => void;
+    }
+  >();
 
   router.get('/api/v1/admin/nodes/:nodeId/logs', ...requireAdministrator, asyncHandler(async (req, res) => {
     const nodeId = String(req.params.nodeId);
@@ -787,23 +795,44 @@ export function buildRouter(ctx: Ctx): Router {
     // can only answer the request on its next heartbeat, so a shorter wait
     // gave an operator a 504 most of the time and made the button look broken.
     // Still under the 60s a default Traefik read timeout allows.
-    const lines = await new Promise<Array<{ at: string; level: string; msg: string }> | null>((resolve) => {
+    const outcome = await new Promise<{
+      lines: Array<{ at: string; level: string; msg: string }> | null;
+      heartbeats: number;
+    }>((resolve) => {
+      const waiter = {
+        heartbeats: 0,
+        resolve: (lines: Array<{ at: string; level: string; msg: string }>) => {
+          clearTimeout(timer);
+          resolve({ lines, heartbeats: waiter.heartbeats });
+        },
+      };
       const timer = setTimeout(() => {
         pendingNodeLogs.delete(nodeId);
-        resolve(null);
+        resolve({ lines: null, heartbeats: waiter.heartbeats });
       }, 55_000);
-      pendingNodeLogs.set(nodeId, {
-        resolve: (l) => {
-          clearTimeout(timer);
-          resolve(l);
-        },
-      });
+      pendingNodeLogs.set(nodeId, waiter);
     });
-    if (!lines) {
-      res.status(504).json({ error: 'the node did not answer in time; it may be offline', code: 'TIMEOUT' });
+    if (!outcome.lines) {
+      // A node that keeps heartbeating but never posts lines is not offline: its
+      // agent answers the heartbeat and ignores `sendLogs`, which only a build
+      // from before live logs does. Reporting "it may be offline" for both made
+      // a stale image look like a broken button.
+      res.status(504).json(
+        outcome.heartbeats === 0
+          ? {
+              error: 'the node sent no heartbeat while the request waited, so it is offline',
+              code: 'TIMEOUT',
+            }
+          : {
+              error:
+                'the node is heartbeating but did not send its logs: its agent build predates live logs. ' +
+                'Deploy node-agent sha-00105a6 or newer on it and redeploy the controller.',
+              code: 'LOGS_UNSUPPORTED',
+            },
+      );
       return;
     }
-    res.json({ lines });
+    res.json({ lines: outcome.lines });
   }));
 
   router.patch('/api/v1/admin/nodes/:nodeId', ...requireAdministrator, asyncHandler(async (req, res) => {
@@ -1338,11 +1367,17 @@ export function buildRouter(ctx: Ctx): Router {
         console.warn(`[controller] node ${nodeId} public IP auto-updated to ${ipChange.publicIp}`);
       }
 
+      // Counted so a timed-out request can say whether the node was reachable:
+      // a heartbeat that arrived without the lines is the signature of an agent
+      // build that does not know the `sendLogs` reply.
+      const logWaiter = pendingNodeLogs.get(nodeId);
+      if (logWaiter) logWaiter.heartbeats += 1;
+
       res.json({
         ok: true,
         controllerTime: new Date().toISOString(),
         // Tells the agent to post its buffered lines to /internal/v1/node/logs.
-        sendLogs: pendingNodeLogs.has(nodeId),
+        sendLogs: Boolean(logWaiter),
       });
     }),
   );

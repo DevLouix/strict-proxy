@@ -184,7 +184,15 @@ class Agent {
     // the controller. The buffer is copied rather than drained, so a second
     // click still shows what happened instead of an empty panel.
     if (reply.sendLogs) {
-      await this.client.postLogs(await this.logsForAdmin());
+      try {
+        await this.client.postLogs(await this.logsForAdmin());
+        log('debug', 'log lines posted on request');
+      } catch (err) {
+        // Kept in the buffer so the next answer carries the reason: a node that
+        // cannot POST is a controller auth or reachability problem, not an
+        // empty buffer, and the two looked identical from the console.
+        log('warn', 'could not post log lines:', err instanceof Error ? err.message : err);
+      }
     }
   }
 
@@ -207,10 +215,14 @@ class Agent {
           : 'managed, no live process'
         : 'systemd';
     const listening = await this.tunnelPortListening();
+    const live = liveCredentials(this.credentials);
     const snapshot = [
       `mode ${this.cfg.singBoxRestartMode}; engine ${engineState}`,
       `tunnel port ${this.cfg.tunnelPort}: ${listening ? 'listening' : 'NOT listening — clients cannot connect'}`,
-      `live user(s) ${liveCredentials(this.credentials).length}; config ${this.cfg.singBoxConfigPath}`,
+      live.length === 0
+        ? 'live user(s) 0 — this node accepts nobody, so a client tunnel comes up and is ' +
+          'then dropped; credential sync from the controller is failing'
+        : `live user(s) ${live.length}; config ${this.cfg.singBoxConfigPath}`,
       `controller ${this.cfg.controllerBaseUrl}; advertised ip ${this.cfg.publicIp ?? 'detected'}`,
     ].map((msg) => ({ at, level: 'info' as const, msg }));
     return [...recentLogs, ...snapshot, ...(await this.engineLogTail())].slice(-200);
