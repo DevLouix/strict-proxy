@@ -100,30 +100,62 @@ function controllerOrigin() {
 
 function expressSnippet(gk, requiredTier) {
   const origin = controllerOrigin();
-  const keyId = gk?.keyId ?? 'primary';
   const tierLine = requiredTier === 'proxy-only'
     ? '  // Proxy-only mode: any user connected through your StrictProxy fleet is admitted.'
     : `  requiredTier: '${requiredTier}', // admits ${requiredTier === 'pro' ? 'pro only' : 'standard and pro'}`;
   return [
+    '// npm install @strict-proxy/gatekeeper',
     "import express from 'express';",
-    "import { createGatekeeperMiddleware } from '@strict-proxy/gatekeeper';",
+    "import { Gatekeeper } from '@strict-proxy/gatekeeper';",
     '',
     'const app = express();',
     '',
-    'app.use(createGatekeeperMiddleware({',
-    `  controllerBaseUrl: process.env.STRICT_PROXY_CONTROLLER_URL ?? '${origin}',`,
-    '  publicKeys: {',
-    `    ${JSON.stringify(keyId)}: process.env.STRICT_PROXY_PUBLIC_KEY_PEM!,`,
-    '  },',
+    '// 1. Init',
+    'const gk = Gatekeeper.init({',
+    `  controllerUrl: process.env.STRICT_PROXY_CONTROLLER_URL ?? '${origin}',`,
+    '  publicKey: process.env.STRICT_PROXY_PUBLIC_KEY_PEM!,',
     tierLine,
     '  trustForwardedFor: true,',
-    '  trustedProxyHops: 1, // set to the number of reverse proxies in front of your app',
-    "  failureMode: 'closed',",
-    '}));',
+    '  trustedProxyHops: 1, // number of reverse proxies (Caddy/Nginx) in front of your app',
+    '});',
+    '',
+    '// 2. Auth',
+    'app.use(gk.auth());',
     '',
     "app.get('/', (req, res) => {",
     '  res.json({ ok: true, user: req.strictProxy ?? null });',
     '});',
+  ].join('\n');
+}
+
+function pythonSnippet(gk, requiredTier) {
+  const origin = controllerOrigin();
+  const tierLine = requiredTier === 'proxy-only'
+    ? '    # Proxy-only mode: any user connected through your StrictProxy fleet is admitted.'
+    : `    required_tier="${requiredTier}",  # admits ${requiredTier === 'pro' ? 'pro only' : 'standard and pro'}`;
+  return [
+    '# pip install strict-proxy-gatekeeper',
+    'import os',
+    'from fastapi import FastAPI, Request',
+    'from strict_proxy_gatekeeper import Gatekeeper',
+    '',
+    'app = FastAPI()',
+    '',
+    '# 1. Init',
+    'gk = Gatekeeper.init(',
+    `    controller_url=os.environ.get("STRICT_PROXY_CONTROLLER_URL", "${origin}"),`,
+    '    public_key=os.environ["STRICT_PROXY_PUBLIC_KEY_PEM"],',
+    tierLine,
+    '    trust_forwarded_for=True,',
+    '    trusted_proxy_hops=1,  # number of reverse proxies (Caddy/Nginx) in front of your app',
+    ')',
+    '',
+    '# 2. Auth',
+    'app.add_middleware(gk.asgi_middleware())',
+    '',
+    '@app.get("/")',
+    'def index(request: Request):',
+    '    return {"ok": True, "user": getattr(request.state, "strict_proxy", None)}',
   ].join('\n');
 }
 
@@ -212,11 +244,13 @@ export async function linksView(api) {
     const ips = gatekeeper?.allowedIps ?? [];
     const origin = controllerOrigin();
     const publicIpsUrl = `${origin}${gatekeeper?.publicIpsPath ?? '/api/v1/network/nodes/public-ips'}`;
-    const snippetText = snippetKind === 'caddy'
-      ? caddySnippet(gatekeeper)
-      : snippetKind === 'nginx'
-        ? nginxSnippet(gatekeeper)
-        : expressSnippet(gatekeeper, snippetTier);
+    const snippetText = snippetKind === 'python'
+      ? pythonSnippet(gatekeeper, snippetTier)
+      : snippetKind === 'caddy'
+        ? caddySnippet(gatekeeper)
+        : snippetKind === 'nginx'
+          ? nginxSnippet(gatekeeper)
+          : expressSnippet(gatekeeper, snippetTier);
 
     const tierSelect = h('select', {
       class: 'snippet-select',
@@ -287,12 +321,13 @@ export async function linksView(api) {
           : null,
         h('div', { class: 'snippet-bar' },
           h('div', { class: 'row' },
-            tabBtn('express', 'Express / Node'),
+            tabBtn('express', 'Node / npm'),
+            tabBtn('python', 'Python / pip'),
             tabBtn('caddy', 'Caddy'),
             tabBtn('nginx', 'Nginx'),
           ),
           h('div', { class: 'row' },
-            snippetKind === 'express' ? tierSelect : null,
+            (snippetKind === 'express' || snippetKind === 'python') ? tierSelect : null,
             h('button', {
               class: 'btn sm',
               type: 'button',

@@ -112,19 +112,38 @@ Admin fleet controls are global: list nodes, inspect health, change lifecycle st
 edit location/label/public endpoint, drain/offline a node, delete a node, create/list/
 revoke enrollment tokens, and inspect payment events.
 
-```ts
-import { createGatekeeperMiddleware } from '@strict-proxy/gatekeeper';
+Protect any website or API with the publishable Gatekeeper SDKs (**init**, then **auth**):
 
-app.use(createGatekeeperMiddleware({
-  controllerBaseUrl: process.env.CONTROLLER_URL!,
-  publicKeys: { primary: process.env.GATEKEEPER_PUBLIC_KEY_PEM! }, // controller's Ed25519 public key
-  cacheTtlSeconds: 300,        // cached fleet IP list
+- **Node.js / TypeScript (npm)**: [`packages/gatekeeper/README.md`](packages/gatekeeper/README.md) (`npm install @strict-proxy/gatekeeper`)
+- **Python (PyPI)**: [`sdks/python/README.md`](sdks/python/README.md) (`pip install strict-proxy-gatekeeper`)
+
+```ts
+// Node.js / Express — npm install @strict-proxy/gatekeeper
+import { Gatekeeper } from '@strict-proxy/gatekeeper';
+
+const gk = Gatekeeper.init({
+  controllerUrl: process.env.STRICT_PROXY_CONTROLLER_URL!,
+  publicKey: process.env.STRICT_PROXY_PUBLIC_KEY_PEM!, // Ed25519 PEM from /admin#links
+  requiredTier: 'pro',         // omit for proxy-only; 'standard' also admits pro
   trustForwardedFor: true,     // only behind a trusted reverse proxy
-  failureMode: 'closed',       // controller down => deny
-  requiredTier: 'pro',         // omit for fleet-only; 'standard' also admits pro
-}));
+  trustedProxyHops: 1,         // number of reverse proxies in front of your app
+});
+
+app.use(gk.auth());
 // Non-fleet clients receive 403 GATEKEEPER_DENIED. Fleet clients without a
 // valid plan receive 401/403 GATEKEEPER_ENTITLEMENT_* / TIER_INSUFFICIENT.
+```
+
+```python
+# Python / FastAPI — pip install strict-proxy-gatekeeper
+from strict_proxy_gatekeeper import Gatekeeper
+
+gk = Gatekeeper.init(
+    required_tier="pro",       # reads STRICT_PROXY_CONTROLLER_URL & STRICT_PROXY_PUBLIC_KEY_PEM from env
+    trust_forwarded_for=True,
+    trusted_proxy_hops=1,
+)
+app.add_middleware(gk.asgi_middleware())
 ```
 
 The client fetches a short-lived token from `GET /api/v1/entitlement` with its

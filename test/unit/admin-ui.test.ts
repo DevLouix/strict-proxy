@@ -550,7 +550,13 @@ test('the links view renders the Gatekeeper setup panel with live exit IPs and s
   assert.ok(text.includes('Protect a site (Gatekeeper setup)'), 'links view should render Gatekeeper setup');
   assert.ok(text.includes('203.0.113.10'), 'active exit IP must be displayed');
   assert.ok(text.includes('BEGIN PUBLIC KEY'), 'signing public key PEM must be displayed');
-  assert.ok(text.includes('createGatekeeperMiddleware'), 'Express snippet should be shown by default');
+  assert.ok(text.includes('Gatekeeper.init('), 'Node SDK snippet should be shown by default');
+  assert.ok(text.includes('gk.auth()'), 'Node SDK snippet should show init -> auth');
+
+  const pyBtn = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Python / pip');
+  assert.ok(pyBtn, 'Python snippet tab should exist');
+  pyBtn.dispatch('click');
+  assert.ok(node.text().includes('from strict_proxy_gatekeeper import Gatekeeper'), 'Python snippet should use strict_proxy_gatekeeper');
 
   const caddyBtn = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Caddy');
   assert.ok(caddyBtn, 'Caddy snippet tab should exist');

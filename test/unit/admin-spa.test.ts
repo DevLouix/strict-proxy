@@ -239,7 +239,8 @@ test('every operator billing route has a control in the dashboard', async () => 
 test('the links view wires up Gatekeeper setup metadata and snippets', async () => {
   const source = await readFile(path.join(ADMIN_DIR, 'links-view.js'), 'utf8');
   assert.ok(source.includes("api.get('/api/v1/admin/gatekeeper')"), 'links view must load Gatekeeper metadata');
-  assert.ok(source.includes('createGatekeeperMiddleware'), 'links view must offer a Gatekeeper Express snippet');
+  assert.ok(source.includes('Gatekeeper.init('), 'links view must offer the Gatekeeper.init() SDK snippet');
+  assert.ok(source.includes('strict_proxy_gatekeeper'), 'links view must offer the Python pip SDK snippet');
   assert.ok(source.includes('trustedProxyHops'), 'Express snippet should document trustedProxyHops');
 });
 

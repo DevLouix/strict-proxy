@@ -43,3 +43,10 @@ apps/client/windows/
 apps/client/web/
 apps/client/.metadata
 apps/client/.flutter-plugins-dependencies
+
+# Python SDK build & test artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/

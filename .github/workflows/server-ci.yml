@@ -34,10 +34,44 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Build and dry-run pack Gatekeeper npm SDK
+        run: |
+          npm run build -w @strict-proxy/gatekeeper
+          npm pack --dry-run -w @strict-proxy/gatekeeper
       - run: npm run typecheck
       - run: git diff --check
       - name: Run unit tests
         run: npm run test:unit
+      - name: Validate Gatekeeper Python SDK (tests, sdist/wheel build, cross-language verify)
+        run: |
+          python3 -m venv .venv-sdk
+          .venv-sdk/bin/pip install --upgrade pip
+          .venv-sdk/bin/pip install -e "./sdks/python[dev]"
+          .venv-sdk/bin/pytest -v sdks/python/tests
+          .venv-sdk/bin/python -m build sdks/python
+          .venv-sdk/bin/twine check sdks/python/dist/*
+          # Cross-language verification: Node signs payload + entitlement token, Python verifies both.
+          node --import tsx --input-type=module -e "
+            import { generateEd25519Keypair, loadSigningPrivateKey, signJson } from './packages/types/src/main.ts';
+            const keys = generateEd25519Keypair();
+            const priv = loadSigningPrivateKey(keys.privateKeyPem);
+            const now = Date.now();
+            const exp = new Date(now + 600_000).toISOString();
+            const ipsPayload = { generatedAt: new Date(now).toISOString(), expiresAt: exp, ips: ['203.0.113.55'] };
+            const ipsBody = { ...ipsPayload, keyId: 'interop', signature: signJson(priv, ipsPayload) };
+            const claims = { version: 1, keyId: 'interop', sub: 'u1', email: 'interop@example.com', tier: 'pro', status: 'active', currentPeriodEnd: exp, issuedAt: new Date(now).toISOString(), expiresAt: exp };
+            const token = 'sp1.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.' + Buffer.from(signJson(priv, claims), 'base64').toString('base64url');
+            console.log(JSON.stringify({ publicKeyPem: keys.publicKeyPem, ipsBody, token }));
+          " | .venv-sdk/bin/python -c "
+            import json, sys
+            from strict_proxy_gatekeeper import Gatekeeper
+            data = json.load(sys.stdin)
+            gk = Gatekeeper.init(controller_url='https://controller.test', public_key=data['publicKeyPem'], required_tier='standard', http_get_json=lambda _u, _t: data['ipsBody'])
+            d = gk.auth(ip='203.0.113.55', headers={'x-strict-proxy-entitlement': data['token']})
+            assert d.allowed and d.user and d.user.email == 'interop@example.com' and d.user.tier == 'pro', d
+            print('Cross-language Node->Python Ed25519 verification passed!')
+          "
+          rm -rf .venv-sdk sdks/python/dist sdks/python/build sdks/python/src/*.egg-info
       - name: Run integration tests
         # Needs a working Docker daemon: the integration suite boots ephemeral
         # Postgres + Redis containers with testcontainers.

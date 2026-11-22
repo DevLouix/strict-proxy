@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { signJson } from '@strict-proxy/types';
 import {
+  Gatekeeper,
   clientIpOf,
   createGatekeeperMiddleware,
   entitlementTokenOf,
@@ -251,5 +252,111 @@ test('createGatekeeperMiddleware skips Set-Cookie when setCookieFromQuery is fal
     assert.equal(appended.length, 0);
   } finally {
     globalThis.fetch = origFetch;
+  }
+});
+
+test('Gatekeeper.init() + auth() supports single publicKey shorthand and per-route tier override', async () => {
+  const { publicKeyPem, publicIpsBody, token } = makeSignedTestMaterials();
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test/',
+    publicKey: publicKeyPem,
+    trustForwardedFor: true,
+    trustedProxyHops: 1,
+    fetchImpl: (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => publicIpsBody,
+    })) as typeof fetch,
+  });
+
+  // Proxy-only route (no requiredTier) admits fleet IP without token
+  const proxyOnly = await gk.authorize({
+    ip: '127.0.0.1',
+    headers: { 'x-forwarded-for': '198.51.100.99, 203.0.113.10' },
+  });
+  assert.equal(proxyOnly.allowed, true);
+  if (proxyOnly.allowed) {
+    assert.equal(proxyOnly.ip, '203.0.113.10');
+    assert.equal(proxyOnly.user, null);
+  }
+
+  // Per-route pro override via Web Standard Request
+  const webReq = new Request(`https://private.example.com/pro?sp_ticket=${encodeURIComponent(token)}`, {
+    headers: { 'x-forwarded-for': '198.51.100.99, 203.0.113.10' },
+  });
+  const proDecision = await gk.verifyRequest(webReq, 'pro');
+  assert.equal(proDecision.allowed, true);
+  if (proDecision.allowed) {
+    assert.equal(proDecision.user?.tier, 'pro');
+    assert.ok(proDecision.setCookie?.includes('HttpOnly'));
+    assert.ok(proDecision.setCookie?.includes('Secure'));
+  }
+
+  // Refresh returns active fleet IPs
+  assert.deepEqual(await gk.refresh(), ['203.0.113.10']);
+});
+
+test('Gatekeeper.init() auto-fetches public key over HTTPS and refuses non-localhost HTTP', async () => {
+  const { publicKeyPem, publicIpsBody, token } = makeSignedTestMaterials();
+  const fakeFetch = (async (url: string | URL) => {
+    const s = String(url);
+    if (s.endsWith('/api/v1/network/public-key')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ keyId: 'k1', algorithm: 'Ed25519', publicKeyPem }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => publicIpsBody,
+    };
+  }) as typeof fetch;
+
+  const gkHttps = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    requiredTier: 'standard',
+    fetchImpl: fakeFetch,
+  });
+  const okDecision = await gkHttps.authorize({
+    ip: '203.0.113.10',
+    headers: { 'x-strict-proxy-entitlement': token },
+  });
+  assert.equal(okDecision.allowed, true);
+
+  // Remote plain HTTP without a pinned publicKey must fail closed
+  const gkHttp = Gatekeeper.init({
+    controllerUrl: 'http://controller.test',
+    fetchImpl: fakeFetch,
+  });
+  const denied = await gkHttp.authorize({ ip: '203.0.113.10' });
+  assert.equal(denied.allowed, false);
+  if (!denied.allowed) {
+    assert.equal(denied.status, 403);
+    assert.equal(denied.code, 'GATEKEEPER_DENIED');
+  }
+});
+
+test('Gatekeeper.init() reads STRICT_PROXY_* environment variables when omitted', async () => {
+  const { publicKeyPem, publicIpsBody } = makeSignedTestMaterials();
+  const prevUrl = process.env.STRICT_PROXY_CONTROLLER_URL;
+  const prevKey = process.env.STRICT_PROXY_PUBLIC_KEY_PEM;
+  process.env.STRICT_PROXY_CONTROLLER_URL = 'https://controller.test';
+  process.env.STRICT_PROXY_PUBLIC_KEY_PEM = publicKeyPem;
+  try {
+    const gk = Gatekeeper.init({
+      fetchImpl: (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => publicIpsBody,
+      })) as typeof fetch,
+    });
+    assert.deepEqual(await gk.refresh(), ['203.0.113.10']);
+  } finally {
+    if (prevUrl === undefined) delete process.env.STRICT_PROXY_CONTROLLER_URL;
+    else process.env.STRICT_PROXY_CONTROLLER_URL = prevUrl;
+    if (prevKey === undefined) delete process.env.STRICT_PROXY_PUBLIC_KEY_PEM;
+    else process.env.STRICT_PROXY_PUBLIC_KEY_PEM = prevKey;
   }
 });
