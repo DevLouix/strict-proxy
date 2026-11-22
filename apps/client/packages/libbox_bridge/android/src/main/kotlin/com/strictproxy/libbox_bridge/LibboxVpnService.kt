@@ -7,6 +7,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import io.nekohasekai.libbox.BridgeOptions
 import io.nekohasekai.libbox.BridgeSession
@@ -89,6 +91,18 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         @Volatile
         private var stopRequested = false
 
+        /**
+         * The live service, so a stop can also be applied from inside it.
+         *
+         * `stopService` is the documented way to end a started service, but on
+         * the device it twice left the service and its tun alive until Android
+         * revoked the VPN from Settings — the user was told the VPN had not
+         * shut down while the key stayed in the status bar. The instance can
+         * close itself instead, which is the same teardown the system runs.
+         */
+        @Volatile
+        private var instance: LibboxVpnService? = null
+
         fun start(context: Context, config: String) {
             // An explicit start is newer than any stop still being delivered.
             stopRequested = false
@@ -101,20 +115,40 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         /**
          * Stops the tunnel and the service.
          *
-         * `stopService` and not a broadcast: the system tears the service down,
-         * so `onDestroy` runs even if this process is busy or the engine is
-         * wedged, and the notification and the tun go with it. A broadcast only
-         * reached a receiver that had to still be registered and alive in this
-         * process, which is why Disconnect could leave the tunnel and its
+         * A service stop and not a broadcast: the system tears the service
+         * down, so `onDestroy` runs even if this process is busy or the engine
+         * is wedged, and the notification and the tun go with it. A broadcast
+         * only reached a receiver that had to still be registered and alive in
+         * this process, which is why Disconnect could leave the tunnel and its
          * notification running.
          */
         fun stop(context: Context) {
             stopRequested = true
-            context.stopService(Intent(context, LibboxVpnService::class.java))
+            // Both results go to the on-device log: whether the system accepted
+            // the stop is the first question a "did not shut down" report
+            // needs answered, and it is invisible from the screen otherwise.
+            val stopped = runCatching {
+                context.stopService(Intent(context, LibboxVpnService::class.java))
+            }.onFailure {
+                EngineLog.append("stopService failed: ${it.javaClass.simpleName}: ${it.message}")
+            }.getOrDefault(false)
+            EngineLog.append("stopService returned $stopped")
+            // Ask the service itself as well instead of trusting that call to
+            // land. Warming it through an instance is safe whether or not the
+            // system is already tearing it down: the teardown is idempotent.
+            instance?.let { service ->
+                service.main.post {
+                    EngineLog.append("closing the tunnel from the service")
+                    service.runner.stop()
+                    service.stopSelf()
+                }
+            }
         }
     }
 
     private lateinit var runner: BoxRunner
+
+    private val main = Handler(Looper.getMainLooper())
 
     /**
      * The engine's default-interface listeners, and the system callbacks that
@@ -138,9 +172,12 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        instance = this
         // Before the engine exists: a crash during setup still leaves a file
-        // the next launch (and Diagnostics) can read.
+        // the next launch (and Diagnostics) can read. Attaching first also
+        // keeps the previous launch's lines *above* this one in the log.
         EngineLog.attach(this)
+        EngineLog.append("VPN service created")
         runner = BoxRunner(this, this)
         runner.create()
     }
@@ -177,6 +214,9 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     }
 
     override fun onDestroy() {
+        // Cleared first: a stop that arrives while this runs must not queue more
+        // work onto a service the system is already destroying.
+        instance = null
         // Before the engine teardown: every stop confirmation reads this, and
         // the tun is gone by the time this callback runs.
         isRunning = false

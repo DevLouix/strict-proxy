@@ -173,6 +173,15 @@ internal class BoxRunner(
             options.setWorkingPath(File(files, "libbox").apply { mkdirs() }.absolutePath)
             options.setTempPath(File(service.cacheDir, "libbox").apply { mkdirs() }.absolutePath)
             options.setLogMaxLines(300)
+            // The engine only hands its log lines to
+            // `PlatformInterface.writeDebugMessage` when `SetupOptions.Debug`
+            // is set: `daemon/started_service.go` forwards them inside an
+            // `if s.debug` block. Without this the on-device log held only the
+            // app's own lines and Diagnostics could not show a single decision
+            // the engine made. This is the forwarding switch, not the log
+            // level — what is recorded still comes from the config's
+            // `log.level`.
+            options.setDebug(true)
             options.setFixAndroidStack(true)
             val version = appVersion()
             options.setAppVersion(version)

@@ -267,6 +267,20 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
   static const dataPathProbeTimeout = Duration(seconds: 8);
 
+  /// How many fresh-socket probes one `connected` event gets.
+  ///
+  /// One was not enough: a node restart or a redeploy can take longer than a
+  /// probe's timeout, and the attempt then disconnected a tunnel that recovered
+  /// seconds later and told the user it carried no traffic. A second attempt,
+  /// spaced out, still catches a datapath this device cannot use.
+  @visibleForTesting
+  static const dataPathProbeAttempts = 2;
+
+  /// Pause between probe attempts, so a node that is coming back has a chance
+  /// to answer instead of being asked twice into the same outage.
+  @visibleForTesting
+  static const dataPathProbeRetryDelay = Duration(seconds: 3);
+
   /// True once this run already fell back to compat mode for a dead datapath,
   /// so a second failed probe reports the failure instead of reconnecting
   /// forever.
@@ -358,11 +372,25 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     await Future<void>.delayed(const Duration(seconds: 2));
     if (attempt != _attempt || state is! EngineStateConnected) return;
     String? reason;
-    if (await probeDataPath(onError: (error) => reason ??= describeProbeError(error))) {
+    var reachable = false;
+    for (var probe = 0; probe < dataPathProbeAttempts; probe++) {
+      reachable = await probeDataPath(
+        onError: (error) => reason ??= describeProbeError(error),
+      );
+      if (reachable) break;
+      if (probe + 1 >= dataPathProbeAttempts) break;
+      // A tunnel that is up is not torn down on the first timeout: a node can
+      // restart or be redeployed exactly while the interface comes up. Every
+      // wait re-checks the attempt and the state, so a newer connect or a
+      // disconnect makes this loop stop instead of acting on a stale tunnel.
+      if (attempt != _attempt || state is! EngineStateConnected) return;
+      await Future<void>.delayed(dataPathProbeRetryDelay);
+      if (attempt != _attempt || state is! EngineStateConnected) return;
+    }
+    if (reachable) {
       _autoCompatTried = false;
       return;
     }
-    if (attempt != _attempt || state is! EngineStateConnected) return;
     // The engine cannot know this one: the probe runs in Dart, from the app
     // itself, and its result is the difference between "the tunnel is up" and
     // "the tunnel carries traffic".
