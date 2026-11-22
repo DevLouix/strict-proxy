@@ -74,8 +74,11 @@ export class ControllerClient {
   }
 
   /** Buffered log lines, posted only when a heartbeat response asked for them. */
-  postLogs(logs: Array<{ at: string; level: string; msg: string }>): Promise<{ ok: boolean; delivered: boolean }> {
-    return this.request('POST', '/internal/v1/node/logs', { logs });
+  postLogs(
+    logs: Array<{ at: string; level: string; msg: string }>,
+    refusedPeers: Array<{ endpoint: string; host: string; at: string; attempts: number }> = [],
+  ): Promise<{ ok: boolean; delivered: boolean }> {
+    return this.request('POST', '/internal/v1/node/logs', { logs, refusedPeers });
   }
 
   sync(): Promise<{ credentials: Array<{ uuid: string; shortId: string; userEmail: string; expiresAt: string | null; revoked: boolean }>; controllerTime: string }> {

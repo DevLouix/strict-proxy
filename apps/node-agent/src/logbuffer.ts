@@ -11,6 +11,22 @@
 export type LogLine = { at: string; level: string; msg: string };
 
 /**
+ * A client address the engine refused, pinned independently of the transcript.
+ *
+ * Keyed by host rather than by `host:port`: a client that retries gets a new
+ * source port every time, so keying by the full endpoint would list one phone
+ * ten times and hide the other nine addresses to an operator looking for it.
+ */
+export type RefusedPeer = {
+  /** Most recent `host:port` seen, or just the host when the engine omitted a port. */
+  endpoint: string;
+  host: string;
+  at: string;
+  /** Refusals seen from this host inside the retained window. */
+  attempts: number;
+};
+
+/**
  * Engine output lives for two minutes, whatever the volume.
  *
  * Evicting by age is what makes a burst harmless: a burst adds lines at the
@@ -74,4 +90,57 @@ export function composeAdminLines(sources: {
     ...sources.engine.slice(-ADMIN_LOG_BUDGET.engine),
     ...sources.tail.slice(-ADMIN_LOG_BUDGET.tail),
   ];
+}
+
+/**
+ * sing-box reports the peer on the line that names the failure
+ * (`process connection from 1.2.3.4:5678: reality: processed invalid
+ * connection`). A split format that logs the address and the refusal on two
+ * lines cannot be paired here, so those addresses are not pinned — the full
+ * transcript above still carries both lines.
+ */
+const PEER_RE = /\bfrom (\[[0-9a-fA-F:]+\]|\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/;
+
+/** Failure words wide enough for REALITY, VLESS and handshake rejections. */
+const REFUSAL_RE = /invalid|refus|reject|denied|unauthori[sz]ed|unknown (?:user|uuid|client)|handshake fail/i;
+
+/** sing-box colours its level in the line; the colour is noise in a list. */
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
+
+/**
+ * The refused endpoints an operator is looking for, newest first.
+ *
+ * Derived from every engine line the node still holds rather than from the
+ * transcript that gets sent, so the pinned list is not bounded by the payload
+ * budget: a burst can shorten the transcript but not this list.
+ */
+export function recentRefusedPeers(
+  engine: LogLine[],
+  tail: LogLine[] = [],
+  limit = 10,
+): RefusedPeer[] {
+  const byHost = new Map<string, RefusedPeer>();
+  for (const line of [...engine, ...tail]) {
+    const msg = line.msg.replace(ANSI_RE, '');
+    if (!REFUSAL_RE.test(msg)) continue;
+    const match = PEER_RE.exec(msg);
+    if (!match) continue;
+    const host = match[1];
+    if (!host) continue;
+    const port = match[2] ?? null;
+    const endpoint = port ? `${host}:${port}` : host;
+    const seen = byHost.get(host);
+    if (seen) {
+      seen.attempts += 1;
+      seen.endpoint = endpoint;
+      seen.at = line.at;
+    } else {
+      byHost.set(host, { endpoint, host, at: line.at, attempts: 1 });
+    }
+  }
+  // Same-instant lines keep the order they arrived in, so a retry's newest port
+  // is the one shown when the engine wrote several refusals in one second.
+  return [...byHost.values()]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, limit);
 }

@@ -634,12 +634,84 @@ function nodeLogsDialog(api, node) {
   dlg.showModal();
   api.get(`/api/v1/admin/nodes/${encodeURIComponent(node.id)}/logs`)
     .then((data) => {
-      const lines = data.lines || [];
-      text = lines.map((l) => `${l.at} [${l.level}] ${l.msg}`).join('\n');
-      copyBtn.disabled = lines.length === 0;
-      body.replaceChildren(lines.length === 0
-        ? h('div', { class: 'empty' }, 'The node sent no log lines.')
-        : h('pre', { class: 'mono small logs' }, text));
+      const lines = Array.isArray(data.lines) ? data.lines : [];
+      const peers = Array.isArray(data.refusedPeers) ? data.refusedPeers : [];
+      const format = (l) => `${l.at} [${l.level}] ${l.msg}`;
+      // The pinned endpoints go first in the copied text: they are usually what
+      // an operator is pasting to someone, and they outlive the transcript.
+      const peersText = peers.length === 0
+        ? ''
+        : [
+          `recently refused endpoints (${peers.length})`,
+          ...peers.map((p) => `${p.at} ${p.endpoint}${p.attempts > 1 ? ` x${p.attempts}` : ''}`),
+          '',
+        ].join('\n');
+      const peersSection = peers.length === 0
+        ? h('p', { class: 'muted small' }, 'No refused client endpoints in the engine output the node kept.')
+        : h('div', { class: 'stack' },
+          h('div', { class: 'muted small' }, 'Recently refused endpoints — pinned, so a scanner flood cannot push them out'),
+          ...peers.map((p) => h('div', { class: 'row' },
+            h('code', {}, p.endpoint),
+            p.attempts > 1
+              ? h('span', { class: 'badge degraded', title: `${p.attempts} refusals from this address` }, `${p.attempts}×`)
+              : h('span', { class: 'badge offline' }, 'refused'),
+            h('span', { class: 'muted small', title: p.at }, ago(p.at)),
+          )),
+        );
+
+      if (lines.length === 0) {
+        text = peersText;
+        copyBtn.disabled = peers.length === 0;
+        body.replaceChildren(peersSection, h('div', { class: 'empty' }, 'The node sent no log lines.'));
+        return;
+      }
+
+      // The transcript is filtered locally: the node answers with up to a few
+      // hundred lines, and an operator looking for one refusal should not have
+      // to scroll a scanner's output to find it.
+      let needle = '';
+      let level = '';
+      const search = h('input', {
+        type: 'search',
+        placeholder: 'Filter lines by text…',
+        'aria-label': 'Filter log lines',
+        autocomplete: 'off',
+        spellcheck: 'false',
+        onInput: (e) => { needle = e.target.value; draw(); },
+      });
+      const levelSelect = h('select', {
+        'aria-label': 'Filter log lines by level',
+        onChange: (e) => { level = e.target.value; draw(); },
+      },
+        h('option', { value: '' }, 'All levels'),
+        ...['error', 'warn', 'info', 'debug'].map((value) => h('option', { value }, value)),
+      );
+      const countLabel = h('span', { class: 'muted small' });
+      const transcript = h('pre', { class: 'mono small logs' });
+      const noMatch = h('div', { class: 'empty', hidden: true }, 'No lines match this filter.');
+
+      function draw() {
+        const query = needle.trim().toLowerCase();
+        const visible = lines.filter((l) =>
+          (!level || l.level === level) &&
+          (!query || format(l).toLowerCase().includes(query)));
+        transcript.textContent = visible.map(format).join('\n');
+        transcript.hidden = visible.length === 0;
+        noMatch.hidden = visible.length > 0;
+        countLabel.textContent = `${visible.length} of ${lines.length} shown`;
+        // Copy follows the filter: what gets pasted is what is on screen.
+        const linesText = visible.map(format).join('\n');
+        text = peersText ? `${peersText}\n${linesText}` : linesText;
+        copyBtn.disabled = !text.trim();
+      }
+
+      body.replaceChildren(
+        peersSection,
+        h('div', { class: 'toolbar' }, search, levelSelect, countLabel),
+        noMatch,
+        transcript,
+      );
+      draw();
     })
     .catch((err) => {
       body.replaceChildren(

@@ -26,7 +26,7 @@ import {
   saveAppliedFingerprint,
   type Credential,
 } from './singbox.js';
-import { composeAdminLines, EngineLogRing, type LogLine } from './logbuffer.js';
+import { composeAdminLines, EngineLogRing, recentRefusedPeers, type LogLine, type RefusedPeer } from './logbuffer.js';
 
 const execFileP = promisify(execFile);
 
@@ -217,7 +217,8 @@ class Agent {
     // click still shows what happened instead of an empty panel.
     if (reply.sendLogs) {
       try {
-        await this.client.postLogs(await this.logsForAdmin());
+        const report = await this.logsForAdmin();
+        await this.client.postLogs(report.lines, report.refusedPeers);
         log('debug', 'log lines posted on request');
       } catch (err) {
         // Kept in the buffer so the next answer carries the reason: a node that
@@ -237,7 +238,7 @@ class Agent {
    * lines plus a live snapshot of the tunnel, and — when the engine is not this
    * process's child — the engine's own recent output.
    */
-  private async logsForAdmin(): Promise<Array<{ at: string; level: string; msg: string }>> {
+  private async logsForAdmin(): Promise<{ lines: LogLine[]; refusedPeers: RefusedPeer[] }> {
     const at = new Date().toISOString();
     const engine = this.managedSingBox.current;
     const engineState =
@@ -261,12 +262,14 @@ class Agent {
     // Each source has its own budget: assembling first and capping the result
     // let a burst at the tail push out the agent's own lines and the snapshot
     // that explains a dead node.
-    return composeAdminLines({
-      recent: recentLogs,
-      snapshot,
-      engine: engineLogs.tail(),
-      tail: await this.engineLogTail(),
-    });
+    const engineLines = engineLogs.tail();
+    // In systemd mode the ring is empty and refusals live only in the journal,
+    // so both sources feed the pinned list rather than the transcript alone.
+    const engineTail = await this.engineLogTail();
+    return {
+      lines: composeAdminLines({ recent: recentLogs, snapshot, engine: engineLines, tail: engineTail }),
+      refusedPeers: recentRefusedPeers([...engineLines, ...engineTail]),
+    };
   }
 
   /**

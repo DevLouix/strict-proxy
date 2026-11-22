@@ -8,9 +8,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { composeAdminLines, EngineLogRing } from '../../apps/node-agent/src/logbuffer.js';
+import { composeAdminLines, EngineLogRing, recentRefusedPeers } from '../../apps/node-agent/src/logbuffer.js';
 
-const line = (msg: string) => ({ at: new Date(0).toISOString(), level: 'warn', msg });
+const line = (msg: string, at = new Date(0).toISOString()) => ({ at, level: 'warn', msg });
 
 test('a scanner burst cannot evict a line that is still inside the window', () => {
   const ring = new EngineLogRing(60_000, 1000);
@@ -50,4 +50,33 @@ test('each source keeps its own budget, so engine noise cannot push out agent li
   assert.ok(out.some((entry) => entry.msg === 'journal line'), 'the journal tail must be included');
   assert.equal(out.filter((entry) => entry.msg.startsWith('engine ')).length, 180);
   assert.equal(out.at(-1)?.msg, 'journal line');
+});
+
+test('refused peers are pinned by host, with retry ports folded into a count', () => {
+  const peers = recentRefusedPeers([
+    line('[sing-box] +0000 2026-11-22 04:01:09 INFO inbound/vless[vless-reality-in]: process connection from 45.33.83.23:40001: reality: processed invalid connection', '2026-11-22T04:01:09.000Z'),
+    line('[sing-box] +0000 2026-11-22 04:01:11 INFO inbound/vless[vless-reality-in]: process connection from 45.33.83.23:40002: reality: processed invalid connection', '2026-11-22T04:01:11.000Z'),
+    line('[sing-box] +0000 2026-11-22 04:01:12 INFO inbound/vless[vless-reality-in]: process connection from 138.197.113.179:5555: reality: processed invalid connection', '2026-11-22T04:01:12.000Z'),
+  ]);
+  assert.deepEqual(peers.map((p) => p.host), ['138.197.113.179', '45.33.83.23']);
+  const retried = peers.find((p) => p.host === '45.33.83.23');
+  assert.equal(retried?.attempts, 2);
+  assert.equal(retried?.endpoint, '45.33.83.23:40002', 'the newest port is the one shown');
+});
+
+test('a successful connection is not pinned as refused', () => {
+  const peers = recentRefusedPeers([
+    line('[sing-box] +0000 2026-11-22 04:01:09 INFO inbound/vless[vless-reality-in]: process connection from 203.0.113.9:1234'),
+    line('[sing-box] +0000 2026-11-22 04:01:09 INFO inbound/vless[vless-reality-in]: inbound connection to outbound'),
+  ]);
+  assert.deepEqual(peers, []);
+});
+
+test('pinned peers are bounded and IPv6 addresses stay readable', () => {
+  const engine = Array.from({ length: 15 }, (_, i) =>
+    line(`[sing-box] INFO inbound/vless[in]: process connection from [2001:db8::${i + 1}]:443: reality: processed invalid connection`),
+  );
+  const peers = recentRefusedPeers(engine);
+  assert.equal(peers.length, 10);
+  assert.match(peers[0].endpoint, /^\[2001:db8::\d+\]:443$/);
 });

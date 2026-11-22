@@ -103,6 +103,35 @@ function issueTokenPair(ctx: Ctx, params: { userId: string; email: string; role:
 // Routes
 // ---------------------------------------------------------------------------
 
+/**
+ * A refused client endpoint as the node pinned it, shaped for the log dialog.
+ * The node derives it independently of the transcript, so it survives a burst
+ * that shortens the lines.
+ */
+type NodeRefusedPeer = { endpoint: string; host?: string; at: string; attempts: number };
+
+/**
+ * Validates the pinned list a node POSTs: it is rendered in the admin console,
+ * so an oversized or malformed entry must not reach the page.
+ */
+function sanitizeRefusedPeers(raw: unknown): NodeRefusedPeer[] {
+  if (!Array.isArray(raw)) return [];
+  const peers: NodeRefusedPeer[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const value = entry as Record<string, unknown>;
+    if (typeof value.endpoint !== 'string' || value.endpoint.trim() === '') continue;
+    const attempts = Number(value.attempts);
+    peers.push({
+      endpoint: value.endpoint.trim().slice(0, 64),
+      ...(typeof value.host === 'string' && value.host.trim() !== '' ? { host: value.host.trim().slice(0, 64) } : {}),
+      at: typeof value.at === 'string' ? value.at.slice(0, 40) : new Date().toISOString(),
+      attempts: Number.isFinite(attempts) && attempts > 0 ? Math.min(Math.floor(attempts), 1_000_000) : 1,
+    });
+  }
+  return peers.slice(0, 20);
+}
+
 export function buildRouter(ctx: Ctx): Router {
   const router = Router();
   const requireAuth = requireJwt(ctx.cfg, ctx.db);
@@ -782,7 +811,7 @@ export function buildRouter(ctx: Ctx): Router {
        * distinguishable from a build whose log POST was rejected.
        */
       build: string | null;
-      resolve: (lines: Array<{ at: string; level: string; msg: string }>) => void;
+      resolve: (payload: { lines: Array<{ at: string; level: string; msg: string }>; refusedPeers: NodeRefusedPeer[] }) => void;
     }
   >();
 
@@ -803,20 +832,21 @@ export function buildRouter(ctx: Ctx): Router {
     // Still under the 60s a default Traefik read timeout allows.
     const outcome = await new Promise<{
       lines: Array<{ at: string; level: string; msg: string }> | null;
+      refusedPeers: NodeRefusedPeer[];
       heartbeats: number;
       build: string | null;
     }>((resolve) => {
       const waiter = {
         heartbeats: 0,
         build: null as string | null,
-        resolve: (lines: Array<{ at: string; level: string; msg: string }>) => {
+        resolve: (payload: { lines: Array<{ at: string; level: string; msg: string }>; refusedPeers: NodeRefusedPeer[] }) => {
           clearTimeout(timer);
-          resolve({ lines, heartbeats: waiter.heartbeats, build: waiter.build });
+          resolve({ ...payload, heartbeats: waiter.heartbeats, build: waiter.build });
         },
       };
       const timer = setTimeout(() => {
         pendingNodeLogs.delete(nodeId);
-        resolve({ lines: null, heartbeats: waiter.heartbeats, build: waiter.build });
+        resolve({ lines: null, refusedPeers: [], heartbeats: waiter.heartbeats, build: waiter.build });
       }, 55_000);
       pendingNodeLogs.set(nodeId, waiter);
     });
@@ -850,7 +880,7 @@ export function buildRouter(ctx: Ctx): Router {
       }
       return;
     }
-    res.json({ lines: outcome.lines });
+    res.json({ lines: outcome.lines, refusedPeers: outcome.refusedPeers });
   }));
 
   router.patch('/api/v1/admin/nodes/:nodeId', ...requireAdministrator, asyncHandler(async (req, res) => {
@@ -1415,19 +1445,20 @@ export function buildRouter(ctx: Ctx): Router {
     requireNode,
     asyncHandler(async (req, res) => {
       const nodeId = req.node!.nodeId;
-      const body = req.body as { logs?: Array<{ at: string; level: string; msg: string }> };
+      const body = req.body as { logs?: Array<{ at: string; level: string; msg: string }>; refusedPeers?: unknown };
       const waiter = pendingNodeLogs.get(nodeId);
       if (waiter && Array.isArray(body.logs)) {
         pendingNodeLogs.delete(nodeId);
-        waiter.resolve(
-          body.logs
+        waiter.resolve({
+          lines: body.logs
             .filter((l) => l && typeof l.msg === 'string')
             // Larger than the agent's own single-source caps: the POST already
             // carries a per-source budget, and re-capping the whole list here
             // was a second place a flood could push out the snapshot.
             .slice(-600)
             .map((l) => ({ at: String(l.at), level: String(l.level), msg: String(l.msg).slice(0, 500) })),
-        );
+          refusedPeers: sanitizeRefusedPeers(body.refusedPeers),
+        });
       }
       res.json({ ok: true, delivered: Boolean(waiter) });
     }),
