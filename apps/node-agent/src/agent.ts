@@ -32,9 +32,19 @@ const execFileP = promisify(execFile);
 /** Touched on every tick; the container healthcheck compares its mtime. */
 const HEALTH_PATH = process.env.AGENT_HEALTH_PATH?.trim() || '/tmp/agent-healthy';
 
-/** Recent agent log lines, sent to the controller so the admin console can show them. */
+/**
+ * Recent lines for the admin console, kept in two rings.
+ *
+ * One ring was not enough. The engine writes every refused handshake from the
+ * internet's scanners to stderr, and a burst of a few hundred lines pushed
+ * `applied N credential(s)` and `could not post log lines` out of the buffer
+ * within seconds — the exact lines an operator clicks Logs to find. Engine
+ * output is capped on its own; the agent's own lines are not.
+ */
 const RECENT_LOG_LIMIT = 200;
+const ENGINE_LOG_LIMIT = 60;
 const recentLogs: Array<{ at: string; level: string; msg: string }> = [];
+const engineLogs: Array<{ at: string; level: string; msg: string }> = [];
 
 function log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ...rest: unknown[]): void {
   if (level === 'debug' && process.env.LOG_LEVEL !== 'debug') return;
@@ -42,6 +52,24 @@ function log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ...rest: u
   console.log(`[${at}][${level}] ${msg}`, ...rest);
   recentLogs.push({ at, level, msg: [msg, ...rest.map(String)].join(' ').slice(0, 500) });
   if (recentLogs.length > RECENT_LOG_LIMIT) recentLogs.splice(0, recentLogs.length - RECENT_LOG_LIMIT);
+}
+
+/**
+ * Engine output from the managed child.
+ *
+ * A chunk is not a line: one read can carry several records, and slicing the
+ * chunk at 500 characters cut a log record in half. Split first, then cap.
+ */
+function logEngine(level: 'debug' | 'warn', text: string): void {
+  if (level === 'debug' && process.env.LOG_LEVEL !== 'debug') return;
+  const at = new Date().toISOString();
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    console.log(`[${at}][${level}] [sing-box] ${line}`);
+    engineLogs.push({ at, level, msg: `[sing-box] ${line}`.slice(0, 500) });
+  }
+  if (engineLogs.length > ENGINE_LOG_LIMIT) engineLogs.splice(0, engineLogs.length - ENGINE_LOG_LIMIT);
 }
 
 async function validateSingBoxConfig(binary: string, configPath: string): Promise<boolean> {
@@ -60,8 +88,8 @@ async function restartSingBox(cfg: AgentConfig, managedProcess: { current: Child
     managedProcess.current = spawn(cfg.singBoxBinaryPath, ['run', '-c', cfg.singBoxConfigPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    managedProcess.current.stdout?.on('data', (chunk: Buffer) => log('debug', `[sing-box] ${chunk.toString().trim()}`));
-    managedProcess.current.stderr?.on('data', (chunk: Buffer) => log('warn', `[sing-box] ${chunk.toString().trim()}`));
+    managedProcess.current.stdout?.on('data', (chunk: Buffer) => logEngine('debug', chunk.toString()));
+    managedProcess.current.stderr?.on('data', (chunk: Buffer) => logEngine('warn', chunk.toString()));
     managedProcess.current.on('exit', (code, signal) => {
       if (code !== 0 && signal !== 'SIGTERM') log('error', `managed sing-box exited (${code ?? signal ?? 'unknown'})`);
     });
@@ -225,7 +253,10 @@ class Agent {
         : `live user(s) ${live.length}; config ${this.cfg.singBoxConfigPath}`,
       `controller ${this.cfg.controllerBaseUrl}; advertised ip ${this.cfg.publicIp ?? 'detected'}`,
     ].map((msg) => ({ at, level: 'info' as const, msg }));
-    return [...recentLogs, ...snapshot, ...(await this.engineLogTail())].slice(-200);
+    // The snapshot and the engine tail sit before the cap so they survive it;
+    // the highest-volume source (engine output) is capped separately in its own
+    // ring, which leaves the remaining room to the agent's own lines.
+    return [...recentLogs, ...snapshot, ...engineLogs, ...(await this.engineLogTail())].slice(-RECENT_LOG_LIMIT);
   }
 
   /**
