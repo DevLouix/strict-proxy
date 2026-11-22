@@ -279,15 +279,11 @@ internal class BoxRunner(
         lastConfig = null
         closeService()
         main.post {
-            val announced = foreground
             leaveForeground()
             publish(BoxStatus.ERROR, message)
-            if (!announced) {
-                // A startForegroundService request that never reaches
-                // startForeground is an ANR the system charges to this process
-                // within seconds. Stopping is the only way out of it.
-                service.stopSelf()
-            }
+            // Always stop the service on failure so isRunning does not stay
+            // true while the engine failed to start.
+            service.stopSelf()
         }
     }
 

@@ -3,16 +3,27 @@ package com.strictproxy.libbox_bridge
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.DnsResolver
+import android.net.IpPrefix
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.CancellationSignal
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.system.ErrnoException
+import android.system.OsConstants
 import android.util.Log
+import androidx.annotation.RequiresApi
 import io.nekohasekai.libbox.BridgeOptions
 import io.nekohasekai.libbox.BridgeSession
 import io.nekohasekai.libbox.ConnectionOwner
+import io.nekohasekai.libbox.ExchangeContext
+import io.nekohasekai.libbox.Func as LibboxFunc
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.LocalDNSTransport
@@ -27,9 +38,16 @@ import io.nekohasekai.libbox.ShellSession
 import io.nekohasekai.libbox.StringIterator
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.InterfaceAddress
 import java.net.NetworkInterface as AndroidNetworkInterface
+import java.net.UnknownHostException
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Foreground Android VPN service, bound to the engine's generated Java API.
@@ -169,6 +187,20 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     /** The physical network last reported to each listener. */
     private val reportedDefaultNetworks = HashMap<InterfaceUpdateListener, Network>()
 
+    @Volatile
+    private var currentPhysicalNetwork: Network? = null
+
+    private var defaultNetworkThread: HandlerThread? = null
+    private var defaultNetworkHandler: Handler? = null
+    private val dnsExecutor: ExecutorService = Executors.newCachedThreadPool()
+
+    private fun ensureDefaultNetworkHandler(): Handler {
+        defaultNetworkHandler?.let { return it }
+        val thread = HandlerThread("StrictProxyNetworkCallback").apply { start() }
+        defaultNetworkThread = thread
+        return Handler(thread.looper).also { defaultNetworkHandler = it }
+    }
+
     override fun onCreate() {
         super.onCreate()
         isRunning = true
@@ -220,6 +252,11 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         // Before the engine teardown: every stop confirmation reads this, and
         // the tun is gone by the time this callback runs.
         isRunning = false
+        currentPhysicalNetwork = null
+        defaultNetworkThread?.quitSafely()
+        defaultNetworkThread = null
+        defaultNetworkHandler = null
+        dnsExecutor.shutdownNow()
         runner.destroy()
         super.onDestroy()
     }
@@ -262,14 +299,50 @@ class LibboxVpnService : VpnService(), PlatformInterface {
             // which is why its iterator is collected defensively. A tunnel with
             // no DNS server on its interface resolves nothing on the device, so
             // TunPlan substitutes a hijacked-in-tunnel fallback.
-            for (server in TunPlan.dnsServers(strings { options.getDNSServerAddress() })) {
-                builder.addDnsServer(server)
+            val dnsEnabled = runCatching { options.getDNSMode()?.value != Libbox.DNSModeDisabled }.getOrDefault(true)
+            if (dnsEnabled) {
+                for (server in TunPlan.dnsServers(strings { options.getDNSServerAddress() })) {
+                    builder.addDnsServer(server)
+                }
             }
-            for (route in TunPlan.routes(prefixes { options.getInet4RouteAddress() }, "0.0.0.0", inet4.isNotEmpty())) {
-                builder.addRoute(route.address, route.prefix)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                for (route in TunPlan.routes(prefixes { options.getInet4RouteAddress() }, "0.0.0.0", inet4.isNotEmpty())) {
+                    builder.addRoute(route.address, route.prefix)
+                }
+                for (route in TunPlan.routes(prefixes { options.getInet6RouteAddress() }, "::", inet6.isNotEmpty())) {
+                    builder.addRoute(route.address, route.prefix)
+                }
+                for (excluded in prefixes { options.getInet4RouteExcludeAddress() }) {
+                    runCatching { builder.excludeRoute(IpPrefix(InetAddress.getByName(excluded.address), excluded.prefix)) }
+                }
+                for (excluded in prefixes { options.getInet6RouteExcludeAddress() }) {
+                    runCatching { builder.excludeRoute(IpPrefix(InetAddress.getByName(excluded.address), excluded.prefix)) }
+                }
+            } else {
+                for (route in TunPlan.routesForPreApi33(
+                    prefixes { options.getInet4RouteRange() },
+                    prefixes { options.getInet4RouteAddress() },
+                    "0.0.0.0",
+                    inet4.isNotEmpty(),
+                )) {
+                    builder.addRoute(route.address, route.prefix)
+                }
+                for (route in TunPlan.routesForPreApi33(
+                    prefixes { options.getInet6RouteRange() },
+                    prefixes { options.getInet6RouteAddress() },
+                    "::",
+                    inet6.isNotEmpty(),
+                )) {
+                    builder.addRoute(route.address, route.prefix)
+                }
             }
-            for (route in TunPlan.routes(prefixes { options.getInet6RouteAddress() }, "::", inet6.isNotEmpty())) {
-                builder.addRoute(route.address, route.prefix)
+            for (pkg in strings { options.getIncludePackage() }) {
+                runCatching { builder.addAllowedApplication(pkg) }
+                    .onFailure { Log.w(TAG, "addAllowedApplication($pkg) failed", it) }
+            }
+            for (pkg in strings { options.getExcludePackage() }) {
+                runCatching { builder.addDisallowedApplication(pkg) }
+                    .onFailure { Log.w(TAG, "addDisallowedApplication($pkg) failed", it) }
             }
         }
 
@@ -321,29 +394,72 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         val interfaces = runCatching {
             AndroidNetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
         }.getOrDefault(emptyList())
+        val networkInfoByName = activeNetworkMetadataByInterface()
         // An interface that cannot be represented is skipped: a malformed entry
         // (null iterator fields) would abort the Go side, while a short list is
         // just a less precise default-interface choice.
         val items = interfaces.mapNotNull { iface ->
-            runCatching { libboxInterface(iface) }
+            runCatching { libboxInterface(iface, networkInfoByName[iface.name]) }
                 .onFailure { Log.w(TAG, "skipping interface ${iface.name}", it) }
                 .getOrNull()
         }
         return NetworkInterfaces(items)
     }
 
-    private fun libboxInterface(iface: AndroidNetworkInterface): NetworkInterface {
+    private data class NetworkMetadata(
+        val linkProperties: LinkProperties,
+        val capabilities: NetworkCapabilities,
+    )
+
+    @Suppress("DEPRECATION")
+    private fun activeNetworkMetadataByInterface(): Map<String, NetworkMetadata> = runCatching {
+        val manager = connectivityManager
+        val result = HashMap<String, NetworkMetadata>()
+        for (network in manager.allNetworks) {
+            val link = manager.getLinkProperties(network) ?: continue
+            val name = link.interfaceName ?: continue
+            val capabilities = manager.getNetworkCapabilities(network) ?: continue
+            if (!result.containsKey(name) || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                result[name] = NetworkMetadata(link, capabilities)
+            }
+        }
+        result
+    }.getOrDefault(emptyMap())
+
+    private fun libboxInterface(iface: AndroidNetworkInterface, meta: NetworkMetadata?): NetworkInterface {
         val result = NetworkInterface()
         result.setName(iface.name)
         result.setIndex(iface.index)
         optional { result.setMTU(iface.mtu) }
-        result.setFlags(interfaceFlags(iface))
-        result.setType(interfaceType(iface))
-        result.setMetered(false)
+        val capabilities = meta?.capabilities
+        val link = meta?.linkProperties
+        var flags = interfaceFlags(iface)
+        if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
+            flags = flags or OsConstants.IFF_UP or OsConstants.IFF_RUNNING
+        }
+        result.setFlags(flags)
+        result.setType(capabilities?.let { interfaceType(it, iface) } ?: interfaceType(iface))
+        val metered = capabilities != null &&
+            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+        result.setMetered(metered)
         result.setAddresses(Strings(iface.interfaceAddresses.mapNotNull { prefixString(it) }))
-        result.setDNSServer(Strings(emptyList()))
-        result.setGateway(Strings(emptyList()))
+        val dnsServers = link?.dnsServers?.mapNotNull { it.hostAddress }.orEmpty()
+        val gateways = link?.routes
+            ?.filter { it.destination.prefixLength == 0 }
+            ?.mapNotNull { it.gateway }
+            ?.filterNot { it.isAnyLocalAddress }
+            ?.mapNotNull { it.hostAddress }
+            .orEmpty()
+        result.setDNSServer(Strings(dnsServers))
+        result.setGateway(Strings(gateways))
         return result
+    }
+
+    private fun interfaceType(capabilities: NetworkCapabilities, iface: AndroidNetworkInterface): Int = when {
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> Libbox.InterfaceTypeWIFI
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> Libbox.InterfaceTypeCellular
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Libbox.InterfaceTypeEthernet
+        else -> interfaceType(iface)
     }
 
     private inline fun optional(block: () -> Unit) {
@@ -401,39 +517,61 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     override fun sendNotification(notification: LibboxNotification) = Unit
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
-        // registerDefaultNetworkCallback landed in Android 7. On older releases
-        // the engine falls back to its own interface selection; there is no
-        // supported way to observe the default network there.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val manager = connectivityManager
+        // Seed the active physical network synchronously when available so
+        // sing-box has an upstream default interface before the first callback.
+        manager.activeNetwork?.let { active ->
+            reportDefaultInterface(manager, active, listener)
+        }
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = reportDefaultInterface(manager, network, listener)
+            override fun onAvailable(network: Network) =
+                reportDefaultInterface(manager, network, listener)
 
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
                 reportDefaultInterface(manager, network, listener)
 
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) =
+                reportDefaultInterface(manager, network, listener)
+
             override fun onLost(network: Network) {
-                // A VPN network going away must not wipe the physical interface
-                // the engine is dialling through.
                 if (reportedDefaultNetworks[listener] != network) return
                 reportedDefaultNetworks.remove(listener)
-                listener.updateDefaultInterface("", 0, false, false)
+                if (currentPhysicalNetwork == network) {
+                    currentPhysicalNetwork = null
+                }
+                // libbox treats interfaceIndex == -1 as "no default interface".
+                listener.updateDefaultInterface("", -1, false, false)
             }
         }
         defaultInterfaceCallbacks[listener] = callback
-        runCatching { manager.registerDefaultNetworkCallback(callback) }
-            .onFailure { Log.e(TAG, "could not monitor the default network", it) }
+        // Request a non-VPN internet network on Android 9+: registerDefaultNetworkCallback
+        // reports our own VPN tun as the default network once establish() succeeds.
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .build()
+        runCatching {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+                    manager.registerBestMatchingNetworkCallback(request, callback, ensureDefaultNetworkHandler())
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P ->
+                    manager.requestNetwork(request, callback, ensureDefaultNetworkHandler())
+                else ->
+                    manager.registerDefaultNetworkCallback(callback)
+            }
+        }.onFailure {
+            defaultInterfaceCallbacks.remove(listener)
+            Log.e(TAG, "could not monitor the default network", it)
+        }
     }
 
     /**
-     * Tells the engine which interface and index the default network uses.
+     * Tells the engine which physical interface and index carries upstream traffic.
      *
-     * The metered flag matters: the engine avoids expensive paths for its own
-     * connections when it can. The VPN flag matters more: without it, the tun
-     * Android makes default is treated as a physical upstream and the engine
-     * loops its own node connection back into the tunnel. A network announced
-     * without a name is skipped rather than reported as an empty interface the
-     * engine would bind to.
+     * VPN networks are always skipped (libbox's 4th parameter is `isConstrained`,
+     * not `isVpn`). A network without a resolvable interface name or index is
+     * skipped rather than handed to the engine.
      */
     private fun reportDefaultInterface(
         manager: ConnectivityManager,
@@ -446,14 +584,10 @@ class LibboxVpnService : VpnService(), PlatformInterface {
             val capabilities = manager.getNetworkCapabilities(network)
             val isVpn = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
             val update = TunPlan.defaultInterfaceUpdate(name, isVpn) ?: return
-            val index = AndroidNetworkInterface.getByName(update.name)?.index ?: 0
+            val index = AndroidNetworkInterface.getByName(update.name)?.index ?: return
             val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
-            // The last argument is "this is a VPN". Reporting the tun with it
-            // unset let the engine adopt its own tunnel as the upstream NIC,
-            // because an Android VPN is only accepted as upstream when the
-            // config asks for it (`route.override_android_vpn`). The result was
-            // a connected tunnel that carried nothing on every app.
-            listener.updateDefaultInterface(update.name, index, metered, update.isVpn)
+            currentPhysicalNetwork = network
+            listener.updateDefaultInterface(update.name, index, metered, update.isConstrained)
             reportedDefaultNetworks[listener] = network
         }.onFailure { Log.w(TAG, "could not report the default interface", it) }
     }
@@ -521,7 +655,142 @@ class LibboxVpnService : VpnService(), PlatformInterface {
 
     override fun readWIFIState(): WIFIState? = null
 
-    override fun localDNSTransport(): LocalDNSTransport? = null
+    override fun localDNSTransport(): LocalDNSTransport = localDnsTransport
+
+    private val localDnsTransport = object : LocalDNSTransport {
+        private val rcodeNxDomain = 3
+
+        override fun raw(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+        override fun exchange(ctx: ExchangeContext, message: ByteArray) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                error("raw local DNS exchange requires Android 10+")
+            }
+            val network = currentPhysicalNetwork ?: error("missing default physical network")
+            exchangeApi29(network, ctx, message)
+        }
+
+        override fun lookup(ctx: ExchangeContext, network: String, domain: String) {
+            val physical = currentPhysicalNetwork ?: error("missing default physical network")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                lookupApi29(physical, ctx, network, domain)
+            } else {
+                val answer = try {
+                    physical.getAllByName(domain)
+                } catch (_: UnknownHostException) {
+                    ctx.errorCode(rcodeNxDomain)
+                    return
+                }
+                ctx.success(answer.mapNotNull { it.hostAddress }.joinToString("\n"))
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun exchangeApi29(network: Network, ctx: ExchangeContext, message: ByteArray) {
+        val latch = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val signal = CancellationSignal()
+        ctx.onCancel(object : LibboxFunc {
+            override fun invoke() {
+                signal.cancel()
+                failure.compareAndSet(null, CancellationException("DNS query cancelled"))
+                latch.countDown()
+            }
+        })
+        val callback = object : DnsResolver.Callback<ByteArray> {
+            override fun onAnswer(answer: ByteArray, rcode: Int) {
+                if (rcode == 0) ctx.rawSuccess(answer) else ctx.errorCode(rcode)
+                latch.countDown()
+            }
+
+            override fun onError(error: DnsResolver.DnsException) {
+                val cause = error.cause
+                if (cause is ErrnoException) {
+                    ctx.errnoCode(cause.errno)
+                } else {
+                    failure.compareAndSet(null, error)
+                }
+                latch.countDown()
+            }
+        }
+        DnsResolver.getInstance().rawQuery(
+            network,
+            message,
+            DnsResolver.FLAG_NO_RETRY,
+            dnsExecutor,
+            signal,
+            callback,
+        )
+        latch.await()
+        failure.get()?.let { throw it }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun lookupApi29(
+        physical: Network,
+        ctx: ExchangeContext,
+        network: String,
+        domain: String,
+    ) {
+        val latch = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        val signal = CancellationSignal()
+        ctx.onCancel(object : LibboxFunc {
+            override fun invoke() {
+                signal.cancel()
+                failure.compareAndSet(null, CancellationException("DNS lookup cancelled"))
+                latch.countDown()
+            }
+        })
+        val callback = object : DnsResolver.Callback<Collection<InetAddress>> {
+            override fun onAnswer(answer: Collection<InetAddress>, rcode: Int) {
+                if (rcode == 0) {
+                    ctx.success(answer.mapNotNull { it.hostAddress }.joinToString("\n"))
+                } else {
+                    ctx.errorCode(rcode)
+                }
+                latch.countDown()
+            }
+
+            override fun onError(error: DnsResolver.DnsException) {
+                val cause = error.cause
+                if (cause is ErrnoException) {
+                    ctx.errnoCode(cause.errno)
+                } else {
+                    failure.compareAndSet(null, error)
+                }
+                latch.countDown()
+            }
+        }
+        val type = when {
+            network.endsWith("4") -> DnsResolver.TYPE_A
+            network.endsWith("6") -> DnsResolver.TYPE_AAAA
+            else -> null
+        }
+        if (type != null) {
+            DnsResolver.getInstance().query(
+                physical,
+                domain,
+                type,
+                DnsResolver.FLAG_NO_RETRY,
+                dnsExecutor,
+                signal,
+                callback,
+            )
+        } else {
+            DnsResolver.getInstance().query(
+                physical,
+                domain,
+                DnsResolver.FLAG_NO_RETRY,
+                dnsExecutor,
+                signal,
+                callback,
+            )
+        }
+        latch.await()
+        failure.get()?.let { throw it }
+    }
 
     /** Android has no POSIX shell or bridge surface for the engine to use. */
     override fun usePlatformShell() = false

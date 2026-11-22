@@ -7,6 +7,7 @@
          a SecurityException, the engine never receives a default interface,
          and the tunnel comes up while every outbound connection fails. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- `systemExempted` is the foreground service type Android provides for
          VpnService apps. `specialUse` would work too, but it is the type that

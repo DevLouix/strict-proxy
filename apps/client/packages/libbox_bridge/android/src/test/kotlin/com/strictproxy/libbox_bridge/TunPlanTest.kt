@@ -43,20 +43,16 @@ class TunPlanTest {
     }
 
     @Test
-    fun `the default-interface update carries the vpn flag`() {
-        // The engine only refuses to use its own tun as the upstream NIC when
-        // it is told the interface is a VPN; the flag was previously hard-coded
-        // to false, which made every request loop into the tunnel.
+    fun `vpn interfaces are ignored as default upstream updates`() {
+        // libbox has no isVpn flag on updateDefaultInterface (the 4th arg is
+        // isConstrained), so VPN interfaces must never be reported as upstream.
+        assertEquals(null, TunPlan.defaultInterfaceUpdate("tun0", isVpn = true))
         assertEquals(
-            TunPlan.DefaultInterface("tun0", isVpn = true),
-            TunPlan.defaultInterfaceUpdate("tun0", isVpn = true),
-        )
-        assertEquals(
-            TunPlan.DefaultInterface("wlan0", isVpn = false),
+            TunPlan.DefaultInterface("wlan0", isConstrained = false),
             TunPlan.defaultInterfaceUpdate("wlan0", isVpn = false),
         )
         assertEquals(null, TunPlan.defaultInterfaceUpdate(null, isVpn = false))
-        assertEquals(null, TunPlan.defaultInterfaceUpdate("   ", isVpn = true))
+        assertEquals(null, TunPlan.defaultInterfaceUpdate("   ", isVpn = false))
     }
 
     @Test
@@ -79,5 +75,18 @@ class TunPlanTest {
         val advertised = listOf(TunPlan.Prefix("10.0.0.0", 8), TunPlan.Prefix("192.168.0.0", 16))
 
         assertEquals(advertised, TunPlan.routes(advertised, "0.0.0.0", hasAddress = true))
+    }
+
+    @Test
+    fun `pre-API-33 routing prefers engine routeRanges over default fallback`() {
+        val ranges = listOf(TunPlan.Prefix("1.0.0.0", 8), TunPlan.Prefix("11.0.0.0", 8))
+        assertEquals(
+            ranges,
+            TunPlan.routesForPreApi33(ranges, emptyList(), "0.0.0.0", hasAddress = true),
+        )
+        assertEquals(
+            listOf(TunPlan.Prefix("0.0.0.0", 0)),
+            TunPlan.routesForPreApi33(emptyList(), emptyList(), "0.0.0.0", hasAddress = true),
+        )
     }
 }

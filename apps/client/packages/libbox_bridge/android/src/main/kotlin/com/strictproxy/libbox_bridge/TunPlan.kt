@@ -17,18 +17,24 @@ internal object TunPlan {
     data class Prefix(val address: String, val prefix: Int)
 
     /**
-     * The default-interface announcement handed to the engine.
+     * The physical default-interface announcement handed to the engine.
      *
-     * [isVpn] is not decoration: the engine accepts a VPN interface as an
-     * upstream NIC only when the config opts in with
-     * `route.override_android_vpn`. Dropping the flag made Android's own tun
-     * look like a physical network and the engine dialled the node into it.
+     * libbox's `InterfaceUpdateListener.updateDefaultInterface` takes
+     * `(interfaceName, interfaceIndex, isExpensive, isConstrained)` — the 4th
+     * argument is `isConstrained`, not `isVpn`. Reporting a VPN interface here
+     * makes sing-box adopt its own `tun0` as the upstream default interface,
+     * which `selectInterfaces` then filters out as `MyInterfaces`, failing
+     * every outbound dial with `no available network interface`.
      */
-    data class DefaultInterface(val name: String, val isVpn: Boolean)
+    data class DefaultInterface(val name: String, val isConstrained: Boolean = false)
 
-    /** The announcement to send for [interfaceName], or null when unusable. */
-    fun defaultInterfaceUpdate(interfaceName: String?, isVpn: Boolean): DefaultInterface? =
-        if (interfaceName.isNullOrBlank()) null else DefaultInterface(interfaceName, isVpn)
+    /** The announcement to send for [interfaceName], or null when unusable or a VPN. */
+    fun defaultInterfaceUpdate(
+        interfaceName: String?,
+        isVpn: Boolean,
+        isConstrained: Boolean = false,
+    ): DefaultInterface? =
+        if (isVpn || interfaceName.isNullOrBlank()) null else DefaultInterface(interfaceName, isConstrained)
 
     /**
      * Resolvers to put on the VPN interface when the engine reports none.
@@ -72,6 +78,22 @@ internal object TunPlan {
         if (!hasAddress || fallback == null) return emptyList()
         return listOf(Prefix(fallback, 0))
     }
+
+    /**
+     * Routes to hand `VpnService.Builder` on Android < 13 (before `excludeRoute`).
+     *
+     * With `strict_route: true`, libbox leaves [advertised] empty and puts the
+     * computed split ranges (with LAN/reserved exclusions subtracted) in
+     * [routeRanges]. Prefer [routeRanges] when present so private/LAN traffic
+     * does not get pulled into the tunnel.
+     */
+    fun routesForPreApi33(
+        routeRanges: List<Prefix>,
+        advertised: List<Prefix>,
+        fallback: String?,
+        hasAddress: Boolean,
+    ): List<Prefix> =
+        if (routeRanges.isNotEmpty()) routeRanges else routes(advertised, fallback, hasAddress)
 
     /** Largest MTU this app will put on a VPN interface. */
     const val maxMtu = 1400
