@@ -30,7 +30,10 @@ async function paidUser(deviceId = 'device-a') {
   // Standard = three device seats.
   await h.setTier(user.id, 'standard');
   const tokens = await h.login(user.email, user.password, deviceId);
-  return { user, ...tokens };
+  // Explicit: the login response also carries a `user` object, and spreading
+  // it here replaces the seeded user with one that has no password — which made
+  // a second login for the same account send no credentials at all.
+  return { user, accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
 }
 
 async function claim(token: string, deviceId: string) {
