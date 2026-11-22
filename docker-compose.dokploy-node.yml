@@ -9,7 +9,7 @@
 #   Adding an exit node to a Dokploy deployment. Create a SEPARATE Dokploy
 #   Compose service for it on the exit VPS. This file is not part of, and must
 #   not be merged into, docker-compose.dokploy.yml: the controller does not need
-#   TUN/NET_ADMIN, and nodes should not share the controller's IP or failure
+#   host networking, and nodes should not share the controller's IP or failure
 #   domain.
 #
 # IMAGE
@@ -34,7 +34,9 @@
 # AFTER ENROLLMENT
 #   The one-time token is spent. Remove NODE_ENROLLMENT_TOKEN and redeploy. The
 #   permanent identity (node id, HMAC secret, REALITY keypair) lives in the
-#   `nodeidentity` volume, not in the environment.
+#   `nodeidentity` volume, not in the environment. NODE_ID and NODE_HMAC_SECRET
+#   are override slots rather than settings: leave them empty, and set them only
+#   when the controller's secret was rotated and the agent's 401 names them.
 #
 # WHAT IT PUBLISHES
 #   Host networking: TCP and UDP on NODE_TUNNEL_PORT (default 443). Open both on
@@ -50,7 +52,9 @@
 #   - expose the stats listener.
 #
 # REQUIREMENTS
-#   A public IPv4, /dev/net/tun, NET_ADMIN, and inbound TCP+UDP 443.
+#   A public IPv4 and inbound TCP+UDP on the tunnel port. No /dev/net/tun and no
+#   NET_ADMIN: the node is a userspace VLESS+REALITY proxy with a `direct`
+#   outbound, so it never opens a TUN device and needs no extra capability.
 #
 # STEP BY STEP: docs/DOKPLOY.md section 5.  FILE MAP: docs/FILE-MAP.md
 # =============================================================================
@@ -61,15 +65,16 @@ services:
     restart: unless-stopped
     init: true
     network_mode: host
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun:/dev/net/tun
     environment:
       CONTROLLER_URL: ${NODE_CONTROLLER_URL:?NODE_CONTROLLER_URL is required — the controller's public https URL}
       NODE_ENROLLMENT_TOKEN: ${NODE_ENROLLMENT_TOKEN:-}
+      # Empty means "use the identity in the nodeidentity volume", which is what
+      # enrolled the node. Set these only to override it, e.g. after a rotation.
+      NODE_ID: ${NODE_ID:-}
+      NODE_HMAC_SECRET: ${NODE_HMAC_SECRET:-}
       NODE_PUBLIC_IP: ${NODE_PUBLIC_IP:-}
       NODE_PUBLIC_IP_ECHO_URL: ${NODE_PUBLIC_IP_ECHO_URL:-https://api.ipify.org}
+      NODE_PUBLIC_IP_DETECT_INTERVAL_SECONDS: ${NODE_PUBLIC_IP_DETECT_INTERVAL_SECONDS:-600}
       NODE_TUNNEL_PORT: ${NODE_TUNNEL_PORT:-443}
       NODE_HOSTNAME: ${NODE_HOSTNAME:?NODE_HOSTNAME is required — this VPS's public hostname}
       NODE_LABEL: ${NODE_LABEL:-}
@@ -80,10 +85,15 @@ services:
       SING_BOX_CONFIG_PATH: /etc/sing-box/config.json
       SING_BOX_STATS_API_LISTEN: 127.0.0.1:10085
       SING_BOX_STATS_PROTO: /app/apps/node-agent/src/v2rayapi/stats.proto
+      # Keep this at 50 or below. Log lines only leave on a heartbeat, and the
+      # console's Logs button waits 55s for the reply that asks for them, so a
+      # longer interval makes that button time out on every click.
       HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-30}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-60}
       USAGE_INTERVAL_SECONDS: ${USAGE_INTERVAL_SECONDS:-60}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The healthcheck below reads this same variable, so the two cannot drift.
+      AGENT_HEALTH_PATH: /tmp/agent-healthy
     volumes:
       - nodeidentity:/var/lib/strict-proxy
     healthcheck:
@@ -93,7 +103,7 @@ services:
         - CMD
         - node
         - -e
-        - "const fs=require('fs');try{process.exit(Date.now()-fs.statSync('/tmp/agent-healthy').mtimeMs<180000?0:1)}catch{process.exit(1)}"
+        - "const fs=require('fs'),p=process.env.AGENT_HEALTH_PATH||'/tmp/agent-healthy';try{process.exit(Date.now()-fs.statSync(p).mtimeMs<180000?0:1)}catch{process.exit(1)}"
       interval: 30s
       timeout: 5s
       retries: 3

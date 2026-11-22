@@ -255,10 +255,9 @@ services:
     restart: ${NODE_AGENT_RESTART_POLICY:-unless-stopped}
     init: true
     network_mode: ${NODE_NETWORK_MODE:-host}
-    cap_add:
-      - ${NODE_NET_ADMIN_CAPABILITY:-NET_ADMIN}
-    devices:
-      - ${NODE_TUN_DEVICE:-/dev/net/tun}:/dev/net/tun
+    # No NET_ADMIN and no /dev/net/tun: the rendered sing-box config is a
+    # VLESS+REALITY inbound with a `direct` outbound, so the agent never opens a
+    # TUN device. Host networking is all it needs.
     environment:
       CONTROLLER_URL: ${NODE_CONTROLLER_URL:-http://127.0.0.1:8080}
       NODE_ENROLLMENT_TOKEN: ${NODE_ENROLLMENT_TOKEN:-}

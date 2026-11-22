@@ -637,7 +637,9 @@ controller refuses to boot on `*`, and on a `localhost` `PUBLIC_APP_URL`.
 
 ### Docker node agent
 
-The node profile requires a Linux host with `/dev/net/tun` and `NET_ADMIN`:
+The node profile needs a Linux host with the tunnel port open on TCP and UDP. It
+does not need `/dev/net/tun` or `NET_ADMIN`: the agent runs sing-box as a
+userspace VLESS+REALITY listener with a `direct` outbound.
 
 ```bash
 docker compose --profile node --env-file .env.docker \\

@@ -18,7 +18,7 @@ other Compose files are for, is summarised in [FILE-MAP.md](FILE-MAP.md).
 | Piece | Where | Compose file | Needs |
 |---|---|---|---|
 | Controller + Postgres + Redis | One Dokploy server with a domain | `docker-compose.dokploy.yml` | 2 CPU / 2 GB RAM / 20 GB disk, a DNS record |
-| Node agent | Each exit VPS | `docker-compose.dokploy-node.yml` | Public IPv4, `/dev/net/tun`, `NET_ADMIN`, UDP+TCP 443 |
+| Node agent | Each exit VPS | `docker-compose.dokploy-node.yml` | Public IPv4, UDP+TCP on the tunnel port (443 by default) |
 | Flutter client | Built in GitHub Actions, installed by users | — | Android keystore, signing public key, libbox SHA |
 
 Start with the controller. A node is useless until the controller can issue it
@@ -258,9 +258,11 @@ with a warning annotation on the run. There is no enrollment-token secret on
 purpose: tokens are single-use and expire in 30 minutes, so the token only ever
 lives in the node service's environment and is removed after enrollment.
 
-Requirement: the VPS kernel must provide `/dev/net/tun`, and the container gets
-`NET_ADMIN`. On a VPS where `/dev/net/tun` is missing, ask the provider to
-enable TUN/TAP or use a different host.
+No TUN device and no `NET_ADMIN` are needed. The node runs sing-box as a
+userspace VLESS+REALITY listener with a `direct` outbound, so it accepts clients
+on a TCP+UDP port and never creates a TUN interface. A kernel without TUN/TAP
+is fine; the only host requirements are a public IPv4 and the tunnel port open
+in both protocols.
 
 ## 6. Payments and email
 

@@ -34,9 +34,4 @@ if [[ "$TLS_MODE" == managed && "$SITE" != https://* ]]; then
   exit 1
 fi
 
-if grep -Eq '^NODE_ENROLLMENT_TOKEN=.+$' "$ENV_FILE" && [[ ! -e /dev/net/tun ]]; then
-  echo 'Node deployment requires /dev/net/tun on the Linux host.' >&2
-  exit 1
-fi
-
 printf '%s\n' "server prerequisites and Compose configuration passed: $ENV_FILE"

@@ -31,8 +31,8 @@
 #   8080) through dokploy-network. `docker port` printing nothing is correct;
 #   the port to configure is the one in the Domains tab, not a host port.
 #
-# THE NODE AGENT IS NOT PART OF THIS STACK. It needs a public IP, NET_ADMIN and
-# /dev/net/tun, and belongs on each exit VPS: docker-compose.dokploy-node.yml.
+# THE NODE AGENT IS NOT PART OF THIS STACK. It needs a public IP and host
+# networking, and belongs on each exit VPS: docker-compose.dokploy-node.yml.
 #
 # REQUIREMENTS
 #   A DNS A record for the API domain, TCP 80/443 reachable (ACME), and the

@@ -817,6 +817,10 @@ export function buildRouter(ctx: Ctx): Router {
       // agent answers the heartbeat and ignores `sendLogs`, which only a build
       // from before live logs does. Reporting "it may be offline" for both made
       // a stale image look like a broken button.
+      //
+      // The floor is the build that learned the `sendLogs` reply, not the one
+      // that made the lines worth reading: a node on the older build answers
+      // every heartbeat and silently ignores the request.
       res.status(504).json(
         outcome.heartbeats === 0
           ? {
@@ -826,7 +830,7 @@ export function buildRouter(ctx: Ctx): Router {
           : {
               error:
                 'the node is heartbeating but did not send its logs: its agent build predates live logs. ' +
-                'Deploy node-agent sha-00105a6 or newer on it and redeploy the controller.',
+                'Deploy node-agent sha-08a6e51 or newer on it (sha-b40f199 is current) and redeploy the controller.',
               code: 'LOGS_UNSUPPORTED',
             },
       );

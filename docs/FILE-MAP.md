@@ -76,10 +76,11 @@ is filling in the wrong `.env` file.
 ### `docker-compose.dokploy-node.yml` — one exit VPS per node (Dokploy)
 
 - **Starts:** a single `node-agent` from the published GHCR image
-  (`ghcr.io/<owner>/strict-proxy-node-agent`), with host networking, `NET_ADMIN`,
-  and `/dev/net/tun`, so sing-box can accept VLESS+REALITY traffic and users'
-  bytes leave from that VPS's IP. Nothing is built on the exit VPS; pin
-  `NODE_AGENT_TAG=sha-<commit>` to control upgrades.
+  (`ghcr.io/<owner>/strict-proxy-node-agent`), with host networking so its
+  sing-box accepts VLESS+REALITY traffic on the tunnel port and users' bytes
+  leave from that VPS's IP. It needs no TUN device and no `NET_ADMIN`: the
+  listener is userspace with a `direct` outbound. Nothing is built on the exit
+  VPS; pin `NODE_AGENT_TAG=sha-<commit>` to control upgrades.
 - **Use when:** adding a node to a Dokploy deployment. Deploy it as its **own**
   Dokploy Compose service on the exit VPS.
 - **Env file:** paste the node section of `.env.dokploy.example` into that
