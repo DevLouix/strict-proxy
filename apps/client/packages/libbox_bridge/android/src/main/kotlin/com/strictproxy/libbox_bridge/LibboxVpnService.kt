@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.DnsResolver
 import android.net.IpPrefix
+import android.net.LinkAddress
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -15,6 +16,7 @@ import android.os.CancellationSignal
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.system.ErrnoException
 import android.system.OsConstants
 import android.util.Log
@@ -44,9 +46,12 @@ import java.net.InterfaceAddress
 import java.net.NetworkInterface as AndroidNetworkInterface
 import java.net.UnknownHostException
 import java.util.concurrent.CancellationException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -76,6 +81,9 @@ import java.util.concurrent.atomic.AtomicReference
 class LibboxVpnService : VpnService(), PlatformInterface {
     companion object {
         private const val TAG = "StrictProxyLibbox"
+        private const val DNS_QUERY_TIMEOUT_SECONDS = 10L
+        private const val INTERFACE_RETRY_ATTEMPTS = 5
+        private const val INTERFACE_RETRY_DELAY_MS = 100L
 
         /**
          * Whether the engine is packaged with this APK.
@@ -100,6 +108,16 @@ class LibboxVpnService : VpnService(), PlatformInterface {
             private set
 
         /**
+         * True while the engine is still closing its service/command server
+         * after a stop request. Waiters check both [isRunning] and this flag so
+         * Disconnect only succeeds once both the TUN fd and Go engine have shut
+         * down cleanly.
+         */
+        @Volatile
+        var isTearingDown: Boolean = false
+            internal set
+
+        /**
          * Set when the app asks for the tunnel to stop.
          *
          * A start intent can already be queued with Android when the stop
@@ -110,13 +128,13 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         private var stopRequested = false
 
         /**
-         * The live service, so a stop can also be applied from inside it.
+         * The live service, so a stop can close the TUN descriptor directly
+         * from inside the service.
          *
-         * `stopService` is the documented way to end a started service, but on
-         * the device it twice left the service and its tun alive until Android
-         * revoked the VPN from Settings — the user was told the VPN had not
-         * shut down while the key stayed in the status bar. The instance can
-         * close itself instead, which is the same teardown the system runs.
+         * While the TUN `ParcelFileDescriptor` stays open, Android's system Vpn
+         * service holds a binding to this `VpnService`, so `stopService()` and
+         * `stopSelf()` will not invoke `onDestroy()` until the TUN descriptor
+         * is closed.
          */
         @Volatile
         private var instance: LibboxVpnService? = null
@@ -133,68 +151,70 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         /**
          * Stops the tunnel and the service.
          *
-         * A service stop and not a broadcast: the system tears the service
-         * down, so `onDestroy` runs even if this process is busy or the engine
-         * is wedged, and the notification and the tun go with it. A broadcast
-         * only reached a receiver that had to still be registered and alive in
-         * this process, which is why Disconnect could leave the tunnel and its
-         * notification running.
+         * Drives teardown through the live service instance first so the TUN
+         * descriptor is closed immediately (allowing Android to unbind the
+         * `VpnService`), the engine is shut down on a dedicated thread, and
+         * `stopSelf()` destroys the service cleanly.
          */
         fun stop(context: Context) {
             stopRequested = true
-            // Both results go to the on-device log: whether the system accepted
-            // the stop is the first question a "did not shut down" report
-            // needs answered, and it is invisible from the screen otherwise.
+            val active = instance
+            if (active != null) {
+                EngineLog.append("closing the tunnel from the service")
+                active.runner.stop()
+                return
+            }
             val stopped = runCatching {
                 context.stopService(Intent(context, LibboxVpnService::class.java))
             }.onFailure {
                 EngineLog.append("stopService failed: ${it.javaClass.simpleName}: ${it.message}")
             }.getOrDefault(false)
             EngineLog.append("stopService returned $stopped")
-            // Ask the service itself as well instead of trusting that call to
-            // land. Warming it through an instance is safe whether or not the
-            // system is already tearing it down: the teardown is idempotent.
+        }
+
+        /** Fallback used when stop confirmation times out. */
+        internal fun forceStopService(context: Context) {
+            stopRequested = true
             instance?.let { service ->
-                service.main.post {
-                    EngineLog.append("closing the tunnel from the service")
-                    service.runner.stop()
-                    service.stopSelf()
-                }
+                service.closeTun()
+                service.runner.stop()
+            }
+            runCatching {
+                context.stopService(Intent(context, LibboxVpnService::class.java))
+            }.onFailure {
+                EngineLog.append("force stopService failed: ${it.javaClass.simpleName}: ${it.message}")
             }
         }
     }
 
     private lateinit var runner: BoxRunner
 
-    private val main = Handler(Looper.getMainLooper())
+    private val tunLock = Any()
+    private var tunDescriptor: ParcelFileDescriptor? = null
 
     /**
      * The engine's default-interface listeners, and the system callbacks that
      * feed them.
      *
-     * The config sets `route.auto_detect_interface`, and on Android the engine
-     * has no way to read the default route itself: the platform is expected to
-     * report which interface currently carries traffic. Leaving these as no-ops
-     * meant the engine had no default interface to bind outbound sockets to, so
-     * the tunnel came up (`connected`) and then carried nothing — the exact
-     * "connected but no internet" symptom. `getInterfaces()` alone is not a
-     * substitute: it lists interfaces, it does not say which one is the path
-     * out of the device.
+     * Concurrent maps are required because libbox registers/unregisters on Go
+     * threads while Android delivers callbacks on [defaultNetworkThread] and
+     * teardown runs on the teardown/main threads.
      */
     private val defaultInterfaceCallbacks =
-        HashMap<InterfaceUpdateListener, ConnectivityManager.NetworkCallback>()
+        ConcurrentHashMap<InterfaceUpdateListener, ConnectivityManager.NetworkCallback>()
 
     /** The physical network last reported to each listener. */
-    private val reportedDefaultNetworks = HashMap<InterfaceUpdateListener, Network>()
+    private val reportedDefaultNetworks = ConcurrentHashMap<InterfaceUpdateListener, Network>()
 
     @Volatile
     private var currentPhysicalNetwork: Network? = null
 
+    private val networkThreadLock = Any()
     private var defaultNetworkThread: HandlerThread? = null
     private var defaultNetworkHandler: Handler? = null
     private val dnsExecutor: ExecutorService = Executors.newCachedThreadPool()
 
-    private fun ensureDefaultNetworkHandler(): Handler {
+    private fun ensureDefaultNetworkHandler(): Handler = synchronized(networkThreadLock) {
         defaultNetworkHandler?.let { return it }
         val thread = HandlerThread("StrictProxyNetworkCallback").apply { start() }
         defaultNetworkThread = thread
@@ -249,16 +269,42 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         // Cleared first: a stop that arrives while this runs must not queue more
         // work onto a service the system is already destroying.
         instance = null
-        // Before the engine teardown: every stop confirmation reads this, and
-        // the tun is gone by the time this callback runs.
-        isRunning = false
+        closeTun()
+        closeAllDefaultInterfaceMonitors()
         currentPhysicalNetwork = null
-        defaultNetworkThread?.quitSafely()
-        defaultNetworkThread = null
-        defaultNetworkHandler = null
+        synchronized(networkThreadLock) {
+            defaultNetworkThread?.quitSafely()
+            defaultNetworkThread = null
+            defaultNetworkHandler = null
+        }
         dnsExecutor.shutdownNow()
         runner.destroy()
+        isRunning = false
         super.onDestroy()
+    }
+
+    /**
+     * Closes the active TUN `ParcelFileDescriptor`, removing `tun0` and
+     * releasing Android's system VPN binding immediately. Safe to call
+     * multiple times from any thread.
+     */
+    internal fun closeTun() {
+        val descriptor = synchronized(tunLock) {
+            val current = tunDescriptor
+            tunDescriptor = null
+            current
+        } ?: return
+        runCatching { descriptor.close() }
+            .onFailure { Log.w(TAG, "closing tun descriptor failed", it) }
+    }
+
+    /** Unregisters every ConnectivityManager callback owned by this service. */
+    internal fun closeAllDefaultInterfaceMonitors() {
+        val listeners = defaultInterfaceCallbacks.keys.toList()
+        for (listener in listeners) {
+            closeDefaultInterfaceMonitor(listener)
+        }
+        reportedDefaultNetworks.clear()
     }
 
     // ---------------------------------------------------------------------
@@ -347,11 +393,20 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         }
 
         val descriptor = builder.establish() ?: error("VpnService.Builder.establish returned null")
-        // The descriptor is handed to libbox, which owns it from here on: the
-        // engine closes it when the tun endpoint closes, including on reload.
-        // Keeping the ParcelFileDescriptor as well and closing it here would
-        // close an fd native code is still reading.
-        return descriptor.detachFd()
+        val previous = synchronized(tunLock) {
+            val old = tunDescriptor
+            tunDescriptor = descriptor
+            old
+        }
+        if (previous != null && previous !== descriptor) {
+            runCatching { previous.close() }
+                .onFailure { Log.w(TAG, "closing previous tun descriptor failed", it) }
+        }
+        // Return the fd WITHOUT calling detachFd(): libbox duplicates it via
+        // dup() and only ever closes its duplicate. Keeping the descriptor here
+        // lets closeTun() close the original fd on stop/destroy so Android
+        // tears down tun0 and unbinds the VpnService immediately.
+        return descriptor.fd
     }
 
     /**
@@ -384,25 +439,41 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     }
 
     /**
-     * The device's interfaces, shaped like the generated libbox iterator.
+     * The device's active interfaces, shaped like the generated libbox iterator.
      *
-     * Enumerated per call because libbox re-reads the list as networks change.
-     * Every field is filled — the engine reads the iterators unconditionally,
-     * and a null one is dereferenced in Go.
+     * Prefers Android's `ConnectivityManager.allNetworks` (matching
+     * `sing-box-for-android`) so unmanaged interfaces like `dummy0`/`lo` are
+     * excluded and `LinkProperties` supplies accurate addresses, MTU, DNS, and
+     * gateways even on Android 11+ SELinux-restricted devices. Falls back to
+     * `java.net.NetworkInterface` if `allNetworks` yields no usable entries.
      */
     override fun getInterfaces(): NetworkInterfaceIterator {
-        val interfaces = runCatching {
-            AndroidNetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-        }.getOrDefault(emptyList())
         val networkInfoByName = activeNetworkMetadataByInterface()
-        // An interface that cannot be represented is skipped: a malformed entry
-        // (null iterator fields) would abort the Go side, while a short list is
-        // just a less precise default-interface choice.
-        val items = interfaces.mapNotNull { iface ->
-            runCatching { libboxInterface(iface, networkInfoByName[iface.name]) }
-                .onFailure { Log.w(TAG, "skipping interface ${iface.name}", it) }
+        val items = ArrayList<NetworkInterface>()
+
+        for ((name, meta) in networkInfoByName) {
+            val javaIface = runCatching { AndroidNetworkInterface.getByName(name) }.getOrNull() ?: continue
+            runCatching { libboxInterface(javaIface, meta) }
+                .onFailure { Log.w(TAG, "skipping network interface $name", it) }
                 .getOrNull()
+                ?.let { items.add(it) }
         }
+
+        if (items.isEmpty()) {
+            val fallbackInterfaces = runCatching {
+                AndroidNetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            }.getOrDefault(emptyList())
+            for (iface in fallbackInterfaces) {
+                val up = runCatching { iface.isUp }.getOrDefault(false)
+                val loopback = runCatching { iface.isLoopback }.getOrDefault(false)
+                if (!up || loopback) continue
+                runCatching { libboxInterface(iface, null) }
+                    .onFailure { Log.w(TAG, "skipping fallback interface ${iface.name}", it) }
+                    .getOrNull()
+                    ?.let { items.add(it) }
+            }
+        }
+
         return NetworkInterfaces(items)
     }
 
@@ -414,7 +485,7 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     @Suppress("DEPRECATION")
     private fun activeNetworkMetadataByInterface(): Map<String, NetworkMetadata> = runCatching {
         val manager = connectivityManager
-        val result = HashMap<String, NetworkMetadata>()
+        val result = LinkedHashMap<String, NetworkMetadata>()
         for (network in manager.allNetworks) {
             val link = manager.getLinkProperties(network) ?: continue
             val name = link.interfaceName ?: continue
@@ -430,9 +501,11 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         val result = NetworkInterface()
         result.setName(iface.name)
         result.setIndex(iface.index)
-        optional { result.setMTU(iface.mtu) }
         val capabilities = meta?.capabilities
         val link = meta?.linkProperties
+        val linkMtu = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) link?.mtu ?: 0 else 0
+        val mtu = if (linkMtu > 0) linkMtu else runCatching { iface.mtu }.getOrDefault(0)
+        if (mtu > 0) optional { result.setMTU(mtu) }
         var flags = interfaceFlags(iface)
         if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
             flags = flags or OsConstants.IFF_UP or OsConstants.IFF_RUNNING
@@ -442,7 +515,13 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         val metered = capabilities != null &&
             !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
         result.setMetered(metered)
-        result.setAddresses(Strings(iface.interfaceAddresses.mapNotNull { prefixString(it) }))
+        val linkAddresses = link?.linkAddresses?.mapNotNull { linkPrefixString(it) }.orEmpty()
+        val addresses = if (linkAddresses.isNotEmpty()) {
+            linkAddresses
+        } else {
+            iface.interfaceAddresses.mapNotNull { prefixString(it) }
+        }
+        result.setAddresses(Strings(addresses))
         val dnsServers = link?.dnsServers?.mapNotNull { it.hostAddress }.orEmpty()
         val gateways = link?.routes
             ?.filter { it.destination.prefixLength == 0 }
@@ -466,6 +545,14 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         runCatching(block)
     }
 
+    private fun linkPrefixString(address: LinkAddress): String? {
+        val inet = address.address ?: return null
+        val host = inet.hostAddress?.substringBefore('%') ?: return null
+        val max = if (inet.address.size == 4) 32 else 128
+        val prefix = address.prefixLength.coerceIn(0, max)
+        return "$host/$prefix"
+    }
+
     private fun prefixString(address: InterfaceAddress): String? {
         val inet = address.address ?: return null
         val host = inet.hostAddress?.substringBefore('%') ?: return null
@@ -475,15 +562,18 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     }
 
     /**
-     * Android's `java.net.NetworkInterface` has no flags getter, so the Go
-     * `net.Flags` bits libbox expects are assembled from the public booleans.
+     * Android's `java.net.NetworkInterface` has no flags getter, so the POSIX
+     * `IFF_*` bits libbox converts in `linkFlags` are assembled from the public
+     * booleans.
      */
     private fun interfaceFlags(iface: AndroidNetworkInterface): Int {
         var flags = 0
-        if (runCatching { iface.isUp }.getOrDefault(false)) flags = flags or 0x1 or 0x40 // UP | RUNNING
-        if (runCatching { iface.isLoopback }.getOrDefault(false)) flags = flags or 0x8
-        if (runCatching { iface.isPointToPoint }.getOrDefault(false)) flags = flags or 0x10
-        if (runCatching { iface.supportsMulticast() }.getOrDefault(false)) flags = flags or 0x1000
+        if (runCatching { iface.isUp }.getOrDefault(false)) {
+            flags = flags or OsConstants.IFF_UP or OsConstants.IFF_RUNNING
+        }
+        if (runCatching { iface.isLoopback }.getOrDefault(false)) flags = flags or OsConstants.IFF_LOOPBACK
+        if (runCatching { iface.isPointToPoint }.getOrDefault(false)) flags = flags or OsConstants.IFF_POINTOPOINT
+        if (runCatching { iface.supportsMulticast() }.getOrDefault(false)) flags = flags or OsConstants.IFF_MULTICAST
         return flags
     }
 
@@ -516,29 +606,63 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     /** StrictProxy shows its own foreground notification; the engine's is unused. */
     override fun sendNotification(notification: LibboxNotification) = Unit
 
+    @Suppress("DEPRECATION")
+    private fun findPhysicalNetwork(manager: ConnectivityManager): Network? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val active = manager.activeNetwork
+            val caps = active?.let { manager.getNetworkCapabilities(it) }
+            if (active != null &&
+                caps != null &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            ) {
+                return active
+            }
+        }
+        var fallback: Network? = null
+        for (network in manager.allNetworks) {
+            val caps = manager.getNetworkCapabilities(network) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            ) {
+                return network
+            }
+            if (fallback == null) fallback = network
+        }
+        return fallback
+    }
+
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val manager = connectivityManager
         // Seed the active physical network synchronously when available so
-        // sing-box has an upstream default interface before the first callback.
-        manager.activeNetwork?.let { active ->
-            reportDefaultInterface(manager, active, listener)
+        // sing-box has an upstream default interface before the first callback,
+        // even during a reload when activeNetwork points at our own VPN.
+        findPhysicalNetwork(manager)?.let { physical ->
+            reportDefaultInterface(manager, physical, listener, allowRetry = false)
         }
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) =
-                reportDefaultInterface(manager, network, listener)
+                reportDefaultInterface(manager, network, listener, allowRetry = true)
 
             override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
-                reportDefaultInterface(manager, network, listener)
+                reportDefaultInterface(manager, network, listener, allowRetry = false)
 
             override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) =
-                reportDefaultInterface(manager, network, listener)
+                reportDefaultInterface(manager, network, listener, allowRetry = false)
 
             override fun onLost(network: Network) {
                 if (reportedDefaultNetworks[listener] != network) return
                 reportedDefaultNetworks.remove(listener)
                 if (currentPhysicalNetwork == network) {
                     currentPhysicalNetwork = null
+                }
+                val replacement = findPhysicalNetwork(manager)
+                if (replacement != null && replacement != network) {
+                    reportDefaultInterface(manager, replacement, listener, allowRetry = false)
+                    return
                 }
                 // libbox treats interfaceIndex == -1 as "no default interface".
                 listener.updateDefaultInterface("", -1, false, false)
@@ -550,6 +674,7 @@ class LibboxVpnService : VpnService(), PlatformInterface {
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
         runCatching {
             when {
@@ -570,26 +695,43 @@ class LibboxVpnService : VpnService(), PlatformInterface {
      * Tells the engine which physical interface and index carries upstream traffic.
      *
      * VPN networks are always skipped (libbox's 4th parameter is `isConstrained`,
-     * not `isVpn`). A network without a resolvable interface name or index is
-     * skipped rather than handed to the engine.
+     * not `isVpn`). When invoked from an `onAvailable` callback on the background
+     * handler thread, briefly retries if `LinkProperties` or the kernel interface
+     * index has not settled yet.
      */
     private fun reportDefaultInterface(
         manager: ConnectivityManager,
         network: Network,
         listener: InterfaceUpdateListener,
+        allowRetry: Boolean,
     ) {
         runCatching {
-            val link = manager.getLinkProperties(network) ?: return
-            val name = link.interfaceName ?: return
-            val capabilities = manager.getNetworkCapabilities(network)
-            val isVpn = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
-            val update = TunPlan.defaultInterfaceUpdate(name, isVpn) ?: return
-            val index = AndroidNetworkInterface.getByName(update.name)?.index ?: return
-            val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
-            currentPhysicalNetwork = network
-            listener.updateDefaultInterface(update.name, index, metered, update.isConstrained)
-            reportedDefaultNetworks[listener] = network
-        }.onFailure { Log.w(TAG, "could not report the default interface", it) }
+            val attempts = if (allowRetry) INTERFACE_RETRY_ATTEMPTS else 1
+            for (attempt in 0 until attempts) {
+                if (isTearingDown || !isRunning) return
+                val link = manager.getLinkProperties(network)
+                val name = link?.interfaceName
+                val capabilities = manager.getNetworkCapabilities(network)
+                val isVpn = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+                if (isVpn) return
+                val update = TunPlan.defaultInterfaceUpdate(name, isVpn = false)
+                val index = update?.let { AndroidNetworkInterface.getByName(it.name)?.index }
+                if (update != null && index != null) {
+                    val metered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == false
+                    currentPhysicalNetwork = network
+                    listener.updateDefaultInterface(update.name, index, metered, update.isConstrained)
+                    reportedDefaultNetworks[listener] = network
+                    return
+                }
+                if (attempt + 1 < attempts) {
+                    Thread.sleep(INTERFACE_RETRY_DELAY_MS)
+                }
+            }
+        }.onFailure {
+            if (it !is InterruptedException) {
+                Log.w(TAG, "could not report the default interface", it)
+            }
+        }
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
@@ -662,16 +804,28 @@ class LibboxVpnService : VpnService(), PlatformInterface {
 
         override fun raw(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
+        private fun resolvePhysicalNetwork(): Network {
+            currentPhysicalNetwork?.let { return it }
+            return findPhysicalNetwork(connectivityManager)?.also {
+                currentPhysicalNetwork = it
+            } ?: error("missing default physical network")
+        }
+
         override fun exchange(ctx: ExchangeContext, message: ByteArray) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                 error("raw local DNS exchange requires Android 10+")
             }
-            val network = currentPhysicalNetwork ?: error("missing default physical network")
-            exchangeApi29(network, ctx, message)
+            if (dnsExecutor.isShutdown) {
+                throw CancellationException("VPN service is shutting down")
+            }
+            exchangeApi29(resolvePhysicalNetwork(), ctx, message)
         }
 
         override fun lookup(ctx: ExchangeContext, network: String, domain: String) {
-            val physical = currentPhysicalNetwork ?: error("missing default physical network")
+            if (dnsExecutor.isShutdown) {
+                throw CancellationException("VPN service is shutting down")
+            }
+            val physical = resolvePhysicalNetwork()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 lookupApi29(physical, ctx, network, domain)
             } else {
@@ -722,7 +876,10 @@ class LibboxVpnService : VpnService(), PlatformInterface {
             signal,
             callback,
         )
-        latch.await()
+        if (!latch.await(DNS_QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            signal.cancel()
+            throw TimeoutException("local DNS query timed out")
+        }
         failure.get()?.let { throw it }
     }
 
@@ -788,7 +945,10 @@ class LibboxVpnService : VpnService(), PlatformInterface {
                 callback,
             )
         }
-        latch.await()
+        if (!latch.await(DNS_QUERY_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            signal.cancel()
+            throw TimeoutException("local DNS lookup timed out")
+        }
         failure.get()?.let { throw it }
     }
 

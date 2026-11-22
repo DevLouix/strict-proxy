@@ -41,7 +41,7 @@ void main() {
     expect(local['type'], 'local');
 
     expect(dns['final'], 'remote');
-    expect(dns['strategy'], 'prefer_ipv4');
+    expect(dns['strategy'], 'ipv4_only');
   });
 
   // `block`/`dns` outbounds were removed in favour of rule actions in 1.12; a
@@ -106,7 +106,8 @@ void main() {
       rules.any((rule) =>
           rule['network'] == 'udp' &&
           rule['port'] == 443 &&
-          rule['action'] == 'reject'),
+          rule['action'] == 'reject' &&
+          rule['no_drop'] == true),
       isTrue,
     );
   });
@@ -150,12 +151,12 @@ void main() {
     expect(tags, contains(route['default_domain_resolver']));
   });
 
-  test('the normal datapath keeps the system stack', () {
+  test('the normal datapath uses gVisor with strict routing', () {
     final inbound =
         (buildSingBoxTunConfig(endpoint())['inbounds'] as List).first as Map<String, dynamic>;
 
-    expect(inbound['stack'], 'mixed');
+    expect(inbound['stack'], 'gvisor');
     expect(inbound['strict_route'], isTrue);
-    expect(inbound['mtu'], isNotNull, reason: 'the MTU is never left to the engine default');
+    expect(inbound['mtu'], tunMtu, reason: 'the MTU is never left to the engine default');
   });
 }

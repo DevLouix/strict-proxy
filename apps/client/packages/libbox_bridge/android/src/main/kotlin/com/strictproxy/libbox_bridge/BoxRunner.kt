@@ -18,7 +18,11 @@ import io.nekohasekai.libbox.SetupOptions
 import io.nekohasekai.libbox.SystemProxyStatus
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Runs the engine for one `VpnService` instance.
@@ -42,6 +46,7 @@ internal class BoxRunner(
         private const val TAG = "StrictProxyLibbox"
         private const val CHANNEL_ID = "strict_proxy_vpn"
         private const val NOTIFICATION_ID = 48118
+        private const val TEARDOWN_WAIT_SECONDS = 3L
 
         /** App -> service: stop the tunnel and the service. */
         const val ACTION_STOP = "com.strictproxy.libbox.STOP"
@@ -59,14 +64,31 @@ internal class BoxRunner(
 
     private val main = Handler(Looper.getMainLooper())
 
-    /** One thread for start/stop, so a stop cannot overtake a start. */
-    private val worker = Executors.newSingleThreadExecutor()
+    /** Serializes engine starts/reloads on a daemon thread. */
+    private val worker = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "StrictProxyEngine").apply { isDaemon = true }
+    }
 
-    /** The engine's command server; `null` until the first start. */
+    /**
+     * Separate daemon executor for engine teardown so `closeService()` can run
+     * concurrently with and interrupt an in-flight `startOrReloadService()`
+     * instead of queuing behind it.
+     */
+    private val teardownExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "StrictProxyTeardown").apply { isDaemon = true }
+    }
+
+    private val serverLock = Any()
+
+    /** The engine's command server; `null` until the first start or after teardown. */
     private var commandServer: CommandServer? = null
-    private var running = false
-    private var lastConfig: String? = null
-    private var foreground = false
+    private val pendingTeardown = AtomicReference<Future<*>?>(null)
+    private val generation = AtomicLong(0)
+
+    @Volatile private var running = false
+    @Volatile private var lastConfig: String? = null
+    @Volatile private var foreground = false
+    @Volatile private var destroyed = false
 
     /**
      * Set when a stop was requested, so a start still running on [worker] cannot
@@ -84,7 +106,9 @@ internal class BoxRunner(
     /** A start intent arrived. */
     fun begin(config: String?) {
         // An explicit start is newer than any stop still in flight.
+        val gen = generation.incrementAndGet()
         stopRequested = false
+        EngineLog.append("--- new tunnel session ---")
         EngineLog.append("engine start requested")
         if (config.isNullOrBlank()) {
             fail("missing libbox configuration")
@@ -105,21 +129,29 @@ internal class BoxRunner(
             return
         }
         publish(BoxStatus.CONNECTING)
-        worker.execute { startEngine(config) }
+        worker.execute { startEngine(config, gen) }
     }
 
-    private fun startEngine(config: String) {
-        if (stopRequested) return
+    private fun startEngine(config: String, gen: Long) {
+        if (stopRequested || generation.get() != gen) return
+        // Wait briefly for any prior teardown to release the command-server
+        // socket before creating a fresh server on the same base path.
+        pendingTeardown.get()?.let { teardown ->
+            runCatching { teardown.get(TEARDOWN_WAIT_SECONDS, TimeUnit.SECONDS) }
+        }
+        if (stopRequested || generation.get() != gen) return
         try {
-            val server = commandServer ?: newCommandServer()
+            val server = synchronized(serverLock) {
+                if (stopRequested || generation.get() != gen) return
+                commandServer ?: newCommandServer()
+            }
             // A different configuration (another node, for instance) is applied
             // in place: the tun device and the Go runtime stay up.
             server.startOrReloadService(config, OverrideOptions())
             // A disconnect that arrived while the engine was starting wins: the
             // user asked for the tunnel to be down, not to come back. Publishing
             // CONNECTED here would also overwrite the state the UI already left.
-            if (stopRequested) {
-                closeService()
+            if (stopRequested || generation.get() != gen) {
                 return
             }
             running = true
@@ -127,8 +159,11 @@ internal class BoxRunner(
             publish(BoxStatus.CONNECTED)
         } catch (error: Throwable) {
             lastConfig = null
+            if (stopRequested || generation.get() != gen) {
+                // Closing the service intentionally interrupts an in-flight start.
+                return
+            }
             Log.e(TAG, "libbox failed to start", error)
-            closeService()
             fail(describeFailure(error))
         }
     }
@@ -148,8 +183,8 @@ internal class BoxRunner(
             .ifBlank { "libbox failed to start" }
 
     /**
-     * Creates the process-wide command server and starts its control listener.
-     * Every later connect only reloads the service through it.
+     * Creates the command server and starts its control listener. Caller must
+     * hold [serverLock].
      */
     private fun newCommandServer(): CommandServer {
         prepareEngine()
@@ -198,93 +233,146 @@ internal class BoxRunner(
     /**
      * User asked to disconnect, from the app or the notification.
      *
-     * Only [DISCONNECTING] is published here: the tunnel and its interface are
-     * still up until the service is destroyed and [destroy] runs. Announcing
-     * "disconnected" at this point is what left the VPN key in the status bar
-     * while the device had no working traffic.
+     * Closes the TUN descriptor immediately so Android releases the `VpnService`
+     * binding and removes the status-bar VPN key, then tears down the Go engine
+     * on [teardownExecutor] and calls `stopSelf()` so `onDestroy()` runs.
      */
     fun stop() {
-        stopRequested = true
-        running = false
-        lastConfig = null
         EngineLog.append("tunnel stop requested")
-        main.post {
-            publish(BoxStatus.DISCONNECTING)
-            // The notification must go even if closing the engine is slow.
-            leaveForeground()
-            service.stopSelf()
-        }
+        teardownAsync(
+            finalState = BoxStatus.DISCONNECTED,
+            finalMessage = null,
+            announceDisconnecting = true,
+            stopSelf = true,
+        )
     }
 
     /** Another app took over the VPN, or consent was withdrawn in Settings. */
     fun revoke() {
         EngineLog.append("VPN permission revoked by Android")
-        worker.execute {
-            closeService()
-            lastConfig = null
-            main.post {
-                leaveForeground()
-                publish(
-                    BoxStatus.ERROR,
-                    "Another app took over the VPN, so StrictProxy stopped. Turn StrictProxy back on to reconnect.",
-                )
-                service.stopSelf()
-            }
-        }
+        teardownAsync(
+            finalState = BoxStatus.ERROR,
+            finalMessage = "Another app took over the VPN, so StrictProxy stopped. Turn StrictProxy back on to reconnect.",
+            announceDisconnecting = false,
+            stopSelf = true,
+        )
     }
 
     fun destroy() {
+        destroyed = true
         stopRequested = true
         running = false
+        lastConfig = null
         EngineLog.append("VPN service destroyed")
-        // Main-thread work first: the notification must not outlive the stop.
+        // Main-thread work first: the notification and TUN must not outlive the stop.
         leaveForeground()
-        // Closing the engine can wait on the Go side, and blocking `onDestroy` is
-        // an ANR at exactly the moment the tunnel is supposed to disappear. The
-        // worker is drained instead of interrupted so the queued close still runs.
-        // A command server created for this service cannot be reused by the next
-        // one, which builds its own.
-        val closing = commandServer
-        commandServer = null
-        runCatching {
-            worker.execute {
-                closeEngineService(closing)
-                runCatching { closing?.close() }
-                    .onFailure { Log.w(TAG, "libbox command server close failed", it) }
+        service.closeTun()
+        service.closeAllDefaultInterfaceMonitors()
+        val closing = takeCommandServer()
+        if (closing != null) {
+            LibboxVpnService.isTearingDown = true
+            runCatching {
+                teardownExecutor.execute {
+                    try {
+                        closeEngineServer(closing)
+                    } finally {
+                        LibboxVpnService.isTearingDown = false
+                    }
+                }
+            }.onFailure {
+                LibboxVpnService.isTearingDown = false
             }
-            worker.shutdown()
         }
-        // The service is going away, so the tun (and the VPN key) go with it.
-        // This is the only place a teardown is reported as complete, which is
-        // what lets the plugin answer Disconnect truthfully.
-        publish(BoxStatus.DISCONNECTED)
+        runCatching { worker.shutdown() }
+        runCatching { teardownExecutor.shutdown() }
+        // Only overwrite active states; preserve an ERROR published by fail()/revoke().
+        if (BoxStatus.isActive) {
+            publish(BoxStatus.DISCONNECTED)
+        }
     }
 
-    /**
-     * Ends the current tunnel but keeps the engine and its command server so
-     * the next connect is a reload rather than a cold start.
-     */
-    private fun closeService() {
+    private fun teardownAsync(
+        finalState: String,
+        finalMessage: String?,
+        announceDisconnecting: Boolean,
+        stopSelf: Boolean,
+    ) {
+        val gen = generation.incrementAndGet()
+        stopRequested = true
         running = false
-        closeEngineService(commandServer)
+        lastConfig = null
+        LibboxVpnService.isTearingDown = true
+
+        // Closing the TUN immediately tears down tun0 and lets Android unbind
+        // the VpnService so stopSelf() actually invokes onDestroy().
+        service.closeTun()
+        service.closeAllDefaultInterfaceMonitors()
+
+        main.post {
+            if (generation.get() != gen) return@post
+            if (announceDisconnecting) {
+                publish(BoxStatus.DISCONNECTING)
+            }
+            leaveForeground()
+        }
+
+        val closing = takeCommandServer()
+        val future = runCatching {
+            teardownExecutor.submit {
+                try {
+                    if (closing != null) {
+                        closeEngineServer(closing)
+                    }
+                } finally {
+                    if (generation.get() == gen) {
+                        LibboxVpnService.isTearingDown = false
+                    }
+                }
+                main.post {
+                    if (generation.get() != gen) return@post
+                    publish(finalState, finalMessage)
+                    if (stopSelf && !destroyed) {
+                        service.stopSelf()
+                    }
+                }
+            }
+        }.getOrElse {
+            LibboxVpnService.isTearingDown = false
+            main.post {
+                if (generation.get() != gen) return@post
+                publish(finalState, finalMessage)
+                if (stopSelf && !destroyed) {
+                    service.stopSelf()
+                }
+            }
+            null
+        }
+        if (future != null) {
+            pendingTeardown.set(future)
+        }
     }
 
-    private fun closeEngineService(server: CommandServer?) {
-        runCatching { server?.closeService() }
+    private fun takeCommandServer(): CommandServer? = synchronized(serverLock) {
+        val current = commandServer
+        commandServer = null
+        current
+    }
+
+    private fun closeEngineServer(server: CommandServer) {
+        runCatching { server.closeService() }
             .onFailure { Log.w(TAG, "libbox closeService failed", it) }
+        runCatching { server.close() }
+            .onFailure { Log.w(TAG, "libbox command server close failed", it) }
     }
 
     private fun fail(message: String) {
         Log.e(TAG, message)
-        lastConfig = null
-        closeService()
-        main.post {
-            leaveForeground()
-            publish(BoxStatus.ERROR, message)
-            // Always stop the service on failure so isRunning does not stay
-            // true while the engine failed to start.
-            service.stopSelf()
-        }
+        teardownAsync(
+            finalState = BoxStatus.ERROR,
+            finalMessage = message,
+            announceDisconnecting = false,
+            stopSelf = true,
+        )
     }
 
     private fun publish(state: String, message: String? = null) {

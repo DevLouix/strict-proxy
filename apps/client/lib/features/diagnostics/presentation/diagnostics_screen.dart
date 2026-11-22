@@ -142,9 +142,9 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                       title: Text(compat ? 'Compatibility mode' : 'Standard'),
                       subtitle: Text(
                         compat
-                            ? 'The engine crashed on this device, so the userspace '
-                                'stack and a smaller MTU are in use.'
-                            : 'The system network stack with strict routing.',
+                            ? 'Compatibility mode is active: userspace gVisor '
+                                'stack without strict routing.'
+                            : 'Userspace gVisor stack with strict routing.',
                       ),
                     ),
                     if (compat)
@@ -264,7 +264,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
                             TextButton.icon(
-                              onPressed: () => _copyLog(_log!),
+                              onPressed: () => _copyLog(_tail(_log!)),
                               icon: const Icon(Icons.copy, size: 18),
                               label: const Text('Copy'),
                             ),

@@ -54,7 +54,12 @@ Map<String, dynamic> buildSingBoxTunConfig(
           {'type': 'local', 'tag': 'local'},
         ],
         'final': 'remote',
-        'strategy': 'prefer_ipv4',
+        // Exit nodes are IPv4-only. `prefer_ipv4` still returns AAAA records to
+        // browsers and Android apps, causing dual-stack websites to stall/fail
+        // over IPv6 while IPv4-only endpoints (such as the controller) succeed.
+        // `ipv4_only` answers AAAA with empty NOERROR while the TUN IPv6
+        // address still captures literal IPv6 so nothing leaks outside the VPN.
+        'strategy': 'ipv4_only',
       },
       'inbounds': [
         {
@@ -64,7 +69,10 @@ Map<String, dynamic> buildSingBoxTunConfig(
           'address': [AppConfig.tunIpv4Address, AppConfig.tunIpv6Address],
           'auto_route': true,
           'strict_route': !compat,
-          'stack': compat ? 'gvisor' : 'mixed',
+          // Pure userspace gVisor handles both TCP and UDP without the `mixed`
+          // stack's kernel TCP NAT loopback, which breaks cross-app browser
+          // traffic on MediaTek and other Android OEM kernels.
+          'stack': 'gvisor',
           'mtu': tunMtu,
         },
       ],
@@ -115,7 +123,9 @@ Map<String, dynamic> buildSingBoxTunConfig(
         'rules': [
           {'action': 'sniff'},
           {'protocol': 'dns', 'action': 'hijack-dns'},
-          {'network': 'udp', 'port': 443, 'action': 'reject'},
+          // `no_drop: true` prevents sing-box from switching to silent DROP
+          // after 50 rejected packets/30s, keeping browser QUIC -> TCP fallback instant.
+          {'network': 'udp', 'port': 443, 'action': 'reject', 'no_drop': true},
         ],
         'final': 'proxy',
       },

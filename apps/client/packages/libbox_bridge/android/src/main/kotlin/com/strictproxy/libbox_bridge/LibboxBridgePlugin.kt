@@ -41,7 +41,7 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
          * this only has to cover a busy main thread. Waiting instead of
          * answering immediately is what makes the app's "Disconnected" true.
          */
-        private const val STOP_CONFIRM_TIMEOUT_MS = 4000L
+        private const val STOP_CONFIRM_TIMEOUT_MS = 6000L
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -179,7 +179,7 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             // not the engine's last state: a state can say connected after the
             // tun has already gone (see BoxStatus.update), and waiting on it
             // told the user the VPN did not shut down when it had.
-            if (!LibboxVpnService.isRunning) {
+            if (!LibboxVpnService.isRunning && !LibboxVpnService.isTearingDown) {
                 // Clear a state left behind by the destroyed service, or the
                 // app's Disconnect and its connected badge would never settle.
                 if (BoxStatus.isActive) BoxStatus.update(BoxStatus.DISCONNECTED)
@@ -187,9 +187,10 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
                 return
             }
             if (SystemClock.uptimeMillis() >= deadline) {
-                // A second request, then the truth: the app must not claim the
-                // tunnel is down while the interface is still up.
-                LibboxVpnService.stop(context)
+                // Force-close the TUN and stop the service, then report the
+                // truth: the app must not claim the tunnel is down while the
+                // interface is still up.
+                LibboxVpnService.forceStopService(context)
                 result.error(
                     "vpn_stop_failed",
                     "The VPN did not shut down. Turn StrictProxy off in Android settings, then reconnect.",
