@@ -51,6 +51,14 @@ export interface GatekeeperOptions {
   entitlementQueryParam?: string;
   /** Cookie carrying the token. Defaults to `sp_entitlement`. */
   entitlementCookie?: string;
+  /**
+   * When true (default), a valid entitlement token arriving via the query
+   * ticket (`sp_ticket`) is persisted to `entitlementCookie` (`HttpOnly`,
+   * `SameSite=Lax`, `Max-Age` clamped to the token's remaining lifetime) so
+   * subsequent page clicks, assets, and API requests on the site stay
+   * authorized in browsers.
+   */
+  setCookieFromQuery?: boolean;
   /** Clock skew allowed when checking token issue/expiry. Defaults to 30s. */
   entitlementLeewaySeconds?: number;
   /**
@@ -61,9 +69,16 @@ export interface GatekeeperOptions {
   denyResponse?: { status: number; body: unknown } | { redirectUrl: string };
   /**
    * Trust X-Forwarded-For chains from your own proxy. Only enable behind a
-   * trusted reverse proxy that overwrites (not appends to) the header.
+   * trusted reverse proxy.
    */
   trustForwardedFor?: boolean;
+  /**
+   * Number of trusted reverse proxies appending to `X-Forwarded-For` in front
+   * of this app (e.g. `1` behind a single Caddy/Nginx/Traefik proxy). When set,
+   * the client IP is read from the right (`hops` from the end) so an attacker
+   * cannot spoof the leftmost entry. When omitted, the first entry is used.
+   */
+  trustedProxyHops?: number;
   /** Failure mode when the controller is unreachable: 'open' | 'closed'. */
   failureMode?: 'open' | 'closed';
   /** Logger for operational diagnostics. */
@@ -115,18 +130,22 @@ export interface EntitlementVerification {
  * the strongest signal, then the short-lived query ticket used by links, then
  * the cookie a browser may carry between visits.
  */
-export function entitlementTokenOf(
+export type EntitlementTokenSource = 'header' | 'query' | 'cookie';
+
+export function entitlementTokenWithSourceOf(
   req: Request,
   headerName = 'x-strict-proxy-entitlement',
   opts: { queryParam?: string; cookieName?: string } = {},
-): string | undefined {
+): { token: string; source: EntitlementTokenSource } | undefined {
   const header = req.header(headerName);
-  if (header) return header;
+  if (header) return { token: header, source: 'header' };
 
   const queryParam = opts.queryParam ?? 'sp_ticket';
   const query = (req.query ?? {}) as Record<string, unknown>;
   const fromQuery = query[queryParam];
-  if (typeof fromQuery === 'string' && fromQuery.length > 0) return fromQuery;
+  if (typeof fromQuery === 'string' && fromQuery.length > 0) {
+    return { token: fromQuery, source: 'query' };
+  }
 
   const cookieName = opts.cookieName ?? 'sp_entitlement';
   const cookie = req.header('cookie');
@@ -136,13 +155,22 @@ export function entitlementTokenOf(
     if (eq < 0) continue;
     if (part.slice(0, eq).trim() !== cookieName) continue;
     const raw = part.slice(eq + 1).trim();
+    if (!raw) continue;
     try {
-      return decodeURIComponent(raw);
+      return { token: decodeURIComponent(raw), source: 'cookie' };
     } catch {
-      return raw;
+      return { token: raw, source: 'cookie' };
     }
   }
   return undefined;
+}
+
+export function entitlementTokenOf(
+  req: Request,
+  headerName = 'x-strict-proxy-entitlement',
+  opts: { queryParam?: string; cookieName?: string } = {},
+): string | undefined {
+  return entitlementTokenWithSourceOf(req, headerName, opts)?.token;
 }
 
 function isClaims(value: unknown): value is EntitlementClaims {
@@ -213,20 +241,60 @@ export function verifyEntitlementToken(
   };
 }
 
+function normalizeIp(raw: string): string {
+  // Normalize IPv6-mapped IPv4 (e.g. ::ffff:203.0.113.7 -> 203.0.113.7).
+  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+}
+
 /** Extracts the client IP, honoring X-Forwarded-For when configured. */
-export function clientIpOf(req: Request, trustForwardedFor: boolean): string | null {
+export function clientIpOf(
+  req: Request,
+  trustForwardedFor: boolean,
+  trustedProxyHops?: number,
+): string | null {
   if (trustForwardedFor) {
     const xff = req.header('x-forwarded-for');
     if (xff) {
-      const first = xff.split(',')[0]?.trim();
-      if (first) return first;
+      const entries = xff.split(',').map((part) => part.trim());
+      if (trustedProxyHops && trustedProxyHops >= 1) {
+        const nonEmpty = entries.filter((part) => part.length > 0);
+        if (nonEmpty.length > 0) {
+          const idx = Math.max(0, nonEmpty.length - Math.trunc(trustedProxyHops));
+          return normalizeIp(nonEmpty[idx]!);
+        }
+      } else {
+        const first = entries[0];
+        if (first) return normalizeIp(first);
+      }
     }
   }
   const ra = req.socket.remoteAddress;
   if (!ra) return null;
-  // Normalize IPv6-mapped IPv4.
-  if (ra.startsWith('::ffff:')) return ra.slice(7);
-  return ra;
+  return normalizeIp(ra);
+}
+
+const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function setEntitlementCookie(
+  req: Request,
+  res: Response,
+  cookieName: string,
+  token: string,
+  expiresAtIso: string,
+): void {
+  if (!COOKIE_NAME_RE.test(cookieName)) return;
+  const remainingSec = Math.max(1, Math.floor((Date.parse(expiresAtIso) - Date.now()) / 1000));
+  const proto = req.header('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+  const isHttps = Boolean(req.secure) || proto === 'https';
+  const parts = [
+    `${cookieName}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${remainingSec}`,
+  ];
+  if (isHttps) parts.push('Secure');
+  res.append('Set-Cookie', parts.join('; '));
 }
 
 /**
@@ -307,7 +375,7 @@ export function createGatekeeperMiddleware(options: GatekeeperOptions): RequestH
         // plan. Entitlement verification is offline, so it still runs below.
         log('gatekeeper: fleet IP check unavailable; failureMode=open allows the IP through');
       } else {
-        const ip = clientIpOf(req, options.trustForwardedFor ?? false);
+        const ip = clientIpOf(req, options.trustForwardedFor ?? false, options.trustedProxyHops);
         if (!ip || !ips.has(ip)) {
           deny(req, res, options, 'ip');
           return;
@@ -315,10 +383,11 @@ export function createGatekeeperMiddleware(options: GatekeeperOptions): RequestH
       }
 
       if (options.requiredTier) {
-        const token = entitlementTokenOf(req, entitlementHeader, {
+        const found = entitlementTokenWithSourceOf(req, entitlementHeader, {
           queryParam: options.entitlementQueryParam,
           cookieName: options.entitlementCookie,
         });
+        const token = found?.token;
         const verified = verifyEntitlementToken(token, options.publicKeys, {
           leewaySeconds: options.entitlementLeewaySeconds,
         });
@@ -329,6 +398,15 @@ export function createGatekeeperMiddleware(options: GatekeeperOptions): RequestH
         if (!tierSatisfies(verified.entitlement!.tier, options.requiredTier)) {
           deny(req, res, options, 'tier_insufficient', verified.entitlement!.tier);
           return;
+        }
+        if (found?.source === 'query' && options.setCookieFromQuery !== false) {
+          setEntitlementCookie(
+            req,
+            res,
+            options.entitlementCookie ?? 'sp_entitlement',
+            found.token,
+            verified.entitlement!.expiresAt,
+          );
         }
         req.strictProxy = verified.entitlement;
       }

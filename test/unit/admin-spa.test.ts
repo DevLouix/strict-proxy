@@ -235,3 +235,26 @@ test('every operator billing route has a control in the dashboard', async () => 
     assert.ok(source.includes(call), `no dashboard control calls ${call}`);
   }
 });
+
+test('the links view wires up Gatekeeper setup metadata and snippets', async () => {
+  const source = await readFile(path.join(ADMIN_DIR, 'links-view.js'), 'utf8');
+  assert.ok(source.includes("api.get('/api/v1/admin/gatekeeper')"), 'links view must load Gatekeeper metadata');
+  assert.ok(source.includes('createGatekeeperMiddleware'), 'links view must offer a Gatekeeper Express snippet');
+  assert.ok(source.includes('trustedProxyHops'), 'Express snippet should document trustedProxyHops');
+});
+
+test('controller pages include responsive mobile breakpoints and safe dialog/table sizing', async () => {
+  const css = await readFile(path.join(ADMIN_DIR, 'app.css'), 'utf8');
+  assert.match(css, /@media\s*\(max-width:\s*820px\)/, 'admin stylesheet needs tablet/mobile drawer breakpoint');
+  assert.match(css, /@media\s*\(max-width:\s*640px\)/, 'admin stylesheet needs narrow-phone breakpoint');
+  assert.ok(css.includes('100dvh'), 'admin drawer should use dynamic viewport height');
+  assert.ok(css.includes('max-height: 90dvh'), 'dialogs should stay scrollable inside mobile viewports');
+  assert.ok(css.includes('.facts-table'), 'facts tables should have responsive styling');
+
+  const landing = await readFile(path.join(ADMIN_DIR, '..', 'public', 'index.html'), 'utf8');
+  assert.match(landing, /@media\s*\(max-width:\s*600px\)/, 'landing page needs mobile breakpoint');
+  assert.ok(landing.includes('minmax(min(280px, 100%), 1fr)'), 'landing grid must not overflow narrow screens');
+
+  const setup = await readFile(path.join(ADMIN_DIR, '..', 'routes', 'setup.ts'), 'utf8');
+  assert.match(setup, /@media\s*\(max-width:\s*480px\)/, 'setup page needs mobile breakpoint');
+});

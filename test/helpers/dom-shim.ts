@@ -294,6 +294,31 @@ export function stubApi() {
       ],
       configs: [{ provider: 'openpay', connectionStatus: 'ok', checkedAt: '2026-03-01T00:00:00Z' }],
     },
+    links: {
+      links: [
+        {
+          id: 'l1',
+          title: 'Private Portal',
+          url: 'https://private.example.com',
+          description: 'Members-only portal',
+          requiredTier: 'standard',
+          active: true,
+          sortOrder: 0,
+        },
+      ],
+    },
+    gatekeeper: {
+      keyId: 'primary',
+      algorithm: 'Ed25519',
+      publicKeyPem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n-----END PUBLIC KEY-----',
+      publicIpsPath: '/api/v1/network/nodes/public-ips',
+      publicKeyPath: '/api/v1/network/public-key',
+      entitlementHeader: 'x-strict-proxy-entitlement',
+      entitlementQueryParam: 'sp_ticket',
+      entitlementCookie: 'sp_entitlement',
+      entitlementTtlSeconds: 600,
+      allowedIps: [{ nodeId: 'n1', region: 'us-east', publicIp: '203.0.113.10' }],
+    },
     crashes: {
       crashes: [
         {
@@ -335,6 +360,8 @@ export function stubApi() {
       if (path.startsWith('/api/v1/admin/settings/client')) return data.clientGate;
       if (path.startsWith('/api/v1/admin/billing/plans')) return data.plans;
       if (path.startsWith('/api/v1/admin/billing/providers')) return data.providers;
+      if (path.startsWith('/api/v1/admin/gatekeeper')) return data.gatekeeper;
+      if (path.startsWith('/api/v1/admin/links')) return data.links;
       throw new Error(`unstubbed GET ${path}`);
     },
     async post(path, body) {

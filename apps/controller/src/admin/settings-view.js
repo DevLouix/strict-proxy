@@ -178,7 +178,7 @@ export async function settingsView(api) {
         ),
         h('div', { class: 'form-grid' },
           h('div', { class: 'inline' },
-            h('div', { style: 'flex:1' }, testTo0),
+            h('div', { style: 'flex:1 1 220px;min-width:0' }, testTo0),
             testBtn,
           ),
           testError,

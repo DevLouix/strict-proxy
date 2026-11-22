@@ -1,3 +1,4 @@
+import { createPublicKey } from 'node:crypto';
 /**
  * HTTP route wiring for the Central Controller.
  *
@@ -1031,7 +1032,40 @@ export function buildRouter(ctx: Ctx): Router {
     });
     res.json({ entries });
   }));
-  // -- admin: gated links -----------------------------------------------------
+  // -- admin: gatekeeper setup & gated links ----------------------------------
+  const signingPublicKeyPem = () =>
+    createPublicKey(loadSigningPrivateKey(ctx.cfg.signingPrivateKeyPem))
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+
+  router.get('/api/v1/admin/gatekeeper', ...requireAdministrator, asyncHandler(async (_req, res) => {
+    const activeNodes = await ctx.db
+      .select({
+        nodeId: nodes.id,
+        label: nodes.label,
+        hostname: nodes.hostname,
+        region: nodes.region,
+        publicIp: nodes.publicIp,
+        status: nodes.status,
+      })
+      .from(nodes)
+      .where(inArray(nodes.status, ['online', 'degraded']))
+      .orderBy(nodes.region, nodes.label, nodes.hostname);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      keyId: ctx.cfg.signingKeyId,
+      algorithm: 'Ed25519',
+      publicKeyPem: signingPublicKeyPem(),
+      publicIpsPath: '/api/v1/network/nodes/public-ips',
+      publicKeyPath: '/api/v1/network/public-key',
+      entitlementHeader: 'x-strict-proxy-entitlement',
+      entitlementQueryParam: 'sp_ticket',
+      entitlementCookie: 'sp_entitlement',
+      entitlementTtlSeconds: ctx.cfg.entitlementTokenTtlSeconds,
+      allowedIps: activeNodes,
+    });
+  }));
+
   // A link is a site an operator has already put behind the Gatekeeper. This
   // records it so registered users can find it, and names the plan the site
   // requires so the app can explain what the account can and cannot open.
@@ -1355,6 +1389,19 @@ export function buildRouter(ctx: Ctx): Router {
   );
 
   // -- network (gatekeeper) ---------------------------------------------------
+  router.get(
+    '/api/v1/network/public-key',
+    asyncHandler(async (_req, res) => {
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.json({
+        keyId: ctx.cfg.signingKeyId,
+        algorithm: 'Ed25519',
+        publicKeyPem: signingPublicKeyPem(),
+        publicIpsPath: '/api/v1/network/nodes/public-ips',
+      });
+    }),
+  );
+
   router.get(
     '/api/v1/network/nodes/public-ips',
     asyncHandler(async (_req, res) => {

@@ -103,7 +103,7 @@ function renderPage(options: { error?: string; email?: string } = {}): string {
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+      body { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px;
         background: #0b0d12; color: #e7eaf0;
         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
       .card { width: 100%; max-width: 420px; padding: 28px; border-radius: 14px;
@@ -121,6 +121,12 @@ function renderPage(options: { error?: string; email?: string } = {}): string {
       .error { margin: 0 0 14px; padding: 9px 11px; border-radius: 8px;
         background: #2a1418; border: 1px solid #5b2029; color: #ffb4b4; font-size: 13px; }
       .foot { margin: 18px 0 0; color: #6f7889; font-size: 12px; }
+      @media (max-width: 480px) {
+        body { padding: 14px; align-items: start; }
+        .card { margin-top: 12px; padding: 20px; border-radius: 12px; }
+        input { font-size: 16px; padding: 11px 12px; }
+        button { min-height: 44px; font-size: 16px; }
+      }
     </style>
   </head>
   <body>

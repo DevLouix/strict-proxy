@@ -36,9 +36,11 @@ function countsTable(counts) {
   const rows = Object.entries(counts ?? {}).map(([table, count]) =>
     h('tr', {}, h('td', {}, table), h('td', { class: 'mono' }, String(count))),
   );
-  return h('table', { class: 'table' },
-    h('thead', {}, h('tr', {}, h('th', {}, 'Table'), h('th', {}, 'Rows'))),
-    h('tbody', {}, ...rows),
+  return h('div', { class: 'table-wrap' },
+    h('table', { class: 'table' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Table'), h('th', {}, 'Rows'))),
+      h('tbody', {}, ...rows),
+    ),
   );
 }
 

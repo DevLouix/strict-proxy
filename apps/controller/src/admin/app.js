@@ -79,6 +79,7 @@ function loginScreen() {
 let currentView = 'overview';
 let sidebar = null;
 let menuButton = null;
+let mobileTitle = null;
 
 async function renderView(viewId) {
   const view = VIEWS.find((v) => v.id === viewId) ?? VIEWS[0];
@@ -89,6 +90,7 @@ async function renderView(viewId) {
 
   // Reflect the active item before awaiting data.
   sidebar?.setActive(view.id);
+  if (mobileTitle) mobileTitle.textContent = view.label;
   for (const el of document.querySelectorAll('.nav-item')) {
     el.classList.toggle('active', el.dataset.view === view.id);
   }
@@ -162,6 +164,7 @@ function shell(email) {
         menuButton,
         h('span', { class: 'brand-logo' }, navIcon('shield', 'brand-ico')),
         h('span', { class: 'brand-name' }, 'StrictProxy'),
+        mobileTitle = h('span', { class: 'mobile-title' }, VIEWS.find((v) => v.id === currentView)?.label ?? 'Overview'),
       ),
       h('aside', { class: 'sidebar', id: 'sidebar' },
         h('div', { class: 'brand' },

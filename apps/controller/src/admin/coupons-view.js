@@ -138,7 +138,7 @@ export async function couponsView(api) {
       h('div', { class: 'panel' },
         h('header', {}, h('h3', {}, 'Create a code')),
         h('div', { class: 'body' },
-          h('div', { class: 'row', style: 'flex-wrap:wrap;gap:10px' },
+          h('div', { class: 'form-grid' },
             h('label', { class: 'field' }, h('span', {}, 'Code'), code),
             h('label', { class: 'field' }, h('span', {}, 'Type'), kind),
             h('label', { class: 'field' }, h('span', {}, 'Value'), h('div', { class: 'row' }, value, valueHint)),

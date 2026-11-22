@@ -43,11 +43,13 @@ function factsTable(d) {
     ['Resolution', resolution],
   ];
 
-  return h('table', {},
-    h('tbody', {}, ...facts.map(([label, value]) => h('tr', {},
-      h('th', { class: 'small muted', style: 'width:180px;text-align:left' }, label),
-      h('td', { class: 'small' }, value),
-    ))),
+  return h('div', { class: 'table-wrap' },
+    h('table', { class: 'facts-table' },
+      h('tbody', {}, ...facts.map(([label, value]) => h('tr', {},
+        h('th', { class: 'small muted' }, label),
+        h('td', { class: 'small' }, value),
+      ))),
+    ),
   );
 }
 

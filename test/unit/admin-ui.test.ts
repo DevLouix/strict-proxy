@@ -541,3 +541,24 @@ test('the plans view prices in the catalog currency and calls out currency drift
   assert.ok(amounts.length >= 1, 'the pricing panel needs an amount input');
   assert.equal(amounts[0].attributes.step, '1');
 });
+
+test('the links view renders the Gatekeeper setup panel with live exit IPs and switchable snippets', async () => {
+  const { linksView } = await import('../../apps/controller/src/admin/links-view.js');
+  const api = stubApi();
+  const node = await linksView(api);
+  const text = node.text();
+  assert.ok(text.includes('Protect a site (Gatekeeper setup)'), 'links view should render Gatekeeper setup');
+  assert.ok(text.includes('203.0.113.10'), 'active exit IP must be displayed');
+  assert.ok(text.includes('BEGIN PUBLIC KEY'), 'signing public key PEM must be displayed');
+  assert.ok(text.includes('createGatekeeperMiddleware'), 'Express snippet should be shown by default');
+
+  const caddyBtn = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Caddy');
+  assert.ok(caddyBtn, 'Caddy snippet tab should exist');
+  caddyBtn.dispatch('click');
+  assert.ok(node.text().includes('remote_ip 203.0.113.10'), 'Caddy snippet should list active exit IPs');
+
+  const nginxBtn = [...node.walk()].find((el: any) => el.tagName === 'BUTTON' && el.text() === 'Nginx');
+  assert.ok(nginxBtn, 'Nginx snippet tab should exist');
+  nginxBtn.dispatch('click');
+  assert.ok(node.text().includes('allow 203.0.113.10;'), 'Nginx snippet should allow active exit IPs');
+});
