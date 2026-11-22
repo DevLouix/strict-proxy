@@ -62,15 +62,7 @@ jobs:
             const claims = { version: 1, keyId: 'interop', sub: 'u1', email: 'interop@example.com', tier: 'pro', status: 'active', currentPeriodEnd: exp, issuedAt: new Date(now).toISOString(), expiresAt: exp };
             const token = 'sp1.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.' + Buffer.from(signJson(priv, claims), 'base64').toString('base64url');
             console.log(JSON.stringify({ publicKeyPem: keys.publicKeyPem, ipsBody, token }));
-          " | .venv-sdk/bin/python -c "
-            import json, sys
-            from strict_proxy_gatekeeper import Gatekeeper
-            data = json.load(sys.stdin)
-            gk = Gatekeeper.init(controller_url='https://controller.test', public_key=data['publicKeyPem'], required_tier='standard', http_get_json=lambda _u, _t: data['ipsBody'])
-            d = gk.auth(ip='203.0.113.55', headers={'x-strict-proxy-entitlement': data['token']})
-            assert d.allowed and d.user and d.user.email == 'interop@example.com' and d.user.tier == 'pro', d
-            print('Cross-language Node->Python Ed25519 verification passed!')
-          "
+          " | .venv-sdk/bin/python -c "import json, sys; from strict_proxy_gatekeeper import Gatekeeper; data = json.load(sys.stdin); gk = Gatekeeper.init(controller_url='https://controller.test', public_key=data['publicKeyPem'], required_tier='standard', http_get_json=lambda _u, _t: data['ipsBody']); d = gk.auth(ip='203.0.113.55', headers={'x-strict-proxy-entitlement': data['token']}); assert d.allowed and d.user and d.user.email == 'interop@example.com' and d.user.tier == 'pro', d; print('Cross-language Node->Python Ed25519 verification passed!')"
           rm -rf .venv-sdk sdks/python/dist sdks/python/build sdks/python/src/*.egg-info
       - name: Run integration tests
         # Needs a working Docker daemon: the integration suite boots ephemeral

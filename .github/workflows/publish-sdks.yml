@@ -74,13 +74,24 @@ jobs:
         run: |
           python -m build
           twine check dist/*
+      - name: Detect PyPI authentication mode
+        id: pypi_auth
+        if: github.event_name == 'push' || inputs.dry_run == false
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$PYPI_API_TOKEN" ]; then
+            echo "use_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "use_token=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish to PyPI (Trusted Publishing)
-        if: (github.event_name == 'push' || inputs.dry_run == false) && secrets.PYPI_API_TOKEN == ''
+        if: (github.event_name == 'push' || inputs.dry_run == false) && steps.pypi_auth.outputs.use_token == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdks/python/dist/
       - name: Publish to PyPI (API token)
-        if: (github.event_name == 'push' || inputs.dry_run == false) && secrets.PYPI_API_TOKEN != ''
+        if: (github.event_name == 'push' || inputs.dry_run == false) && steps.pypi_auth.outputs.use_token == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
