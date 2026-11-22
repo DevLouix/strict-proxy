@@ -78,9 +78,10 @@ flutter build apk --debug --config-only        # writes Gradle files, no APK
 cd android && ./gradlew :strict_proxy_libbox_bridge:testDebugUnitTest --no-daemon
 ```
 
-`TunPlanTest` covers the pure-Kotlin TUN rules; this step also compiles
-`LibboxVpnService` and `LibboxPlatformInterface`, which is what fails when the
-engine's generated API changes. Without `libbox-classes.jar` the module cannot
+`TunPlanTest` covers the pure-Kotlin TUN rules and `EngineLogTest` the buffer
+behind the Diagnostics tunnel log; this step also compiles `LibboxVpnService`
+and `LibboxPlatformInterface`, which is what fails when the engine's generated
+API changes. Without `libbox-classes.jar` the module cannot
 compile at all (`checkLibboxClasses` says so in one line).
 
 CI runs exactly the four commands above plus `bash -n` over `apps/client/tool/*.sh`

@@ -55,6 +55,9 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
 
     override fun onAttachedToEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
         appContext = binding.applicationContext
+        // Diagnostics can be opened before any tunnel has run in this process,
+        // so the log must be readable without the service having started.
+        EngineLog.attach(binding.applicationContext)
         channel = MethodChannel(binding.binaryMessenger, CHANNEL).also { it.setMethodCallHandler(this) }
         val listener: (String, String?) -> Unit = { state, message -> emit(state, message) }
         statusListener = listener
@@ -134,6 +137,20 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
                 }
             }
             "stop" -> stopAndConfirm(result)
+            // The engine's recent output, for the Diagnostics screen. The
+            // phone cannot read logcat, so this is the only way to see why a
+            // tunnel that reports connected carries nothing.
+            "engineLog" -> result.success(EngineLog.snapshot())
+            "clearEngineLog" -> {
+                EngineLog.clear()
+                result.success(null)
+            }
+            // App-side events that only exist in Dart (the chosen node, a
+            // failed data-path probe), so the log tells one story per attempt.
+            "note" -> {
+                call.argument<String>("message")?.let { EngineLog.append(it) }
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
@@ -153,11 +170,19 @@ class LibboxBridgePlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activ
             result.error("activity_unavailable", "The VPN service cannot be stopped without a context", null)
             return
         }
+        EngineLog.append("stop requested from the app")
         LibboxVpnService.stop(context)
         val deadline = SystemClock.uptimeMillis() + STOP_CONFIRM_TIMEOUT_MS
 
         fun confirm() {
-            if (!BoxStatus.isActive) {
+            // Whether the service instance still exists is the authority here,
+            // not the engine's last state: a state can say connected after the
+            // tun has already gone (see BoxStatus.update), and waiting on it
+            // told the user the VPN did not shut down when it had.
+            if (!LibboxVpnService.isRunning) {
+                // Clear a state left behind by the destroyed service, or the
+                // app's Disconnect and its connected badge would never settle.
+                if (BoxStatus.isActive) BoxStatus.update(BoxStatus.DISCONNECTED)
                 result.success(null)
                 return
             }

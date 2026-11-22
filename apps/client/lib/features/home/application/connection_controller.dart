@@ -37,7 +37,11 @@ Map<String, dynamic> buildSingBoxTunConfig(
   bool compat = false,
 }) =>
     {
-      'log': {'level': 'warn', 'timestamp': true},
+      // `info` is what records the connection decisions behind a "connected but
+      // no traffic" report. `warn` recorded none of them: the tunnel could fail
+      // app after app without the engine ever writing a line about why. The
+      // bridge keeps the tail of this on the device for Diagnostics.
+      'log': {'level': 'info', 'timestamp': true},
       // sing-box 1.12 replaced the `address` form with an explicit `type` and
       // `server`, and 1.14 removed the legacy form entirely. One legacy entry
       // rejects the whole config before the tunnel starts ("decode config:
@@ -359,9 +363,14 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
       return;
     }
     if (attempt != _attempt || state is! EngineStateConnected) return;
+    // The engine cannot know this one: the probe runs in Dart, from the app
+    // itself, and its result is the difference between "the tunnel is up" and
+    // "the tunnel carries traffic".
+    _engine.note('datapath probe failed${reason == null ? '' : ': $reason'}');
 
     if (!_ref.read(compatModeProvider) && !_autoCompatTried) {
       _autoCompatTried = true;
+      _engine.note('reloading with compatibility settings');
       await _recovery.enableCompat();
       _ref.read(compatModeProvider.notifier).state = true;
       if (attempt != _attempt || state is! EngineStateConnected) return;
@@ -525,6 +534,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         return;
       }
       _activeEndpoint = nodeConfig;
+      _engine.note('connecting through ${_selected!.tunnelHost}:${_selected!.tunnelPort}');
       _engineStarted = true;
       await _engine.connect(jsonEncode(buildSingBoxTunConfig(
         nodeConfig,

@@ -66,7 +66,32 @@ class LibboxVpnService : VpnService(), PlatformInterface {
          */
         fun isLibboxAvailable(): Boolean = runCatching { Libbox.version() }.isSuccess
 
+        /**
+         * True while a service instance exists in this process.
+         *
+         * The tun lives and dies with the service, so this — not the engine's
+         * last state — is what decides whether a stop has completed. The state
+         * can lag behind (or be left saying connected by a start that finished
+         * after the service was destroyed), and waiting on it reported "the
+         * VPN did not shut down" for a tunnel that was already gone.
+         */
+        @Volatile
+        var isRunning: Boolean = false
+            private set
+
+        /**
+         * Set when the app asks for the tunnel to stop.
+         *
+         * A start intent can already be queued with Android when the stop
+         * arrives; without this, the queued start would bring the tunnel back
+         * up after the user asked for it to be down.
+         */
+        @Volatile
+        private var stopRequested = false
+
         fun start(context: Context, config: String) {
+            // An explicit start is newer than any stop still being delivered.
+            stopRequested = false
             val intent = Intent(context, LibboxVpnService::class.java)
                 .putExtra(BoxRunner.EXTRA_CONFIG, config)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
@@ -84,6 +109,7 @@ class LibboxVpnService : VpnService(), PlatformInterface {
          * notification running.
          */
         fun stop(context: Context) {
+            stopRequested = true
             context.stopService(Intent(context, LibboxVpnService::class.java))
         }
     }
@@ -111,6 +137,10 @@ class LibboxVpnService : VpnService(), PlatformInterface {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
+        // Before the engine exists: a crash during setup still leaves a file
+        // the next launch (and Diagnostics) can read.
+        EngineLog.attach(this)
         runner = BoxRunner(this, this)
         runner.create()
     }
@@ -129,6 +159,12 @@ class LibboxVpnService : VpnService(), PlatformInterface {
             stopSelf()
             return START_NOT_STICKY
         }
+        // This start was queued before the user asked to stop.
+        if (stopRequested) {
+            EngineLog.append("dropping a start that was queued before the stop request")
+            stopSelf()
+            return START_NOT_STICKY
+        }
         runner.begin(config)
         // The tunnel's lifetime is owned by the app's explicit start/stop, not
         // by whether this service happens to be running.
@@ -141,6 +177,9 @@ class LibboxVpnService : VpnService(), PlatformInterface {
     }
 
     override fun onDestroy() {
+        // Before the engine teardown: every stop confirmation reads this, and
+        // the tun is gone by the time this callback runs.
+        isRunning = false
         runner.destroy()
         super.onDestroy()
     }

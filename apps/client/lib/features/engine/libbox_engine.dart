@@ -106,6 +106,40 @@ class LibboxEngine implements VpnEngine {
     _setState(next);
   }
 
+  @override
+  void note(String message) {
+    // Diagnostics only: a line that cannot be recorded must never fail the
+    // connection that produced it.
+    unawaited(
+      _channel.invokeMethod<void>('note', {'message': message}).catchError((Object _) {}),
+    );
+  }
+
+  @override
+  Future<String?> readLog() async {
+    try {
+      return await _channel.invokeMethod<String>('engineLog');
+    } on MissingPluginException {
+      // Not every platform build carries this bridge (Linux uses another
+      // engine); there is nothing to show rather than an error to report.
+      return null;
+    } on PlatformException catch (error) {
+      return 'The engine log could not be read (${error.code}).';
+    }
+  }
+
+  @override
+  Future<bool> clearLog() async {
+    try {
+      await _channel.invokeMethod<void>('clearEngineLog');
+      return true;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   static String _describePlatformError(Object error) {
     if (error is PlatformException) {
       final message = error.message?.trim();

@@ -43,6 +43,20 @@ internal object BoxStatus {
     var lastError: String? = null
         private set
 
+    /**
+     * The last state published, used only to reject a stale `connected`.
+     *
+     * A start runs on the service's worker thread and publishes at the end, so
+     * a stop that arrives while it is starting can destroy the service first
+     * and be followed by `connected` from the start that had already been in
+     * flight. The tun is gone at that point, but the app would sit on a
+     * connected state that nothing can end — the "the VPN did not shut down"
+     * report — so `connected` is only accepted from `connecting`/`connected`,
+     * the two states a successful start can legitimately follow.
+     */
+    @Volatile
+    private var lastPublished = DISCONNECTED
+
     private val listeners = CopyOnWriteArraySet<(String, String?) -> Unit>()
 
     /** Whether a tunnel is up or being brought up. */
@@ -50,6 +64,10 @@ internal object BoxStatus {
         get() = state == CONNECTING || state == CONNECTED || state == DISCONNECTING
 
     fun update(state: String, message: String? = null) {
+        synchronized(this) {
+            if (state == CONNECTED && lastPublished != CONNECTING && lastPublished != CONNECTED) return
+            lastPublished = state
+        }
         this.state = state
         this.message = message
         if (state == ERROR && !message.isNullOrBlank()) lastError = message

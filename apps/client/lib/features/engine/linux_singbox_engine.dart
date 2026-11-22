@@ -124,6 +124,18 @@ class LinuxSingBoxEngine implements VpnEngine {
     if (!_controller.isClosed) _controller.add(value);
   }
 
+  // The desktop engine's output stays on the terminal; there is no on-device
+  // Diagnostics screen to fill, so these stay no-ops rather than duplicating
+  // the process log into Dart.
+  @override
+  void note(String message) {}
+
+  @override
+  Future<String?> readLog() async => null;
+
+  @override
+  Future<bool> clearLog() async => false;
+
   @override
   void dispose() {
     final process = _process;

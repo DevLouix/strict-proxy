@@ -109,6 +109,19 @@ abstract class VpnEngine {
   /// is lost and every failure reads "engine error".
   String? get lastErrorMessage => null;
 
+  /// Records an app-side event in the engine log, when the platform keeps one.
+  ///
+  /// Engine output alone cannot explain every failure: which node was chosen
+  /// and whether the data-path probe passed only exist on this side, and
+  /// without them the log is silent about the attempt that went wrong.
+  void note(String message) {}
+
+  /// The engine's recent output, or null when this platform keeps no log.
+  Future<String?> readLog() async => null;
+
+  /// Clears the engine log; false when this platform has none.
+  Future<bool> clearLog() async => false;
+
   void dispose();
 }
 
@@ -138,6 +151,15 @@ class UnsupportedEngine implements VpnEngine {
 
   @override
   Future<void> disconnect() async => throw _unsupported();
+
+  @override
+  void note(String message) {}
+
+  @override
+  Future<String?> readLog() async => null;
+
+  @override
+  Future<bool> clearLog() async => false;
 
   @override
   void dispose() {}
@@ -173,6 +195,15 @@ class NoopEngine implements VpnEngine {
     await Future<void>.delayed(const Duration(milliseconds: 300));
     _setState(EngineState.disconnected);
   }
+
+  @override
+  void note(String message) {}
+
+  @override
+  Future<String?> readLog() async => null;
+
+  @override
+  Future<bool> clearLog() async => false;
 
   void _setState(EngineState s) {
     _state = s;

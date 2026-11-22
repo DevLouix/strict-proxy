@@ -75,6 +75,9 @@ internal class BoxRunner(
     @Volatile private var stopRequested = false
 
     fun create() {
+        // The engine's own output goes to logcat, which the phone cannot read.
+        // Keeping it here is what fills Diagnostics with something to send.
+        EngineLog.attach(service)
         createNotificationChannel()
     }
 
@@ -82,6 +85,7 @@ internal class BoxRunner(
     fun begin(config: String?) {
         // An explicit start is newer than any stop still in flight.
         stopRequested = false
+        EngineLog.append("engine start requested")
         if (config.isNullOrBlank()) {
             fail("missing libbox configuration")
             return
@@ -194,6 +198,7 @@ internal class BoxRunner(
         stopRequested = true
         running = false
         lastConfig = null
+        EngineLog.append("tunnel stop requested")
         main.post {
             publish(BoxStatus.DISCONNECTING)
             // The notification must go even if closing the engine is slow.
@@ -204,6 +209,7 @@ internal class BoxRunner(
 
     /** Another app took over the VPN, or consent was withdrawn in Settings. */
     fun revoke() {
+        EngineLog.append("VPN permission revoked by Android")
         worker.execute {
             closeService()
             lastConfig = null
@@ -221,6 +227,7 @@ internal class BoxRunner(
     fun destroy() {
         stopRequested = true
         running = false
+        EngineLog.append("VPN service destroyed")
         // Main-thread work first: the notification must not outlive the stop.
         leaveForeground()
         // Closing the engine can wait on the Go side, and blocking `onDestroy` is
@@ -276,6 +283,10 @@ internal class BoxRunner(
     }
 
     private fun publish(state: String, message: String? = null) {
+        // State changes are the timeline a "connected but no internet" report
+        // needs: the engine's own lines say what it tried, these say when the
+        // platform thought the tunnel was up.
+        EngineLog.append(if (message == null) "state: $state" else "state: $state ($message)")
         if (Looper.myLooper() == Looper.getMainLooper()) {
             BoxStatus.update(state, message)
         } else {
@@ -395,6 +406,7 @@ internal class BoxRunner(
 
     override fun writeDebugMessage(message: String) {
         Log.d(TAG, message)
+        EngineLog.append(message)
         updateNotification()
     }
 
