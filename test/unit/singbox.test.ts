@@ -11,6 +11,7 @@ import path from 'node:path';
 import {
   renderSingBoxConfig,
   liveCredentials,
+  resolveRealitySettings,
   needsApply,
   writeConfigAtomic,
   writeConfigIfValid,
@@ -192,6 +193,26 @@ test('writeConfigIfValid replaces the config only after the candidate passes val
   assert.deepEqual((await fs.readdir(dir)).sort(), ['config.json']);
 
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('a controller restatement of the REALITY identity replaces the applied one', () => {
+  // The agent read these once at startup. A re-enrollment or key rotation left
+  // the controller issuing credentials from a new short-id pool while the engine
+  // held the old keys, so every client was rejected as an invalid handshake.
+  const current = { privateKey: 'old-private', shortIds: ['aa'], serverName: 'www.microsoft.com' };
+  const incoming = { privateKey: 'new-private', shortIds: ['cc', 'dd'], serverName: 'www.example.com' };
+
+  assert.deepEqual(resolveRealitySettings(current, incoming), incoming);
+
+  // A partial answer must not blank a node that is serving clients right now.
+  assert.deepEqual(
+    resolveRealitySettings(current, { privateKey: '', shortIds: ['cc'], serverName: 'www.example.com' }),
+    current,
+  );
+  assert.deepEqual(
+    resolveRealitySettings(current, { privateKey: 'new-private', shortIds: [], serverName: 'www.example.com' }),
+    current,
+  );
 });
 
 test('the rendered user list does not depend on the order rows arrive in', () => {

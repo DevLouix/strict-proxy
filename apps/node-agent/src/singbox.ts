@@ -43,6 +43,23 @@ export function liveCredentials(all: Credential[]): Array<{ uuid: string; shortI
     .sort((a, b) => (a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0));
 }
 
+/**
+ * The REALITY settings to render with, when the controller re-states them.
+ *
+ * The agent keeps the settings it last applied and a bootstrap response only
+ * replaces them when it carries a complete identity. An empty or partial
+ * response — a controller fault, a row mid-update — would otherwise render an
+ * engine that rejects every client, so the settings already applied win.
+ */
+export function resolveRealitySettings(
+  current: { privateKey: string; shortIds: string[]; serverName: string },
+  incoming: { privateKey: string; shortIds: string[]; serverName: string },
+): { privateKey: string; shortIds: string[]; serverName: string } {
+  const usable =
+    incoming.privateKey.trim() !== '' && incoming.serverName.trim() !== '' && incoming.shortIds.length > 0;
+  return usable ? incoming : current;
+}
+
 /** Renders a sing-box 1.10+ server config with VLESS + REALITY inbound. */
 export function renderSingBoxConfig(params: {
   cfg: AgentConfig;

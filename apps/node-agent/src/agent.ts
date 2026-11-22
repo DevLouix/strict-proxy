@@ -20,6 +20,7 @@ import { chooseTunnelPort } from './tunnel-port.js';
 import {
   renderSingBoxConfig,
   liveCredentials,
+  resolveRealitySettings,
   needsApply,
   writeConfigIfValid,
   loadAppliedFingerprint,
@@ -193,6 +194,38 @@ class Agent {
     this.realityShortIds = boot.reality.shortIds;
     this.realityServerName = boot.reality.serverName;
     log('info', `bootstrapped node ${boot.nodeId} (${boot.region})`);
+  }
+
+  /**
+   * Re-reads this node's REALITY settings before each render.
+   *
+   * They were read once at startup and never again. When the node row changes
+   * while this process runs — a re-enrollment after the identity file was lost,
+   * an operator re-running registration, a deliberate key or short-id rotation —
+   * the controller starts issuing credentials from the new pool while the engine
+   * still holds the old keys. Every client then fails the handshake (the node
+   * logs `REALITY: processed invalid connection`) while the node reports healthy,
+   * and nothing in its own state says why. A failed or partial refresh keeps the
+   * applied settings, so a controller blip cannot blank a working node.
+   */
+  private async refreshRealitySettings(): Promise<void> {
+    try {
+      const boot = await this.client.bootstrap();
+      const next = resolveRealitySettings(
+        { privateKey: this.realityPrivateKey, shortIds: this.realityShortIds, serverName: this.realityServerName },
+        boot.reality,
+      );
+      if (next.privateKey !== this.realityPrivateKey || next.serverName !== this.realityServerName) {
+        log('warn', "the controller's REALITY identity for this node differs from the applied one; applying it so clients can handshake again");
+      } else if (next.shortIds.join(',') !== this.realityShortIds.join(',')) {
+        log('info', `REALITY short-id pool changed (${next.shortIds.length} id(s)); applying the controller's list`);
+      }
+      this.realityPrivateKey = next.privateKey;
+      this.realityShortIds = next.shortIds;
+      this.realityServerName = next.serverName;
+    } catch (err) {
+      log('debug', 'could not refresh REALITY settings:', err instanceof Error ? err.message : err);
+    }
   }
 
   async heartbeatOnce(): Promise<void> {
@@ -400,6 +433,7 @@ class Agent {
   async syncOnce(): Promise<void> {
     const state = await this.client.sync();
     this.credentials = state.credentials;
+    await this.refreshRealitySettings();
     const fp = fingerprint(this.credentials);
     const applied = await loadAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`);
 
