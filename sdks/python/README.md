@@ -22,20 +22,18 @@ pip install strict-proxy-gatekeeper
 
 > Needs Python 3.9 or newer. Works with FastAPI, Flask, Django, Starlette, or any Python web app.
 
-### Step 2 — Grab 2 values from your StrictProxy Admin Console
+### Step 2 — Create a Site Key in your StrictProxy Admin Console
 
 1. Open your controller admin page at **`https://YOUR-CONTROLLER/admin#links`**.
-2. Copy:
-   - Your **Controller URL** (example: `https://proxy.example.com`)
-   - Your **Signing Public Key** (click **Copy public key**)
-3. Set them as environment variables (or put them in your `.env`):
+2. In **Gatekeeper Key Factory (Site API keys)**, click **Create site key** and give your site a name (e.g. `Partner Portal`).
+3. Click **Copy .env** and set those 2 single-line environment variables:
 
 ```bash
 export STRICT_PROXY_CONTROLLER_URL="https://proxy.example.com"
-export STRICT_PROXY_PUBLIC_KEY_PEM="-----BEGIN PUBLIC KEY-----
-paste-your-public-key-here
------END PUBLIC KEY-----"
+export STRICT_PROXY_GATEKEEPER_KEY="sp_gk_your_generated_site_secret"
 ```
+
+> **No multi-line PEMs!** Your single-line `sp_gk_…` site key automatically fetches both your active proxy exit IPs and the controller's Ed25519 signing key in one request — and can be rotated or revoked per site anytime.
 
 ### Step 3 — Init, then Auth!
 
@@ -48,7 +46,7 @@ from strict_proxy_gatekeeper import Gatekeeper
 app = FastAPI()
 
 # 1. INIT — tell the bouncer where your StrictProxy controller is
-#    (automatically reads STRICT_PROXY_CONTROLLER_URL and STRICT_PROXY_PUBLIC_KEY_PEM!)
+#    (automatically reads STRICT_PROXY_CONTROLLER_URL and STRICT_PROXY_GATEKEEPER_KEY!)
 gk = Gatekeeper.init()
 
 # 2. AUTH — put the bouncer in front of your whole app

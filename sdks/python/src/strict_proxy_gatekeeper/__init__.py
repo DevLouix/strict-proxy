@@ -1,6 +1,12 @@
 """Official StrictProxy Gatekeeper SDK for Python."""
 
-from .crypto import canonical_json, load_signing_public_key, normalize_pem, verify_json
+from .crypto import (
+    canonical_json,
+    load_signing_public_key,
+    normalize_pem,
+    validate_public_key_pem,
+    verify_json,
+)
 from .gatekeeper import (
     TIER_RANK,
     AuthDecision,
@@ -14,7 +20,7 @@ from .gatekeeper import (
     verify_entitlement_token,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -29,6 +35,7 @@ __all__ = [
     "entitlement_token_with_source_of",
     "load_signing_public_key",
     "normalize_pem",
+    "validate_public_key_pem",
     "tier_satisfies",
     "verify_entitlement_token",
     "verify_json",

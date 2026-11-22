@@ -299,3 +299,51 @@ def test_escaped_pem_ip_port_and_status() -> None:
     st = gk.status()
     assert st["last_error"] is None
     assert st["cached_ips"] == ["203.0.113.10"]
+
+
+def test_api_key_bootstrap_and_status() -> None:
+    priv, pub_pem = _gen_keypair()
+    ips_body = _signed_ips(priv, ["203.0.113.55"])
+    token = _signed_token(priv, tier="pro")
+    seen_headers: dict[str, str] = {}
+    seen_url: list[str] = []
+
+    def fake_get(url: str, timeout: float, headers: dict[str, str] | None = None) -> dict:
+        seen_url.append(url)
+        if headers:
+            seen_headers.update(headers)
+        return {
+            "site": {"id": "s1", "name": "Portal", "keyPrefix": "sp_gk_deadbeef"},
+            "algorithm": "Ed25519",
+            "publicKeyPem": pub_pem,
+            **ips_body,
+        }
+
+    gk = Gatekeeper.init(
+        controller_url="https://controller.test",
+        api_key="sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz",
+        required_tier="pro",
+        http_get_json=fake_get,
+    )
+    decision = gk.auth(ip="203.0.113.55", headers={"x-strict-proxy-entitlement": token})
+    assert decision.allowed is True
+    assert decision.user is not None and decision.user.tier == "pro"
+    assert seen_url == ["https://controller.test/api/v1/gatekeeper/bootstrap"]
+    assert seen_headers.get("Authorization") == "Bearer sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz"
+    st = gk.status()
+    assert st["auth_mode"] == "api-key"
+    assert st["has_api_key"] is True
+    assert st["cached_ips"] == ["203.0.113.55"]
+
+
+def test_rejects_node_key_or_site_key_in_public_key() -> None:
+    with pytest.raises(ValueError, match="api_key"):
+        Gatekeeper.init(
+            controller_url="https://controller.test",
+            public_key="sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz",
+        )
+    with pytest.raises(ValueError, match="not a proxy node public key"):
+        Gatekeeper.init(
+            controller_url="https://controller.test",
+            public_key="m4h5s8W2kQp9L1xYz0AbCdEfGhIjKlMnOpQrStUvWxY=",
+        )

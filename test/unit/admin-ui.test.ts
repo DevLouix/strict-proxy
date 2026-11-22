@@ -568,3 +568,14 @@ test('the links view renders the Gatekeeper setup panel with live exit IPs and s
   nginxBtn.dispatch('click');
   assert.ok(node.text().includes('allow 203.0.113.10;'), 'Nginx snippet should allow active exit IPs');
 });
+
+test('linksView renders the Gatekeeper Key Factory panel and site keys', async () => {
+  const { linksView } = await import('../../apps/controller/src/admin/links-view.js');
+  const api = stubApi();
+  const root = await linksView(api);
+  const text = root.text();
+  assert.match(text, /Gatekeeper Key Factory/);
+  assert.match(text, /Partner Portal/);
+  assert.match(text, /sp_gk_deadbeef/);
+  assert.match(text, /STRICT_PROXY_GATEKEEPER_KEY/);
+});

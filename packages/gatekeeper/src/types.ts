@@ -1,17 +1,16 @@
-/**
- * Public TypeScript types for the StrictProxy Gatekeeper SDK.
- */
-
+/** Subscription tier levels recognized by StrictProxy. */
 export type SubscriptionTier = 'free' | 'standard' | 'pro';
 
+/** Signed fleet exit-IP list returned by `GET /api/v1/network/nodes/public-ips`. */
 export interface PublicIpsResponse {
   generatedAt: string;
   expiresAt: string;
   ips: string[];
-  keyId: string;
   signature: string;
+  keyId: string;
 }
 
+/** Public signing key metadata returned by `GET /api/v1/network/public-key`. */
 export interface PublicKeyResponse {
   keyId: string;
   algorithm: string;
@@ -19,18 +18,31 @@ export interface PublicKeyResponse {
   publicIpsPath?: string;
 }
 
+/** Authenticated site bootstrap payload returned by `GET /api/v1/gatekeeper/bootstrap`. */
+export interface GatekeeperBootstrapResponse extends PublicIpsResponse {
+  site: {
+    id: string;
+    name: string;
+    keyPrefix: string;
+  };
+  algorithm: string;
+  publicKeyPem: string;
+}
+
+/** Claims embedded inside a controller-signed `sp1.<payload>.<sig>` entitlement token. */
 export interface EntitlementClaims {
   version: 1;
   keyId: string;
   sub: string;
   email: string;
   tier: SubscriptionTier;
-  status: 'active' | 'inactive' | 'expired' | 'cancelled';
+  status: 'active' | 'past_due' | 'canceled' | 'inactive';
   currentPeriodEnd: string | null;
   issuedAt: string;
   expiresAt: string;
 }
 
+/** Verified StrictProxy user identity attached to admitted requests. */
 export interface EntitlementIdentity {
   userId: string;
   email: string;
@@ -64,37 +76,60 @@ export type DenyResponseConfig =
   | { status: number; body: unknown }
   | { redirectUrl: string };
 
+/** Options accepted by `Gatekeeper.init(...)`. */
 export interface GatekeeperInitOptions {
   /**
    * Base URL of your StrictProxy controller (e.g. `https://proxy.example.com`).
-   * Falls back to `process.env.STRICT_PROXY_CONTROLLER_URL`.
+   * Falls back to `process.env.STRICT_PROXY_CONTROLLER_URL` or `process.env.STRICT_PROXY_URL`.
    */
   controllerUrl?: string;
-  /** Alias for `controllerUrl` kept for backwards compatibility. */
+  /** Alias for `controllerUrl` (backwards-compatible with `createGatekeeperMiddleware`). */
   controllerBaseUrl?: string;
   /**
-   * Single Ed25519 SPKI public key PEM copied from `/admin#links`.
+   * Single-line Gatekeeper site API key (`sp_gk_...`) created in
+   * **Admin → Links → Gatekeeper Key Factory**.
+   *
+   * Falls back to `process.env.STRICT_PROXY_GATEKEEPER_KEY` or `process.env.STRICT_PROXY_API_KEY`.
+   *
+   * Recommended: eliminates manual multi-line PEM setup, fetches both active exit
+   * IPs and the controller Ed25519 signing key in one request, and supports
+   * per-site rotation and revocation.
+   */
+  apiKey?: string;
+  /**
+   * Controller Ed25519 signing public key PEM (`-----BEGIN PUBLIC KEY-----`).
+   * Optional when using `apiKey` or HTTPS auto-discovery.
    * Falls back to `process.env.STRICT_PROXY_PUBLIC_KEY_PEM`.
+   *
+   * Note: this is the **controller** signing key from Admin → Links, NOT a proxy
+   * node's Reality/tunnel public key.
    */
   publicKey?: string;
-  /** Key ID for `publicKey`. Optional — a single pinned `publicKey` verifies any keyId unless `publicKeys` is provided. */
+  /**
+   * Optional key id paired with `publicKey` (defaults to `process.env.STRICT_PROXY_SIGNING_KEY_ID`
+   * or accepts any key id when only a single `publicKey` is configured).
+   */
   keyId?: string;
   /**
-   * Map of `keyId -> Ed25519 public key PEM` for multi-key rotation.
-   * Takes precedence over `publicKey` when supplied.
+   * Map of `{ [keyId]: publicKeyPem }` for zero-downtime key rotation.
+   * Optional when `apiKey`, `publicKey`, or `autoFetchPublicKey` is used.
    */
   publicKeys?: Record<string, string>;
   /**
-   * Allow fetching the signing public key from `{controllerUrl}/api/v1/network/public-key`
-   * when no `publicKey` or `publicKeys` are configured. Requires HTTPS unless
-   * targeting localhost or `allowInsecureHttp` is true. Defaults to `true`.
+   * When true (default) and neither `apiKey`, `publicKey`, nor `publicKeys` is
+   * provided, automatically fetches the controller's signing key from
+   * `GET /api/v1/network/public-key` over HTTPS (or localhost/internal Docker hosts).
    */
   autoFetchPublicKey?: boolean;
-  /** Allow plain `http://` when auto-fetching the public key from a non-localhost controller. Defaults to `false`. */
+  /**
+   * Allow plain `http://` when sending `apiKey` or auto-fetching the public key
+   * against non-local public hosts. Defaults to `false` (loopback and private/Docker
+   * internal hosts are allowed automatically).
+   */
   allowInsecureHttp?: boolean;
   /**
-   * Minimum plan required to enter. Omit for proxy-only mode (any user routed
-   * through your StrictProxy fleet is admitted).
+   * Minimum StrictProxy subscription tier required to access protected routes.
+   * Omit (or pass `undefined`) for proxy-only IP gating (any connected user).
    */
   requiredTier?: SubscriptionTier;
   /** Cache TTL for the signed fleet exit-IP allowlist in seconds. Defaults to `300`. */
@@ -130,7 +165,7 @@ export interface GatekeeperInitOptions {
   /** Custom `fetch` implementation (useful for testing or custom agents). */
   fetchImpl?: typeof fetch;
   /**
-   * Logger for operational diagnostics (controller fetch failures, bad PEM, etc.).
+   * Logger for operational diagnostics (controller fetch failures, bad key, etc.).
    * Defaults to `console.warn`. Pass `false` to silence logs.
    */
   logger?: ((msg: string, meta?: unknown) => void) | false;
@@ -187,8 +222,12 @@ export interface AuthDeniedDecision {
   redirectUrl?: string;
 }
 
+export type GatekeeperAuthMode = 'api-key' | 'pinned-key' | 'auto-public-key';
+
 export interface GatekeeperStatus {
   controllerUrl: string;
+  authMode: GatekeeperAuthMode;
+  hasApiKey: boolean;
   hasPinnedKey: boolean;
   cachedIps: string[];
   cacheExpiresAt: string | null;

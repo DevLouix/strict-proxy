@@ -17,6 +17,26 @@ export function normalizePem(raw: string): string {
 }
 
 /**
+ * Validates that a supplied `publicKey` string is actually a controller Ed25519
+ * SPKI PEM and not a Gatekeeper site key (`sp_gk_...`) or a proxy node Reality/X25519
+ * public key. Returns the normalized PEM or throws an actionable error.
+ */
+export function validatePublicKeyPem(raw: string): string {
+  const normalized = normalizePem(raw);
+  if (normalized.startsWith('sp_gk_')) {
+    throw new Error(
+      'Gatekeeper.init(): `publicKey` received a Gatekeeper site API key (`sp_gk_...`). Pass it as `apiKey` instead.',
+    );
+  }
+  if (!normalized.includes('-----BEGIN PUBLIC KEY-----') || !normalized.includes('-----END PUBLIC KEY-----')) {
+    throw new Error(
+      'Gatekeeper.init(): invalid `publicKey` — expected the controller Ed25519 signing PEM starting with "-----BEGIN PUBLIC KEY-----" (from Admin -> Links), not a proxy node public key. Tip: generate a single-line site `apiKey` (`sp_gk_...`) in Admin -> Links -> Key Factory, or omit `publicKey` to auto-fetch.',
+    );
+  }
+  return normalized;
+}
+
+/**
  * Deterministic canonical JSON serialization matching StrictProxy's controller
  * signing format: sorted object keys, no whitespace, undefined fields omitted.
  */

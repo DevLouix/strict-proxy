@@ -411,3 +411,86 @@ test('Gatekeeper surfaces fetchError on denied decisions and status() when contr
   }
   assert.match(gk.status().lastError ?? '', /503/);
 });
+
+test('Gatekeeper.init() with apiKey bootstraps exit IPs + Ed25519 key in one request', async () => {
+  const { publicKeyPem, publicIpsBody, token } = makeSignedTestMaterials();
+  let seenAuth = '';
+  let seenUrl = '';
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    apiKey: 'sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz',
+    requiredTier: 'standard',
+    logger: false,
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      seenUrl = String(url);
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      seenAuth = headers.authorization ?? headers.Authorization ?? '';
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          site: { id: 's1', name: 'Partner Portal', keyPrefix: 'sp_gk_deadbeef' },
+          algorithm: 'Ed25519',
+          publicKeyPem,
+          ...publicIpsBody,
+        }),
+      };
+    }) as typeof fetch,
+  });
+
+  const decision = await gk.authorize({
+    ip: '203.0.113.10',
+    headers: { 'x-strict-proxy-entitlement': token },
+  });
+  assert.equal(decision.allowed, true);
+  assert.equal(seenUrl, 'https://controller.test/api/v1/gatekeeper/bootstrap');
+  assert.equal(seenAuth, 'Bearer sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz');
+  assert.equal(gk.status().authMode, 'api-key');
+  assert.equal(gk.status().hasApiKey, true);
+  assert.deepEqual(gk.status().cachedIps, ['203.0.113.10']);
+});
+
+test('Gatekeeper.init() rejects a node public key or sp_gk_ site key passed to publicKey', () => {
+  assert.throws(
+    () =>
+      Gatekeeper.init({
+        controllerUrl: 'https://controller.test',
+        publicKey: 'sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz',
+      }),
+    /Pass it as `apiKey` instead/,
+  );
+
+  assert.throws(
+    () =>
+      Gatekeeper.init({
+        controllerUrl: 'https://controller.test',
+        publicKey: 'm4h5s8W2kQp9L1xYz0AbCdEfGhIjKlMnOpQrStUvWxY=',
+      }),
+    /not a proxy node public key/,
+  );
+});
+
+test('Gatekeeper unwraps nested fetch err.cause details (TLS / ECONNREFUSED / AggregateError)', async () => {
+  const { publicKeyPem } = makeSignedTestMaterials();
+  const rootCause = Object.assign(new Error('unable to verify the first certificate'), {
+    code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  });
+  const fetchErr = Object.assign(new TypeError('fetch failed'), { cause: rootCause });
+
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    publicKey: publicKeyPem,
+    logger: false,
+    fetchImpl: (async () => {
+      throw fetchErr;
+    }) as typeof fetch,
+  });
+
+  const res = await gk.authorize({ ip: '203.0.113.10' });
+  assert.equal(res.allowed, false);
+  if (!res.allowed) {
+    assert.match(res.fetchError ?? '', /UNABLE_TO_VERIFY_LEAF_SIGNATURE/);
+    assert.match(res.fetchError ?? '', /controller\.test\/api\/v1\/network\/nodes\/public-ips/);
+  }
+  assert.match(gk.status().lastError ?? '', /UNABLE_TO_VERIFY_LEAF_SIGNATURE/);
+});

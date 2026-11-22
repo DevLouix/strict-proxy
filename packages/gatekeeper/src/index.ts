@@ -4,7 +4,6 @@
  * Protect any web app or API so only users connected through your StrictProxy
  * fleet (and optionally holding a paid plan) can access it.
  */
-
 export {
   Gatekeeper,
   TIER_RANK,
@@ -12,11 +11,18 @@ export {
   createGatekeeperMiddleware,
   entitlementTokenOf,
   entitlementTokenWithSourceOf,
+  formatFetchError,
   tierSatisfies,
   verifyEntitlementToken,
 } from './gatekeeper.js';
 
-export { canonicalJson, loadSigningPublicKey, normalizePem, verifyJson } from './crypto.js';
+export {
+  canonicalJson,
+  loadSigningPublicKey,
+  normalizePem,
+  validatePublicKeyPem,
+  verifyJson,
+} from './crypto.js';
 
 export type {
   AuthAllowedDecision,
@@ -34,6 +40,8 @@ export type {
   ExpressLikeNext,
   ExpressLikeRequest,
   ExpressLikeResponse,
+  GatekeeperAuthMode,
+  GatekeeperBootstrapResponse,
   GatekeeperInitOptions,
   GatekeeperOptions,
   GatekeeperRouteOptions,

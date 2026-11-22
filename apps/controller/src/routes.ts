@@ -1058,6 +1058,7 @@ export function buildRouter(ctx: Ctx): Router {
       publicKeyPem: signingPublicKeyPem(),
       publicIpsPath: '/api/v1/network/nodes/public-ips',
       publicKeyPath: '/api/v1/network/public-key',
+      bootstrapPath: '/api/v1/gatekeeper/bootstrap',
       entitlementHeader: 'x-strict-proxy-entitlement',
       entitlementQueryParam: 'sp_ticket',
       entitlementCookie: 'sp_entitlement',

@@ -85,6 +85,13 @@
       "when": 1795324394438,
       "tag": "0011_wild_hawkeye",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795410000000,
+      "tag": "0012_gatekeeper_keys",
+      "breakpoints": true
     }
   ]
 }

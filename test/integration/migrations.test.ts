@@ -21,6 +21,7 @@ const EXPECTED_TABLES = [
   'coupon_redemptions',
   'coupons',
   'gated_links',
+  'gatekeeper_keys',
   'platform_settings',
   'password_reset_tokens',
   'devices',
@@ -85,6 +86,7 @@ test('critical unique constraints exist after migrating', async () => {
     'node_enrollments_token_hash_uq',
     'billing_checkouts_reference_uq',
     'usage_rollups_window_uq',
+    'gatekeeper_keys_hash_uq',
   ]) {
     assert.ok(names.has(index), `missing unique index ${index}`);
   }

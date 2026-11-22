@@ -1,16 +1,16 @@
 /**
- * Operator-managed gated links & Gatekeeper site integration kit.
+ * Gated links, Gatekeeper Key Factory, and site integration kit.
  *
- * Operators publish sites they have placed behind the Gatekeeper middleware,
- * naming the minimum plan each site accepts. This screen also surfaces the
- * live Ed25519 public key, active exit node IPs, and ready-to-paste snippets
- * for Node/Express (`@strict-proxy/gatekeeper`), Caddy, and Nginx.
+ * Operators issue per-site API keys (`sp_gk_...`) from the Key Factory, grab
+ * ready-to-paste snippets for Node/Python/Caddy/Nginx, and publish sites they
+ * have placed behind the Gatekeeper middleware so users can open them with a
+ * one-click ticket.
  */
-import { h, mount, badge, date, toast, confirmDialog, copyText } from './dom.js';
+import { h, mount, badge, date, ago, toast, confirmDialog, copyText } from './dom.js';
 
 const TIERS = ['standard', 'pro'];
 
-/** Create/edit dialog. `link` is null when publishing a new one. */
+/** Create/edit link dialog. `link` is null when publishing a new one. */
 function linkDialog(api, link, onSaved) {
   const title = h('input', { value: link?.title ?? '', placeholder: 'Partner portal' });
   const url = h('input', {
@@ -98,6 +98,110 @@ function controllerOrigin() {
   return 'https://controller.example.com';
 }
 
+/** One-time secret reveal dialog after creating or rotating a site key. */
+function secretRevealDialog(heading, keyMeta, secret) {
+  const origin = controllerOrigin();
+  const envSnippet = [
+    `STRICT_PROXY_CONTROLLER_URL=${origin}`,
+    `STRICT_PROXY_GATEKEEPER_KEY=${secret}`,
+  ].join('\n');
+
+  const dlg = h('dialog', { class: 'wide' },
+    h('div', { class: 'dlg-head' }, h('h3', {}, heading)),
+    h('div', { class: 'dlg-body stack' },
+      h('div', { class: 'notice warn' },
+        `Save this key for “${keyMeta.name}” now — for security, the raw secret is only shown once and cannot be read back later.`),
+      h('div', { class: 'stack' },
+        h('div', { class: 'row', style: 'justify-content:space-between' },
+          h('span', { class: 'small muted' }, 'Site API key (single-line secret)'),
+          h('button', {
+            class: 'btn sm primary',
+            type: 'button',
+            onClick: () => copyText(secret, 'Site API key copied'),
+          }, 'Copy key'),
+        ),
+        h('pre', { class: 'copy', style: 'margin:0;overflow:auto' }, secret),
+      ),
+      h('div', { class: 'stack' },
+        h('div', { class: 'row', style: 'justify-content:space-between' },
+          h('span', { class: 'small muted' }, 'Ready-to-paste .env variables'),
+          h('button', {
+            class: 'btn sm',
+            type: 'button',
+            onClick: () => copyText(envSnippet, '.env snippet copied'),
+          }, 'Copy .env'),
+        ),
+        h('pre', { class: 'copy', style: 'margin:0;overflow:auto' }, envSnippet),
+      ),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn primary', onClick: () => dlg.close() }, 'Done'),
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+}
+
+/** Key Factory creation dialog. */
+function createKeyDialog(api, onCreated) {
+  const name = h('input', { placeholder: 'e.g. Partner Portal' });
+  const note = h('input', { placeholder: 'https://partner.example.com (optional)' });
+  const expiry = h('select', {},
+    h('option', { value: '', selected: true }, 'Never expires'),
+    h('option', { value: '30' }, '30 days'),
+    h('option', { value: '90' }, '90 days'),
+    h('option', { value: '365' }, '1 year'),
+  );
+  const submit = h('button', { class: 'btn primary' }, 'Generate site key');
+
+  const dlg = h('dialog', { class: 'wide' },
+    h('div', { class: 'dlg-head' }, h('h3', {}, 'Create Gatekeeper site key')),
+    h('div', { class: 'dlg-body' },
+      h('label', { class: 'field' }, h('span', {}, 'Site name'), name),
+      h('label', { class: 'field' }, h('span', {}, 'Domain / note (optional)'), note),
+      h('label', { class: 'field' }, h('span', {}, 'Expiration'), expiry),
+      h('p', { class: 'muted small' },
+        'Generates a single-line sp_gk_… secret for this site. Pass it as apiKey in '
+        + '@strict-proxy/gatekeeper or strict-proxy-gatekeeper — no multi-line PEM required. '
+        + 'You can rotate or revoke a site key anytime without affecting other sites.'),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
+      submit,
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+
+  submit.addEventListener('click', async () => {
+    const trimmedName = name.value.trim();
+    if (!trimmedName) {
+      toast('Site name is required', 'err');
+      return;
+    }
+    const payload = {
+      name: trimmedName,
+      note: note.value.trim() || null,
+      ...(expiry.value ? { expiresInDays: Number(expiry.value) } : {}),
+    };
+    submit.disabled = true;
+    submit.textContent = 'Generating…';
+    try {
+      const created = await api.post('/api/v1/admin/gatekeeper/keys', payload);
+      dlg.close();
+      toast('Site key created');
+      await onCreated();
+      secretRevealDialog('New Gatekeeper site key', created.key, created.secret);
+    } catch (err) {
+      toast(err.message, 'err');
+      submit.disabled = false;
+      submit.textContent = 'Generate site key';
+    }
+  });
+}
+
 function expressSnippet(gk, requiredTier) {
   const origin = controllerOrigin();
   const tierLine = requiredTier === 'proxy-only'
@@ -110,13 +214,13 @@ function expressSnippet(gk, requiredTier) {
     '',
     'const app = express();',
     '',
-    '// 1. Init',
+    '// 1. Init (using a single-line site key from the Key Factory above)',
     'const gk = Gatekeeper.init({',
     `  controllerUrl: process.env.STRICT_PROXY_CONTROLLER_URL ?? '${origin}',`,
-    '  publicKey: process.env.STRICT_PROXY_PUBLIC_KEY_PEM!,',
+    '  apiKey: process.env.STRICT_PROXY_GATEKEEPER_KEY!, // sp_gk_…',
     tierLine,
     '  trustForwardedFor: true,',
-    '  trustedProxyHops: 1, // number of reverse proxies (Caddy/Nginx) in front of your app',
+    '  trustedProxyHops: 1, // number of reverse proxies (Caddy/Nginx/Cloudflare) in front of your app',
     '});',
     '',
     '// 2. Auth',
@@ -141,13 +245,13 @@ function pythonSnippet(gk, requiredTier) {
     '',
     'app = FastAPI()',
     '',
-    '# 1. Init',
+    '# 1. Init (using a single-line site key from the Key Factory above)',
     'gk = Gatekeeper.init(',
     `    controller_url=os.environ.get("STRICT_PROXY_CONTROLLER_URL", "${origin}"),`,
-    '    public_key=os.environ["STRICT_PROXY_PUBLIC_KEY_PEM"],',
+    '    api_key=os.environ["STRICT_PROXY_GATEKEEPER_KEY"],  # sp_gk_…',
     tierLine,
     '    trust_forwarded_for=True,',
-    '    trusted_proxy_hops=1,  # number of reverse proxies (Caddy/Nginx) in front of your app',
+    '    trusted_proxy_hops=1,  # number of reverse proxies (Caddy/Nginx/Cloudflare) in front of your app',
     ')',
     '',
     '# 2. Auth',
@@ -200,16 +304,19 @@ export async function linksView(api) {
   const host = h('div', {});
   let rows = [];
   let gatekeeper = null;
+  let siteKeys = [];
   let snippetKind = 'express';
-  let snippetTier = 'standard';
+  let snippetTier = 'proxy-only';
 
   async function load() {
-    const [linksData, gkData] = await Promise.all([
+    const [linksData, gkData, keysData] = await Promise.all([
       api.get('/api/v1/admin/links'),
       api.get('/api/v1/admin/gatekeeper').catch(() => null),
+      api.get('/api/v1/admin/gatekeeper/keys').catch(() => ({ keys: [] })),
     ]);
     rows = linksData.links ?? [];
     gatekeeper = gkData;
+    siteKeys = keysData?.keys ?? [];
     draw();
   }
 
@@ -240,10 +347,120 @@ export async function linksView(api) {
     }
   }
 
+  async function rotateKey(item) {
+    const ok = await confirmDialog({
+      title: `Rotate key for “${item.name}”?`,
+      body: h('p', {}, 'The old secret stops working immediately. Update STRICT_PROXY_GATEKEEPER_KEY on that site with the new secret.'),
+      confirmLabel: 'Rotate key',
+    });
+    if (!ok) return;
+    try {
+      const rotated = await api.post(`/api/v1/admin/gatekeeper/keys/${item.id}/rotate`, {});
+      toast('Site key rotated');
+      await load();
+      secretRevealDialog('Rotated Gatekeeper site key', rotated.key, rotated.secret);
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }
+
+  async function revokeKey(item) {
+    const ok = await confirmDialog({
+      title: `Revoke key for “${item.name}”?`,
+      body: h('p', {}, 'The site will no longer be able to refresh exit IPs from this controller until a new key is issued or rotated.'),
+      confirmLabel: 'Revoke',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.post(`/api/v1/admin/gatekeeper/keys/${item.id}/revoke`, {});
+      toast('Site key revoked');
+      await load();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }
+
+  async function deleteKey(item) {
+    const ok = await confirmDialog({
+      title: `Delete key “${item.name}”?`,
+      body: h('p', {}, 'Permanently removes this key record. Any site still using it will fail closed.'),
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.del(`/api/v1/admin/gatekeeper/keys/${item.id}`);
+      toast('Site key deleted');
+      await load();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }
+
+  function keyFactoryPanel() {
+    const activeCount = siteKeys.filter((k) => k.status === 'active').length;
+    return h('div', { class: 'panel' },
+      h('header', {},
+        h('div', { class: 'row' },
+          h('h3', {}, 'Gatekeeper Key Factory (Site API keys)'),
+          badge(`${activeCount} active`),
+        ),
+        h('button', {
+          class: 'btn primary sm',
+          type: 'button',
+          onClick: () => createKeyDialog(api, load),
+        }, 'Create site key'),
+      ),
+      h('div', { class: 'body stack' },
+        h('p', { class: 'muted small', style: 'margin:0' },
+          'Issue one single-line sp_gk_… secret per gated web app. Pass it as apiKey in the Gatekeeper SDK — '
+          + 'it automatically fetches your active exit IPs and controller signing key in one request (never paste a proxy node public key).'),
+        h('div', { class: 'table-wrap' },
+          siteKeys.length === 0
+            ? h('div', { class: 'empty' }, 'No site keys issued yet. Click “Create site key” to generate a single-line secret for your first gated site.')
+            : h('table', {},
+              h('thead', {}, h('tr', {},
+                h('th', {}, 'Site'),
+                h('th', {}, 'Key prefix'),
+                h('th', {}, 'Status'),
+                h('th', {}, 'Last used'),
+                h('th', {}, 'Expires'),
+                h('th', { class: 'right' }, 'Actions'),
+              )),
+              h('tbody', {}, ...siteKeys.map((item) => h('tr', {},
+                h('td', {},
+                  h('div', {}, item.name),
+                  item.note ? h('span', { class: 'muted small' }, item.note) : null,
+                ),
+                h('td', { class: 'small mono' }, `${item.keyPrefix}_…`),
+                h('td', {}, badge(item.status)),
+                h('td', { class: 'small muted' },
+                  item.lastUsedAt
+                    ? `${ago(item.lastUsedAt)}${item.lastUsedIp ? ` · ${item.lastUsedIp}` : ''}`
+                    : 'never',
+                ),
+                h('td', { class: 'small muted' }, item.expiresAt ? date(item.expiresAt) : 'Never'),
+                h('td', { class: 'actions' },
+                  h('button', { class: 'btn sm', type: 'button', onClick: () => rotateKey(item) }, 'Rotate'),
+                  ' ',
+                  item.status === 'active'
+                    ? h('button', { class: 'btn sm danger', type: 'button', onClick: () => revokeKey(item) }, 'Revoke')
+                    : null,
+                  item.status === 'active' ? ' ' : null,
+                  h('button', { class: 'btn sm danger', type: 'button', onClick: () => deleteKey(item) }, 'Delete'),
+                ),
+              ))),
+            ),
+        ),
+      ),
+    );
+  }
+
   function gatekeeperPanel() {
     const ips = gatekeeper?.allowedIps ?? [];
     const origin = controllerOrigin();
-    const publicIpsUrl = `${origin}${gatekeeper?.publicIpsPath ?? '/api/v1/network/nodes/public-ips'}`;
+    const bootstrapUrl = `${origin}${gatekeeper?.bootstrapPath ?? '/api/v1/gatekeeper/bootstrap'}`;
     const snippetText = snippetKind === 'python'
       ? pythonSnippet(gatekeeper, snippetTier)
       : snippetKind === 'caddy'
@@ -283,7 +500,7 @@ export async function linksView(api) {
       h('div', { class: 'body stack' },
         h('p', { class: 'muted small', style: 'margin:0' },
           'Sites protected with the Gatekeeper only admit traffic exiting your StrictProxy nodes. '
-          + 'Set requiredTier to standard or pro to enforce subscriptions offline, then publish the URL below so users can open it with a one-click ticket.'),
+          + 'Leave requiredTier unset for proxy-only browsing, or set requiredTier to standard/pro to enforce subscriptions offline via a one-click ticket.'),
         gatekeeper && ips.length === 0
           ? h('div', { class: 'notice warn' },
               'No online proxy nodes are enrolled yet. Enroll and bring at least one node online so the Gatekeeper allowlist has exit IPs to admit.')
@@ -296,26 +513,28 @@ export async function linksView(api) {
                   h('button', {
                     class: 'btn sm',
                     type: 'button',
-                    onClick: () => copyText(publicIpsUrl, 'Allowlist URL copied'),
-                  }, 'Copy allowlist URL'),
+                    onClick: () => copyText(bootstrapUrl, 'Bootstrap URL copied'),
+                  }, 'Copy bootstrap URL'),
                 ),
                 ips.length
                   ? h('div', { class: 'row' },
                       ...ips.map((n) => h('span', { class: 'badge online mono' }, `${n.publicIp} · ${n.region}`)),
                     )
                   : h('span', { class: 'muted small' }, 'No active exit IPs yet.'),
-                h('div', { class: 'small muted mono', style: 'overflow-wrap:anywhere' }, publicIpsUrl),
+                h('div', { class: 'small muted mono', style: 'overflow-wrap:anywhere' }, bootstrapUrl),
               ),
               h('div', { class: 'stack' },
                 h('div', { class: 'row', style: 'justify-content:space-between' },
-                  h('span', { class: 'small muted' }, `Signing public key (${gatekeeper.algorithm})`),
+                  h('span', { class: 'small muted' }, `Controller signing key (${gatekeeper.algorithm}, optional)`),
                   h('button', {
                     class: 'btn sm',
                     type: 'button',
-                    onClick: () => copyText(gatekeeper.publicKeyPem, 'Public key copied'),
-                  }, 'Copy public key'),
+                    onClick: () => copyText(gatekeeper.publicKeyPem, 'Controller signing key copied'),
+                  }, 'Copy signing PEM'),
                 ),
                 h('pre', { class: 'copy', style: 'margin:0;max-height:110px;overflow:auto' }, gatekeeper.publicKeyPem),
+                h('span', { class: 'small muted' },
+                  'Only needed if you pin PEMs manually instead of using a site API key. Never use a proxy node public key here.'),
               ),
             )
           : null,
@@ -347,13 +566,14 @@ export async function linksView(api) {
       h('div', { class: 'page-head' },
         h('div', {},
           h('h2', {}, 'Links'),
-          h('p', {}, 'Sites you gate with StrictProxy, published to accounts by plan.'),
+          h('p', {}, 'Issue Gatekeeper site keys, protect web apps, and publish links to accounts by plan.'),
         ),
         h('div', { class: 'row' },
           h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'),
           h('button', { class: 'btn primary sm', onClick: () => linkDialog(api, null, load) }, 'Publish link'),
         ),
       ),
+      keyFactoryPanel(),
       gatekeeperPanel(),
       h('div', { class: 'panel' },
         h('header', {},

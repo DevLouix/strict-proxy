@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import logging
 import os
@@ -17,7 +18,13 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
-from .crypto import b64url_decode, load_signing_public_key, normalize_pem, verify_json
+from .crypto import (
+    b64url_decode,
+    load_signing_public_key,
+    normalize_pem,
+    validate_public_key_pem,
+    verify_json,
+)
 
 SubscriptionTier = str  # "free" | "standard" | "pro"
 
@@ -307,21 +314,61 @@ def _build_entitlement_cookie(
 def _is_loopback_host(hostname: Optional[str]) -> bool:
     if not hostname:
         return False
-    return hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+    h = hostname.strip("[]").lower()
+    return h in {"localhost", "127.0.0.1", "::1"} or h.startswith("127.")
 
 
-def _default_http_get_json(url: str, timeout_seconds: float) -> dict[str, Any]:
-    req = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json", "User-Agent": "strict-proxy-gatekeeper-py/0.1.0"},
-        method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-        status = getattr(resp, "status", 200)
-        if status < 200 or status >= 300:
-            raise RuntimeError(f"HTTP {status} from {url}")
-        raw = resp.read().decode("utf-8")
-        return json.loads(raw)
+def _is_private_or_internal_host(hostname: Optional[str]) -> bool:
+    if not hostname:
+        return False
+    h = hostname.strip("[]").lower()
+    if _is_loopback_host(h):
+        return True
+    if "." not in h and ":" not in h:
+        return True
+    if h.endswith(".local") or h.endswith(".internal"):
+        return True
+    if re.match(r"^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$", h):
+        return True
+    if re.match(r"^192\.168\.\d{1,3}\.\d{1,3}$", h):
+        return True
+    m172 = re.match(r"^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$", h)
+    if m172 and 16 <= int(m172.group(1)) <= 31:
+        return True
+    return False
+
+
+def _default_http_get_json(
+    url: str,
+    timeout_seconds: float,
+    headers: Optional[Mapping[str, str]] = None,
+) -> dict[str, Any]:
+    req_headers = {
+        "Accept": "application/json",
+        "User-Agent": "strict-proxy-gatekeeper-py/0.2.0",
+    }
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            status = getattr(resp, "status", 200)
+            if status < 200 or status >= 300:
+                raise RuntimeError(f"HTTP {status} from {url}")
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403) and "/gatekeeper/bootstrap" in url:
+            raise RuntimeError(
+                f"gatekeeper bootstrap rejected ({exc.code}): invalid, revoked, or expired api_key"
+            ) from exc
+        if exc.code == 404 and "/gatekeeper/bootstrap" in url:
+            raise RuntimeError(
+                f"gatekeeper bootstrap failed (404): controller does not expose /api/v1/gatekeeper/bootstrap yet ({url})"
+            ) from exc
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"fetch failed for {url} ({exc.reason})") from exc
 
 
 class Gatekeeper:
@@ -340,6 +387,7 @@ class Gatekeeper:
         self,
         *,
         controller_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         public_key: Optional[str] = None,
         key_id: Optional[str] = None,
         public_keys: Optional[Mapping[str, str]] = None,
@@ -359,10 +407,14 @@ class Gatekeeper:
         trust_forwarded_for: bool = False,
         trusted_proxy_hops: Optional[int] = None,
         failure_mode: str = "closed",
-        http_get_json: Optional[Callable[[str, float], dict[str, Any]]] = None,
+        http_get_json: Optional[Callable[..., dict[str, Any]]] = None,
         logger: Optional[Callable[[str], None]] = None,
     ) -> None:
-        raw_url = (controller_url or os.environ.get("STRICT_PROXY_CONTROLLER_URL", "")).strip()
+        raw_url = (
+            controller_url
+            or os.environ.get("STRICT_PROXY_CONTROLLER_URL", "")
+            or os.environ.get("STRICT_PROXY_URL", "")
+        ).strip()
         if not raw_url:
             raise ValueError(
                 "Gatekeeper.init() requires `controller_url` (or env STRICT_PROXY_CONTROLLER_URL)."
@@ -375,11 +427,26 @@ class Gatekeeper:
         clean_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
         self._controller_base_url = clean_url.rstrip("/")
 
+        raw_api_key = (
+            api_key
+            or os.environ.get("STRICT_PROXY_GATEKEEPER_KEY", "")
+            or os.environ.get("STRICT_PROXY_API_KEY", "")
+        ).strip()
+        self._api_key: Optional[str] = raw_api_key or None
+
         env_key = os.environ.get("STRICT_PROXY_PUBLIC_KEY_PEM", "").strip()
-        env_key_id = os.environ.get("STRICT_PROXY_KEY_ID", "").strip()
-        self._pinned_keys: dict[str, str] = {k: normalize_pem(v) for k, v in public_keys.items()} if public_keys else {}
-        single_key = (public_key or "").strip() or (env_key if not public_keys and env_key else "")
-        self._pinned_single_key: Optional[str] = normalize_pem(single_key) if single_key else None
+        env_key_id = (
+            os.environ.get("STRICT_PROXY_SIGNING_KEY_ID", "")
+            or os.environ.get("STRICT_PROXY_KEY_ID", "")
+        ).strip()
+        self._pinned_keys: dict[str, str] = (
+            {k: validate_public_key_pem(v) for k, v in public_keys.items()} if public_keys else {}
+        )
+        single_key = (
+            (public_key or "").strip()
+            or (env_key if not self._api_key and not public_keys and env_key else "")
+        )
+        self._pinned_single_key: Optional[str] = validate_public_key_pem(single_key) if single_key else None
         if self._pinned_single_key and (key_id or env_key_id):
             self._pinned_keys[key_id or env_key_id] = self._pinned_single_key
 
@@ -387,9 +454,14 @@ class Gatekeeper:
         self._auto_fetch_public_key = auto_fetch_public_key
         self._allow_insecure_http = allow_insecure_http
 
-        if not self._pinned_single_key and not self._pinned_keys and not self._auto_fetch_public_key:
+        if (
+            not self._api_key
+            and not self._pinned_single_key
+            and not self._pinned_keys
+            and not self._auto_fetch_public_key
+        ):
             raise ValueError(
-                "Gatekeeper.init() requires `public_key` or `public_keys` when `auto_fetch_public_key` is False."
+                "Gatekeeper.init() requires `api_key`, `public_key`, or `public_keys` when `auto_fetch_public_key` is False."
             )
 
         if required_tier is not None and required_tier not in _VALID_TIERS:
@@ -430,44 +502,25 @@ class Gatekeeper:
         else:
             _DEFAULT_LOGGER.warning("%s", msg)
 
-    def _resolve_keys(self) -> Union[dict[str, str], str]:
-        if self._pinned_keys and not self._pinned_single_key:
-            return self._pinned_keys
-        if self._pinned_single_key:
-            return self._pinned_single_key
-        with self._lock:
-            if self._discovered_keys is not None:
-                return self._discovered_keys
-        if not self._auto_fetch_public_key:
-            raise RuntimeError("gatekeeper: no public key configured")
-        if (
-            self._parsed_url.scheme != "https"
-            and not _is_loopback_host(self._parsed_url.hostname)
-            and not self._allow_insecure_http
-        ):
-            raise RuntimeError(
-                "gatekeeper: auto-fetching the public key requires https:// "
-                "(pin `public_key` or set `allow_insecure_http=True` for local testing)"
-            )
-        body = self._http_get_json(
-            f"{self._controller_base_url}/api/v1/network/public-key",
-            self._fetch_timeout_seconds,
-        )
-        key_id = body.get("keyId")
-        pub_pem = body.get("publicKeyPem")
-        if not isinstance(key_id, str) or not isinstance(pub_pem, str):
-            raise RuntimeError("public-key response missing keyId or publicKeyPem")
-        discovered = {key_id: pub_pem}
-        with self._lock:
-            self._discovered_keys = discovered
-        return discovered
+    def _call_http_get_json(
+        self, url: str, headers: Optional[Mapping[str, str]] = None
+    ) -> dict[str, Any]:
+        fn = self._http_get_json
+        if headers:
+            try:
+                sig = inspect.signature(fn)
+                params = list(sig.parameters.values())
+                accepts_headers = len(params) >= 3 or any(
+                    p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                    for p in params
+                )
+            except (TypeError, ValueError):
+                accepts_headers = False
+            if accepts_headers:
+                return fn(url, self._fetch_timeout_seconds, headers)
+        return fn(url, self._fetch_timeout_seconds)
 
-    def _fetch_ip_set(self) -> frozenset[str]:
-        keys = self._resolve_keys()
-        body = self._http_get_json(
-            f"{self._controller_base_url}/api/v1/network/nodes/public-ips",
-            self._fetch_timeout_seconds,
-        )
+    def _verify_signed_ip_payload(self, body: Mapping[str, Any], key_pem: str) -> frozenset[str]:
         key_id = body.get("keyId")
         signature = body.get("signature")
         generated_at = body.get("generatedAt")
@@ -482,10 +535,6 @@ class Gatekeeper:
         ):
             raise RuntimeError("public-ips response malformed")
 
-        key_pem = keys if isinstance(keys, str) else keys.get(key_id)
-        if not key_pem:
-            raise RuntimeError(f"unknown signing key id: {key_id}")
-
         payload = {"generatedAt": generated_at, "expiresAt": expires_at, "ips": ips}
         pub_key = load_signing_public_key(key_id, key_pem)
         if not verify_json(pub_key, payload, signature):
@@ -496,6 +545,84 @@ class Gatekeeper:
             raise RuntimeError("public-ips list expired")
 
         return frozenset(_normalize_ip(str(ip)) for ip in ips)
+
+    def _fetch_bootstrap(self) -> frozenset[str]:
+        if (
+            self._parsed_url.scheme != "https"
+            and not _is_private_or_internal_host(self._parsed_url.hostname)
+            and not self._allow_insecure_http
+        ):
+            raise RuntimeError(
+                "gatekeeper: api_key bootstrap requires https:// for non-local hosts "
+                "(use https://, a local/Docker internal host, or set allow_insecure_http=True)"
+            )
+        url = f"{self._controller_base_url}/api/v1/gatekeeper/bootstrap"
+        body = self._call_http_get_json(url, headers={"Authorization": f"Bearer {self._api_key}"})
+        key_id = body.get("keyId")
+        pub_pem = body.get("publicKeyPem")
+        if not isinstance(key_id, str) or not isinstance(pub_pem, str):
+            raise RuntimeError("gatekeeper bootstrap response missing keyId or publicKeyPem")
+        normalized_pem = normalize_pem(pub_pem)
+        with self._lock:
+            self._discovered_keys = {key_id: normalized_pem}
+
+        if self._pinned_single_key:
+            verify_pem: Optional[str] = self._pinned_single_key
+        elif self._pinned_keys:
+            verify_pem = self._pinned_keys.get(key_id)
+        else:
+            verify_pem = normalized_pem
+        if not verify_pem:
+            raise RuntimeError(f"unknown signing key id: {key_id}")
+        return self._verify_signed_ip_payload(body, verify_pem)
+
+    def _resolve_keys(self) -> Union[dict[str, str], str]:
+        if self._pinned_keys and not self._pinned_single_key:
+            return self._pinned_keys
+        if self._pinned_single_key:
+            return self._pinned_single_key
+        with self._lock:
+            if self._discovered_keys is not None:
+                return self._discovered_keys
+        if self._api_key:
+            self._get_ip_set()
+            with self._lock:
+                if self._discovered_keys is not None:
+                    return self._discovered_keys
+            raise RuntimeError("gatekeeper: bootstrap did not return a controller signing key")
+        if not self._auto_fetch_public_key:
+            raise RuntimeError("gatekeeper: no public key configured")
+        if (
+            self._parsed_url.scheme != "https"
+            and not _is_loopback_host(self._parsed_url.hostname)
+            and not self._allow_insecure_http
+        ):
+            raise RuntimeError(
+                "gatekeeper: auto-fetching the public key requires https:// "
+                "(use `api_key`, pin `public_key`, or set `allow_insecure_http=True` for local testing)"
+            )
+        body = self._call_http_get_json(f"{self._controller_base_url}/api/v1/network/public-key")
+        key_id = body.get("keyId")
+        pub_pem = body.get("publicKeyPem")
+        if not isinstance(key_id, str) or not isinstance(pub_pem, str):
+            raise RuntimeError("public-key response missing keyId or publicKeyPem")
+        discovered = {key_id: normalize_pem(pub_pem)}
+        with self._lock:
+            self._discovered_keys = discovered
+        return discovered
+
+    def _fetch_ip_set(self) -> frozenset[str]:
+        if self._api_key:
+            return self._fetch_bootstrap()
+        keys = self._resolve_keys()
+        body = self._call_http_get_json(f"{self._controller_base_url}/api/v1/network/nodes/public-ips")
+        key_id = body.get("keyId")
+        if not isinstance(key_id, str):
+            raise RuntimeError("public-ips response malformed")
+        key_pem = keys if isinstance(keys, str) else keys.get(key_id)
+        if not key_pem:
+            raise RuntimeError(f"unknown signing key id: {key_id}")
+        return self._verify_signed_ip_payload(body, key_pem)
 
     def _get_ip_set(self, *, force_refresh: bool = False) -> frozenset[str]:
         now = time.time()
@@ -529,9 +656,15 @@ class Gatekeeper:
                 else None
             )
             last_err = self._last_error
+        has_pinned_key = bool(self._pinned_single_key or self._pinned_keys)
+        auth_mode = (
+            "api-key" if self._api_key else ("pinned-key" if has_pinned_key else "auto-public-key")
+        )
         return {
             "controller_url": self._controller_base_url,
-            "has_pinned_key": bool(self._pinned_single_key or self._pinned_keys),
+            "auth_mode": auth_mode,
+            "has_api_key": bool(self._api_key),
+            "has_pinned_key": has_pinned_key,
             "cached_ips": cached,
             "cache_expires_at": exp_iso,
             "last_error": last_err,

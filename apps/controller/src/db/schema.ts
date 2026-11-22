@@ -559,3 +559,40 @@ export const clientCrashReports = pgTable(
     index('client_crash_reports_created_idx').on(t.createdAt),
   ],
 );
+
+/**
+ * Gatekeeper site API keys issued by the Key Factory.
+ *
+ * Each gated website gets its own single-line secret (`sp_gk_<prefix>_<secret>`),
+ * hashed with SHA-256 before storage and shown once at creation or rotation.
+ * The Gatekeeper SDK exchanges this key at `GET /api/v1/gatekeeper/bootstrap`
+ * to fetch the signed fleet exit-IP list and controller Ed25519 public key in
+ * one round-trip — eliminating manual multi-line PEM copying and allowing
+ * per-site revocation and usage tracking without sacrificing offline Ed25519
+ * entitlement verification.
+ */
+export const gatekeeperKeys = pgTable(
+  'gatekeeper_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Operator-assigned site or application name (e.g. "Partner Portal"). */
+    name: text('name').notNull(),
+    /** Non-secret display prefix (e.g. "sp_gk_a1b2c3d4") for identifying keys in UI/logs. */
+    keyPrefix: text('key_prefix').notNull(),
+    /** SHA-256 hex digest of the raw site key. Plaintext is never persisted. */
+    keyHash: text('key_hash').notNull(),
+    /** Optional domain or operator notes. */
+    note: text('note'),
+    active: boolean('active').notNull().default(true),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    lastUsedIp: text('last_used_ip'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('gatekeeper_keys_hash_uq').on(t.keyHash),
+    index('gatekeeper_keys_active_idx').on(t.active),
+  ],
+);

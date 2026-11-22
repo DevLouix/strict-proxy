@@ -15,6 +15,25 @@ _key_cache_lock = threading.Lock()
 _key_cache: dict[str, Ed25519PublicKey] = {}
 
 
+
+def validate_public_key_pem(raw: str) -> str:
+    """Validates that `public_key` is a controller Ed25519 PEM, not a node key or site API key."""
+    normalized = normalize_pem(raw)
+    if normalized.startswith("sp_gk_"):
+        raise ValueError(
+            "Gatekeeper.init(): `public_key` received a Gatekeeper site API key (`sp_gk_...`). "
+            "Pass it as `api_key` instead."
+        )
+    if "-----BEGIN PUBLIC KEY-----" not in normalized or "-----END PUBLIC KEY-----" not in normalized:
+        raise ValueError(
+            "Gatekeeper.init(): invalid `public_key` — expected the controller Ed25519 signing PEM "
+            'starting with "-----BEGIN PUBLIC KEY-----" (from Admin -> Links), not a proxy node public key. '
+            "Tip: generate a single-line site `api_key` (`sp_gk_...`) in Admin -> Links -> Key Factory, "
+            "or omit `public_key` to auto-fetch."
+        )
+    return normalized
+
+
 def canonical_json(payload: Any) -> str:
     """Deterministic canonical JSON matching `@strict-proxy/types` and `@strict-proxy/gatekeeper`.
 

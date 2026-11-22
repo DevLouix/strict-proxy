@@ -317,7 +317,25 @@ export function stubApi() {
       entitlementQueryParam: 'sp_ticket',
       entitlementCookie: 'sp_entitlement',
       entitlementTtlSeconds: 600,
+      bootstrapPath: '/api/v1/gatekeeper/bootstrap',
       allowedIps: [{ nodeId: 'n1', region: 'us-east', publicIp: '203.0.113.10' }],
+    },
+    gatekeeperKeys: {
+      keys: [
+        {
+          id: 'gk1',
+          name: 'Partner Portal',
+          keyPrefix: 'sp_gk_deadbeef',
+          note: 'https://partner.example.com',
+          active: true,
+          status: 'active',
+          lastUsedAt: new Date().toISOString(),
+          lastUsedIp: '203.0.113.10',
+          expiresAt: null,
+          revokedAt: null,
+          createdAt: '2026-03-01T00:00:00Z',
+        },
+      ],
     },
     crashes: {
       crashes: [
@@ -360,12 +378,19 @@ export function stubApi() {
       if (path.startsWith('/api/v1/admin/settings/client')) return data.clientGate;
       if (path.startsWith('/api/v1/admin/billing/plans')) return data.plans;
       if (path.startsWith('/api/v1/admin/billing/providers')) return data.providers;
+      if (path.startsWith('/api/v1/admin/gatekeeper/keys')) return data.gatekeeperKeys;
       if (path.startsWith('/api/v1/admin/gatekeeper')) return data.gatekeeper;
       if (path.startsWith('/api/v1/admin/links')) return data.links;
       throw new Error(`unstubbed GET ${path}`);
     },
     async post(path, body) {
       this.calls.push(['POST', path, body]);
+      if (path === '/api/v1/admin/gatekeeper/keys' || path.endsWith('/rotate')) {
+        return { key: data.gatekeeperKeys.keys[0], secret: 'sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz' };
+      }
+      if (path.endsWith('/revoke')) {
+        return { key: { ...data.gatekeeperKeys.keys[0], active: false, status: 'revoked' } };
+      }
       if (path.endsWith('/rotate-secret')) {
         return { nodeId: 'n1', secret: 'new-node-secret-value', previousValidUntil: new Date(Date.now() + 86_400_000).toISOString() };
       }

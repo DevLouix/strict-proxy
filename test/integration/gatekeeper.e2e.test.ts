@@ -10,7 +10,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { createHarness, type Harness } from '../helpers/harness.js';
-import { createGatekeeperMiddleware } from '@strict-proxy/gatekeeper';
+import { Gatekeeper, createGatekeeperMiddleware } from '@strict-proxy/gatekeeper';
 
 let h: Harness;
 let gkBaseUrl: string;
@@ -304,4 +304,86 @@ test('a forged entitlement token is rejected even from a fleet IP', async () => 
   } finally {
     await origin.stop();
   }
+});
+
+test('Key Factory: admin issues sp_gk_ site key, SDK bootstraps & enforces tier, rotate/revoke cuts off old secret', async () => {
+  await h.seedNode({ status: 'online', publicIp: '203.0.113.77' });
+  const adminToken = await h.adminToken();
+
+  // 1. Admin creates a site key via the Key Factory
+  const created = await h.request<{ key: { id: string; keyPrefix: string; status: string }; secret: string }>(
+    'POST',
+    '/api/v1/admin/gatekeeper/keys',
+    {
+      token: adminToken,
+      body: { name: 'Partner Portal', note: 'https://partner.example.com' },
+    },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.ok(created.body.secret.startsWith('sp_gk_'));
+  const keyId = created.body.key.id;
+  const firstSecret = created.body.secret;
+
+  // 2. SDK initializes with ONLY controllerUrl + apiKey (zero PEMs!)
+  const gk = Gatekeeper.init({
+    controllerUrl: h.baseUrl,
+    apiKey: firstSecret,
+    requiredTier: 'standard',
+    trustForwardedFor: true,
+    trustedProxyHops: 1,
+    cacheTtlSeconds: 1,
+    logger: false,
+  });
+
+  const standardToken = await entitlementFor('keyfactory@example.test', 'standard');
+  const allowed = await gk.authorize({
+    ip: '127.0.0.1',
+    headers: {
+      'x-forwarded-for': '203.0.113.77',
+      'x-strict-proxy-entitlement': standardToken,
+    },
+  });
+  assert.equal(allowed.allowed, true);
+  if (allowed.allowed) {
+    assert.equal(allowed.user?.tier, 'standard');
+  }
+  assert.equal(gk.status().authMode, 'api-key');
+
+  // Verify usage telemetry was stamped in admin listing
+  const listed = await h.request<{ keys: Array<{ id: string; lastUsedAt: string | null }> }>(
+    'GET',
+    '/api/v1/admin/gatekeeper/keys',
+    { token: adminToken },
+  );
+  assert.equal(listed.status, 200);
+  const row = listed.body.keys.find((k) => k.id === keyId);
+  assert.ok(row?.lastUsedAt, 'lastUsedAt should be recorded after bootstrap');
+
+  // 3. Rotate key -> old secret fails 401, new secret succeeds
+  const rotated = await h.request<{ key: { id: string }; secret: string }>(
+    'POST',
+    `/api/v1/admin/gatekeeper/keys/${keyId}/rotate`,
+    { token: adminToken, body: {} },
+  );
+  assert.equal(rotated.status, 200);
+  assert.notEqual(rotated.body.secret, firstSecret);
+
+  await assert.rejects(() => gk.refresh(), /401|rejected/);
+
+  const gkRotated = Gatekeeper.init({
+    controllerUrl: h.baseUrl,
+    apiKey: rotated.body.secret,
+    logger: false,
+  });
+  assert.deepEqual(await gkRotated.refresh(), ['203.0.113.77']);
+
+  // 4. Revoke key -> fails closed immediately on refresh
+  const revoked = await h.request<{ key: { status: string } }>(
+    'POST',
+    `/api/v1/admin/gatekeeper/keys/${keyId}/revoke`,
+    { token: adminToken, body: {} },
+  );
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.body.key.status, 'revoked');
+  await assert.rejects(() => gkRotated.refresh(), /401|rejected/);
 });

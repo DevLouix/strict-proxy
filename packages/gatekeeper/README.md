@@ -22,20 +22,18 @@ npm install @strict-proxy/gatekeeper
 
 > Needs Node.js 20 or newer. Zero extra dependencies.
 
-### Step 2 — Grab 2 values from your StrictProxy Admin Console
+### Step 2 — Create a Site Key in your StrictProxy Admin Console
 
 1. Open your controller admin page at **`https://YOUR-CONTROLLER/admin#links`**.
-2. Copy:
-   - Your **Controller URL** (example: `https://proxy.example.com`)
-   - Your **Signing Public Key** (click **Copy public key**)
-3. Put them in your site's `.env` file:
+2. In **Gatekeeper Key Factory (Site API keys)**, click **Create site key** and give your site a name (e.g. `Partner Portal`).
+3. Click **Copy .env** and paste the 2 single-line values into your site's `.env` file:
 
 ```env
 STRICT_PROXY_CONTROLLER_URL=https://proxy.example.com
-STRICT_PROXY_PUBLIC_KEY_PEM="-----BEGIN PUBLIC KEY-----
-paste-your-public-key-here
------END PUBLIC KEY-----"
+STRICT_PROXY_GATEKEEPER_KEY=sp_gk_your_generated_site_secret
 ```
+
+> **No multi-line PEMs!** Your single-line `sp_gk_…` site key automatically fetches both your active proxy exit IPs and the controller's Ed25519 signing key in one request — and can be rotated or revoked per site anytime. *(Never paste a proxy node's Reality/tunnel public key here.)*
 
 ### Step 3 — Init, then Auth (3 lines of code!)
 
@@ -46,7 +44,7 @@ import { Gatekeeper } from '@strict-proxy/gatekeeper';
 const app = express();
 
 // 1. INIT — tell the bouncer where your StrictProxy controller is
-//    (automatically reads STRICT_PROXY_CONTROLLER_URL and STRICT_PROXY_PUBLIC_KEY_PEM from .env!)
+//    (automatically reads STRICT_PROXY_CONTROLLER_URL and STRICT_PROXY_GATEKEEPER_KEY from .env!)
 const gk = Gatekeeper.init();
 
 // 2. AUTH — put the bouncer in front of your whole website

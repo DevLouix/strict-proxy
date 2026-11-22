@@ -1,4 +1,4 @@
-import { loadSigningPublicKey, normalizePem, verifyJson } from './crypto.js';
+import { loadSigningPublicKey, normalizePem, validatePublicKeyPem, verifyJson } from './crypto.js';
 import type {
   AuthDecision,
   AuthInput,
@@ -12,6 +12,8 @@ import type {
   ExpressLikeNext,
   ExpressLikeRequest,
   ExpressLikeResponse,
+  GatekeeperAuthMode,
+  GatekeeperBootstrapResponse,
   GatekeeperInitOptions,
   GatekeeperOptions,
   GatekeeperRouteOptions,
@@ -21,7 +23,7 @@ import type {
   SubscriptionTier,
 } from './types.js';
 
-/** Order of plans from lowest to highest. A higher tier always satisfies a lower requirement. */
+/** Numeric ordering of StrictProxy plans (higher includes lower). */
 export const TIER_RANK: Record<SubscriptionTier, number> = {
   free: 0,
   standard: 1,
@@ -29,37 +31,109 @@ export const TIER_RANK: Record<SubscriptionTier, number> = {
 };
 
 const VALID_TIERS = new Set<string>(['free', 'standard', 'pro']);
-const VALID_STATUSES = new Set<string>(['active', 'inactive', 'expired', 'cancelled']);
-const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const VALID_STATUSES = new Set<string>(['active', 'past_due', 'canceled', 'inactive']);
+const COOKIE_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
-/** Returns true when `actual` satisfies a gate requiring at least `required`. */
+/** True when `actual` satisfies a site's `required` minimum plan. */
 export function tierSatisfies(actual: SubscriptionTier, required: SubscriptionTier): boolean {
   return TIER_RANK[actual] >= TIER_RANK[required];
 }
 
 function normalizeIp(raw: string): string {
-  let s = raw.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    s = s.slice(1, -1).trim();
+  let ip = raw.trim();
+  if ((ip.startsWith('"') && ip.endsWith('"')) || (ip.startsWith("'") && ip.endsWith("'"))) {
+    ip = ip.slice(1, -1).trim();
   }
-  // Bracketed IPv6, optionally with :port (e.g. [2001:db8::1]:443 or [::ffff:1.2.3.4]:80)
-  if (s.startsWith('[')) {
-    const end = s.indexOf(']');
-    if (end > 1) s = s.slice(1, end);
-  } else {
-    // Strip IPv4 :port (single colon, e.g. 140.238.127.231:54321)
-    const firstColon = s.indexOf(':');
-    if (firstColon > 0 && firstColon === s.lastIndexOf(':')) {
-      const portPart = s.slice(firstColon + 1);
-      if (/^\d+$/.test(portPart)) {
-        s = s.slice(0, firstColon);
-      }
-    }
+  // Bracketed IPv6, optionally with port: "[2001:db8::1]:443" -> "2001:db8::1"
+  if (ip.startsWith('[')) {
+    const close = ip.indexOf(']');
+    if (close > 1) ip = ip.slice(1, close);
   }
-  if (s.toLowerCase().startsWith('::ffff:')) {
-    s = s.slice(7);
+  // IPv4-mapped IPv6: "::ffff:203.0.113.10" (case-insensitive) -> "203.0.113.10"
+  if (ip.toLowerCase().startsWith('::ffff:')) {
+    ip = ip.slice(7);
   }
-  return s.includes(':') ? s.toLowerCase() : s;
+  // IPv4 with trailing port: "203.0.113.10:54321" -> "203.0.113.10"
+  const ipv4Port = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(ip);
+  if (ipv4Port) {
+    ip = ipv4Port[1]!;
+  }
+  return ip.includes(':') ? ip.toLowerCase() : ip;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h.startsWith('127.');
+}
+
+function isPrivateOrInternalHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (isLoopbackHost(h)) return true;
+  // Single-label Docker/Kubernetes service hostnames (e.g. "controller", "strict-proxy")
+  if (!h.includes('.') && !h.includes(':')) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal')) return true;
+  // RFC1918 IPv4 private ranges
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  const m172 = /^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
+  if (m172) {
+    const second = Number(m172[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
+function describeCause(err: unknown, depth = 0): string {
+  if (!err || depth > 4) return '';
+  if (typeof err !== 'object') return String(err);
+  const e = err as Record<string, unknown>;
+
+  const parts: string[] = [];
+  if (typeof e.code === 'string' && e.code) parts.push(e.code);
+  const hostPort =
+    typeof e.address === 'string'
+      ? `${e.address}${e.port ? `:${e.port}` : ''}`
+      : typeof e.hostname === 'string'
+        ? `${e.hostname}${e.port ? `:${e.port}` : ''}`
+        : '';
+  if (hostPort) parts.push(hostPort);
+  if (typeof e.message === 'string' && e.message && e.message !== 'fetch failed') {
+    parts.push(e.message);
+  }
+
+  // Node 20+ dual-stack failures often wrap underlying ECONNREFUSED/ETIMEDOUT inside AggregateError.errors
+  if (Array.isArray(e.errors) && e.errors.length > 0) {
+    const sub = e.errors
+      .slice(0, 3)
+      .map((item) => describeCause(item, depth + 1))
+      .filter(Boolean);
+    if (sub.length > 0) parts.push(sub.join('; '));
+  }
+
+  if (e.cause) {
+    const nested = describeCause(e.cause, depth + 1);
+    if (nested && !parts.includes(nested)) parts.push(nested);
+  }
+
+  return parts.join(' - ');
+}
+
+/**
+ * Formats an error thrown by `fetch()` or crypto verification so Node's generic
+ * `"fetch failed"` always includes the underlying `err.cause` (`code`, TLS error,
+ * `ECONNREFUSED`, `ENOTFOUND`, `AggregateError`, etc.) and target URL.
+ */
+export function formatFetchError(err: unknown, url?: string): string {
+  const base = err instanceof Error ? err.message : String(err);
+  const causeDetail =
+    err && typeof err === 'object' && 'cause' in err
+      ? describeCause((err as { cause?: unknown }).cause)
+      : '';
+  const target = url ? ` for ${url}` : '';
+  if (causeDetail) {
+    return `${base}${target} (${causeDetail})`;
+  }
+  return `${base}${target}`;
 }
 
 function readHeader(
@@ -67,30 +141,31 @@ function readHeader(
   name: string,
 ): string | undefined {
   if (!headers) return undefined;
-  if (headers instanceof Headers) {
-    return headers.get(name) ?? undefined;
+  if (typeof (headers as Headers).get === 'function') {
+    return (headers as Headers).get(name) ?? undefined;
   }
-  const lower = name.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() !== lower) continue;
-    if (Array.isArray(v)) return v.join(', ');
-    return v;
+  const target = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers as Record<string, string | string[] | undefined>)) {
+    if (k.toLowerCase() === target) {
+      if (Array.isArray(v)) return v.join(', ');
+      return v;
+    }
   }
   return undefined;
 }
 
 function readQueryParam(
   query: Record<string, unknown> | URLSearchParams | undefined,
-  param: string,
+  name: string,
 ): string | undefined {
   if (!query) return undefined;
-  if (query instanceof URLSearchParams) {
-    const val = query.get(param);
-    return val && val.length > 0 ? val : undefined;
+  if (typeof (query as URLSearchParams).get === 'function') {
+    const v = (query as URLSearchParams).get(name);
+    return v && v.length > 0 ? v : undefined;
   }
-  const val = query[param];
-  if (typeof val === 'string' && val.length > 0) return val;
-  if (Array.isArray(val) && typeof val[0] === 'string' && val[0].length > 0) return val[0];
+  const value = (query as Record<string, unknown>)[name];
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (Array.isArray(value) && typeof value[0] === 'string' && value[0].length > 0) return value[0];
   return undefined;
 }
 
@@ -323,74 +398,62 @@ function appendSetCookie(res: ExpressLikeResponse, cookieValue: string): void {
   }
 }
 
-function normalizeControllerUrl(raw: string): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw.trim());
-  } catch {
-    throw new Error(`Gatekeeper: invalid controllerUrl "${raw}"`);
-  }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error(`Gatekeeper: controllerUrl must use http:// or https:// (got ${parsed.protocol})`);
-  }
-  parsed.hash = '';
-  parsed.search = '';
-  return parsed;
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  const h = hostname.toLowerCase();
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
-}
-
-function normalizeRouteOptions(
-  tierOrOptions?: SubscriptionTier | GatekeeperRouteOptions,
-  defaultTier?: SubscriptionTier,
-  defaultDeny?: DenyResponseConfig,
-  defaultSetCookie = true,
-): {
-  requiredTier?: SubscriptionTier;
-  denyResponse?: DenyResponseConfig;
-  setCookieFromQuery: boolean;
-} {
-  if (typeof tierOrOptions === 'string') {
-    return {
-      requiredTier: tierOrOptions,
-      denyResponse: defaultDeny,
-      setCookieFromQuery: defaultSetCookie,
-    };
-  }
-  if (!tierOrOptions) {
-    return {
-      requiredTier: defaultTier,
-      denyResponse: defaultDeny,
-      setCookieFromQuery: defaultSetCookie,
-    };
-  }
-  return {
-    requiredTier:
-      tierOrOptions.requiredTier === null
-        ? undefined
-        : (tierOrOptions.requiredTier ?? defaultTier),
-    denyResponse: tierOrOptions.denyResponse ?? defaultDeny,
-    setCookieFromQuery: tierOrOptions.setCookieFromQuery ?? defaultSetCookie,
-  };
-}
-
 interface CacheEntry {
   ips: Set<string>;
   expiresAtMs: number;
 }
 
+interface ResolvedRouteOptions {
+  requiredTier?: SubscriptionTier;
+  denyResponse?: DenyResponseConfig;
+  setCookieFromQuery: boolean;
+}
+
+function normalizeRouteOptions(
+  arg: SubscriptionTier | GatekeeperRouteOptions | undefined,
+  defaultTier: SubscriptionTier | undefined,
+  defaultDeny: DenyResponseConfig | undefined,
+  defaultSetCookie: boolean,
+): ResolvedRouteOptions {
+  if (typeof arg === 'string') {
+    return {
+      requiredTier: arg,
+      denyResponse: defaultDeny,
+      setCookieFromQuery: defaultSetCookie,
+    };
+  }
+  if (arg && typeof arg === 'object') {
+    const requiredTier =
+      arg.requiredTier === null
+        ? undefined
+        : arg.requiredTier !== undefined
+          ? arg.requiredTier
+          : defaultTier;
+    return {
+      requiredTier,
+      denyResponse: arg.denyResponse ?? defaultDeny,
+      setCookieFromQuery: arg.setCookieFromQuery ?? defaultSetCookie,
+    };
+  }
+  return {
+    requiredTier: defaultTier,
+    denyResponse: defaultDeny,
+    setCookieFromQuery: defaultSetCookie,
+  };
+}
+
 /**
- * StrictProxy Gatekeeper SDK.
+ * StrictProxy Gatekeeper SDK client.
  *
- * Two-step integration:
+ * Recommended 2-step setup (Key Factory):
  * ```ts
+ * import { Gatekeeper } from '@strict-proxy/gatekeeper';
+ *
  * const gk = Gatekeeper.init({
- *   controllerUrl: 'https://proxy.example.com',
- *   publicKey: process.env.STRICT_PROXY_PUBLIC_KEY_PEM,
- *   requiredTier: 'standard',
+ *   controllerUrl: process.env.STRICT_PROXY_CONTROLLER_URL!,
+ *   apiKey: process.env.STRICT_PROXY_GATEKEEPER_KEY!, // sp_gk_...
+ *   trustForwardedFor: true,
+ *   trustedProxyHops: 1,
  * });
  * app.use(gk.auth());
  * ```
@@ -398,10 +461,9 @@ interface CacheEntry {
 export class Gatekeeper {
   private readonly controllerBaseUrl: string;
   private readonly controllerParsedUrl: URL;
-  private readonly pinnedSingleKey?: string;
+  private readonly apiKey?: string;
   private readonly pinnedKeys: Record<string, string>;
-  private discoveredKeys: Record<string, string> | null = null;
-  private discoveringKeys: Promise<Record<string, string>> | null = null;
+  private readonly pinnedSingleKey?: string;
   private readonly autoFetchPublicKey: boolean;
   private readonly allowInsecureHttp: boolean;
   private readonly defaultRequiredTier?: SubscriptionTier;
@@ -421,32 +483,56 @@ export class Gatekeeper {
 
   private cache: CacheEntry | null = null;
   private inFlight: Promise<Set<string>> | null = null;
+  private discoveredKeys: Record<string, string> | null = null;
+  private discoveringKeys: Promise<Record<string, string>> | null = null;
   private lastError: string | null = null;
 
   private constructor(options: GatekeeperInitOptions) {
     const rawUrl =
       options.controllerUrl ??
       options.controllerBaseUrl ??
-      process.env.STRICT_PROXY_CONTROLLER_URL;
+      process.env.STRICT_PROXY_CONTROLLER_URL ??
+      process.env.STRICT_PROXY_URL;
     if (!rawUrl) {
       throw new Error(
-        'Gatekeeper.init() requires `controllerUrl` (or env STRICT_PROXY_CONTROLLER_URL).',
+        'Gatekeeper.init() requires `controllerUrl` (or set STRICT_PROXY_CONTROLLER_URL).',
       );
     }
-    this.controllerParsedUrl = normalizeControllerUrl(rawUrl);
-    this.controllerBaseUrl = this.controllerParsedUrl.toString().replace(/\/+$/, '');
-
-    const envKey = process.env.STRICT_PROXY_PUBLIC_KEY_PEM?.trim();
-    const envKeyId = process.env.STRICT_PROXY_KEY_ID?.trim();
-    this.pinnedKeys = options.publicKeys ? { ...options.publicKeys } : {};
-
-    for (const [k, v] of Object.entries(this.pinnedKeys)) {
-      this.pinnedKeys[k] = normalizePem(v);
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new Error(`Gatekeeper.init() received an invalid controllerUrl: ${rawUrl}`);
     }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Gatekeeper.init() controllerUrl must use http:// or https://: ${rawUrl}`);
+    }
+    // Strip any accidental #hash, ?query, and trailing slashes.
+    parsed.hash = '';
+    parsed.search = '';
+    this.controllerParsedUrl = parsed;
+    this.controllerBaseUrl = parsed.toString().replace(/\/+$/, '');
 
-    const rawSingleKey = options.publicKey?.trim() || (!options.publicKeys && envKey ? envKey : undefined);
+    const rawApiKey =
+      options.apiKey ??
+      process.env.STRICT_PROXY_GATEKEEPER_KEY ??
+      process.env.STRICT_PROXY_API_KEY;
+    this.apiKey = rawApiKey?.trim() || undefined;
+
+    this.pinnedKeys = {};
+    if (options.publicKeys) {
+      for (const [kid, pem] of Object.entries(options.publicKeys)) {
+        if (pem) this.pinnedKeys[kid] = validatePublicKeyPem(pem);
+      }
+    }
+    const envKey = process.env.STRICT_PROXY_PUBLIC_KEY_PEM;
+    const envKeyId = process.env.STRICT_PROXY_SIGNING_KEY_ID;
+    const hasExplicitPublicKeys =
+      Boolean(options.publicKeys && Object.keys(options.publicKeys).length > 0);
+    const rawSingleKey =
+      options.publicKey ?? (!this.apiKey && !hasExplicitPublicKeys && envKey ? envKey : undefined);
     if (rawSingleKey) {
-      const singleKey = normalizePem(rawSingleKey);
+      const singleKey = validatePublicKeyPem(rawSingleKey);
       this.pinnedSingleKey = singleKey;
       const keyId = options.keyId ?? envKeyId;
       if (keyId) {
@@ -474,17 +560,23 @@ export class Gatekeeper {
         ? () => undefined
         : (options.logger ??
             ((msg: string, meta?: unknown) => {
-              const detail = meta instanceof Error ? meta.message : meta !== undefined ? String(meta) : '';
+              const detail =
+                meta instanceof Error
+                  ? formatFetchError(meta)
+                  : meta !== undefined
+                    ? String(meta)
+                    : '';
               console.warn(`[strict-proxy/gatekeeper] ${msg}${detail ? `: ${detail}` : ''}`);
             }));
 
     if (
+      !this.apiKey &&
       !this.pinnedSingleKey &&
       Object.keys(this.pinnedKeys).length === 0 &&
       !this.autoFetchPublicKey
     ) {
       throw new Error(
-        'Gatekeeper.init() requires `publicKey` or `publicKeys` when `autoFetchPublicKey` is false.',
+        'Gatekeeper.init() requires `apiKey`, `publicKey`, or `publicKeys` when `autoFetchPublicKey` is false.',
       );
     }
   }
@@ -498,6 +590,29 @@ export class Gatekeeper {
     return this.fetchFn ?? globalThis.fetch;
   }
 
+  private assertSafeTransport(context: string): void {
+    if (
+      this.controllerParsedUrl.protocol !== 'https:' &&
+      !isPrivateOrInternalHost(this.controllerParsedUrl.hostname) &&
+      !this.allowInsecureHttp
+    ) {
+      throw new Error(
+        `gatekeeper: ${context} requires https:// for non-local hosts (use https://, a local/Docker internal host, or set allowInsecureHttp: true for testing)`,
+      );
+    }
+  }
+
+  private async safeFetch(url: string, init?: RequestInit): Promise<Response> {
+    try {
+      return await this.getFetch()(url, {
+        ...init,
+        signal: AbortSignal.timeout(this.fetchTimeoutMs),
+      });
+    } catch (err) {
+      throw new Error(formatFetchError(err, url));
+    }
+  }
+
   private async resolveKeys(): Promise<Record<string, string> | string> {
     if (Object.keys(this.pinnedKeys).length > 0 && !this.pinnedSingleKey) {
       return this.pinnedKeys;
@@ -506,6 +621,14 @@ export class Gatekeeper {
       return this.pinnedSingleKey;
     }
     if (this.discoveredKeys) return this.discoveredKeys;
+
+    // When apiKey is configured, bootstrapping fetches both IPs and public key in one call.
+    if (this.apiKey) {
+      await this.getIpSet();
+      if (this.discoveredKeys) return this.discoveredKeys;
+      throw new Error('gatekeeper: bootstrap did not return a controller signing key');
+    }
+
     if (!this.autoFetchPublicKey) {
       throw new Error('gatekeeper: no public key configured');
     }
@@ -515,20 +638,19 @@ export class Gatekeeper {
       !this.allowInsecureHttp
     ) {
       throw new Error(
-        'gatekeeper: auto-fetching the public key requires https:// (pin `publicKey` or set `allowInsecureHttp: true` for non-HTTPS local testing)',
+        'gatekeeper: auto-fetching the public key requires https:// (use `apiKey`, pin `publicKey`, or set `allowInsecureHttp: true` for non-HTTPS local testing)',
       );
     }
     if (!this.discoveringKeys) {
       this.discoveringKeys = (async () => {
-        const res = await this.getFetch()(`${this.controllerBaseUrl}/api/v1/network/public-key`, {
-          signal: AbortSignal.timeout(this.fetchTimeoutMs),
-        });
-        if (!res.ok) throw new Error(`public-key fetch failed: ${res.status}`);
+        const url = `${this.controllerBaseUrl}/api/v1/network/public-key`;
+        const res = await this.safeFetch(url);
+        if (!res.ok) throw new Error(`public-key fetch failed: ${res.status} (${url})`);
         const body = (await res.json()) as PublicKeyResponse;
         if (!body?.keyId || !body?.publicKeyPem) {
           throw new Error('public-key response missing keyId or publicKeyPem');
         }
-        const map = { [body.keyId]: body.publicKeyPem };
+        const map = { [body.keyId]: normalizePem(body.publicKeyPem) };
         this.discoveredKeys = map;
         return map;
       })()
@@ -548,18 +670,10 @@ export class Gatekeeper {
     return keys[keyId];
   }
 
-  private async fetchIpSet(): Promise<Set<string>> {
-    const keys = await this.resolveKeys();
-    const res = await this.getFetch()(`${this.controllerBaseUrl}/api/v1/network/nodes/public-ips`, {
-      signal: AbortSignal.timeout(this.fetchTimeoutMs),
-    });
-    if (!res.ok) throw new Error(`public-ips fetch failed: ${res.status}`);
-    const body = (await res.json()) as PublicIpsResponse;
-
-    const keyPem = this.keyPemFor(keys, body.keyId);
-    if (!keyPem) {
-      throw new Error(`unknown signing key id: ${body.keyId}`);
-    }
+  private verifySignedIpPayload(
+    body: PublicIpsResponse,
+    keyPem: string,
+  ): Set<string> {
     const payload = { generatedAt: body.generatedAt, expiresAt: body.expiresAt, ips: body.ips };
     if (!verifyJson(loadSigningPublicKey(body.keyId, keyPem), payload, body.signature)) {
       throw new Error('public-ips signature verification failed');
@@ -568,6 +682,61 @@ export class Gatekeeper {
       throw new Error('public-ips list expired');
     }
     return new Set(body.ips.map((ip) => normalizeIp(String(ip))));
+  }
+
+  private async fetchBootstrap(): Promise<Set<string>> {
+    this.assertSafeTransport('apiKey bootstrap');
+    const url = `${this.controllerBaseUrl}/api/v1/gatekeeper/bootstrap`;
+    const res = await this.safeFetch(url, {
+      headers: {
+        authorization: `Bearer ${this.apiKey}`,
+      },
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(
+          `gatekeeper bootstrap rejected (${res.status}): invalid, revoked, or expired apiKey`,
+        );
+      }
+      if (res.status === 404) {
+        throw new Error(
+          `gatekeeper bootstrap failed (404): controller at ${this.controllerBaseUrl} does not expose /api/v1/gatekeeper/bootstrap yet (redeploy controller or omit apiKey)`,
+        );
+      }
+      throw new Error(`gatekeeper bootstrap failed: ${res.status} (${url})`);
+    }
+    const body = (await res.json()) as GatekeeperBootstrapResponse;
+    if (!body?.keyId || !body?.publicKeyPem || !Array.isArray(body?.ips)) {
+      throw new Error('gatekeeper bootstrap response missing keyId, publicKeyPem, or ips');
+    }
+    const normalizedPem = normalizePem(body.publicKeyPem);
+    this.discoveredKeys = { [body.keyId]: normalizedPem };
+
+    // If caller also pinned a key, verify with the pinned key; otherwise use the bootstrapped key.
+    const verifyKeyPem =
+      this.pinnedSingleKey ??
+      (Object.keys(this.pinnedKeys).length > 0 ? this.pinnedKeys[body.keyId] : normalizedPem);
+    if (!verifyKeyPem) {
+      throw new Error(`unknown signing key id: ${body.keyId}`);
+    }
+    return this.verifySignedIpPayload(body, verifyKeyPem);
+  }
+
+  private async fetchIpSet(): Promise<Set<string>> {
+    if (this.apiKey) {
+      return this.fetchBootstrap();
+    }
+    const keys = await this.resolveKeys();
+    const url = `${this.controllerBaseUrl}/api/v1/network/nodes/public-ips`;
+    const res = await this.safeFetch(url);
+    if (!res.ok) throw new Error(`public-ips fetch failed: ${res.status} (${url})`);
+    const body = (await res.json()) as PublicIpsResponse;
+
+    const keyPem = this.keyPemFor(keys, body.keyId);
+    if (!keyPem) {
+      throw new Error(`unknown signing key id: ${body.keyId}`);
+    }
+    return this.verifySignedIpPayload(body, keyPem);
   }
 
   private async getIpSet(forceRefresh = false): Promise<Set<string>> {
@@ -588,7 +757,7 @@ export class Gatekeeper {
           this.inFlight = null;
         })
         .catch((err) => {
-          this.lastError = err instanceof Error ? err.message : String(err);
+          this.lastError = err instanceof Error ? formatFetchError(err) : String(err);
           this.log('ip list refresh failed', err);
           throw err;
         });
@@ -604,16 +773,24 @@ export class Gatekeeper {
 
   /** Returns current cache and diagnostic status (useful for debugging denied requests). */
   status(): GatekeeperStatus {
+    const hasPinnedKey = Boolean(this.pinnedSingleKey) || Object.keys(this.pinnedKeys).length > 0;
+    const authMode: GatekeeperAuthMode = this.apiKey
+      ? 'api-key'
+      : hasPinnedKey
+        ? 'pinned-key'
+        : 'auto-public-key';
     return {
       controllerUrl: this.controllerBaseUrl,
-      hasPinnedKey: Boolean(this.pinnedSingleKey) || Object.keys(this.pinnedKeys).length > 0,
+      authMode,
+      hasApiKey: Boolean(this.apiKey),
+      hasPinnedKey,
       cachedIps: this.cache ? [...this.cache.ips] : [],
       cacheExpiresAt: this.cache ? new Date(this.cache.expiresAtMs).toISOString() : null,
       lastError: this.lastError,
     };
   }
 
-  /** Verifies an entitlement token offline against the configured (or discovered) public key(s). */
+  /** Verifies an entitlement token offline against the configured (or bootstrapped) public key(s). */
   verifyToken(
     token: string | undefined,
     opts: { nowMs?: number; leewaySeconds?: number } = {},
@@ -638,7 +815,11 @@ export class Gatekeeper {
     const extra = fetchError ? { fetchError } : {};
     const base = (
       status: number,
-      code: 'GATEKEEPER_DENIED' | 'GATEKEEPER_ENTITLEMENT_REQUIRED' | 'GATEKEEPER_ENTITLEMENT_INVALID' | 'GATEKEEPER_TIER_INSUFFICIENT',
+      code:
+        | 'GATEKEEPER_DENIED'
+        | 'GATEKEEPER_ENTITLEMENT_REQUIRED'
+        | 'GATEKEEPER_ENTITLEMENT_INVALID'
+        | 'GATEKEEPER_TIER_INSUFFICIENT',
       body: Record<string, unknown>,
     ): AuthDecision => {
       if (denyResponse && 'redirectUrl' in denyResponse) {
@@ -717,7 +898,7 @@ export class Gatekeeper {
       ips = await this.getIpSet();
     } catch (err) {
       ips = null;
-      fetchError = err instanceof Error ? err.message : String(err);
+      fetchError = err instanceof Error ? formatFetchError(err) : String(err);
     }
 
     if (!ips) {
@@ -737,7 +918,7 @@ export class Gatekeeper {
       try {
         keys = await this.resolveKeys();
       } catch (err) {
-        const keyErr = err instanceof Error ? err.message : String(err);
+        const keyErr = err instanceof Error ? formatFetchError(err) : String(err);
         return this.buildDenial('entitlement_invalid', ip, route.requiredTier, undefined, route.denyResponse, keyErr);
       }
       const found = extractTokenWithSource(
