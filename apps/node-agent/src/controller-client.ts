@@ -73,6 +73,16 @@ export class ControllerClient {
     return this.request('POST', '/internal/v1/node/heartbeat', report);
   }
 
+  /**
+   * Takes this node out of new config bundles while its engine restarts.
+   *
+   * The controller declines when this is the only online node, because draining
+   * it would leave new clients with no server to connect to.
+   */
+  setDraining(draining: boolean): Promise<{ draining: boolean; reason?: string }> {
+    return this.request('POST', '/internal/v1/node/drain', { draining });
+  }
+
   /** Buffered log lines, posted only when a heartbeat response asked for them. */
   postLogs(
     logs: Array<{ at: string; level: string; msg: string }>,

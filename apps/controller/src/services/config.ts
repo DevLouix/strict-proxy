@@ -6,7 +6,7 @@
  * (and the Gatekeeper SDK) can verify authenticity.
  */
 import type { Db } from '../db/client.js';
-import { nodeCredentials, nodes, users } from '../db/schema.js';
+import { nodeCredentials, nodes, users, vpnSessions } from '../db/schema.js';
 import { and, eq, gt, inArray, isNull, ne, notInArray, or } from 'drizzle-orm';
 import { loadSigningPrivateKey, signJson } from '@strict-proxy/types';
 import type { NodeEndpoint, SignedConfigBundle, SubscriptionTier, VlessRealityClientConfig } from '@strict-proxy/types';
@@ -62,11 +62,18 @@ export async function buildSignedConfigBundle(
     throw new Error('no_nodes_available');
   }
 
-  // One proxy session per account: whichever install is issued this bundle is
-  // the winner, so every other install's credentials are revoked. This runs
-  // only after the bundle is known to be buildable — revoking first meant a
-  // request that then failed with `no_nodes_available` had already destroyed
-  // the credentials of a device that was working.
+  // Revoke only installs that hold no seat. Seats are the tier's device count
+  // (`claimVpnSession` trims beyond it), so handing one credential to another
+  // person cannot add a seat: the extra user still has no session row of their
+  // own, and the credential they were given dies with the seat it was issued to.
+  // This runs only after the bundle is known to be buildable, so a request that
+  // fails with `no_nodes_available` has not already destroyed working state.
+  const seated = await db
+    .select({ deviceId: vpnSessions.deviceId })
+    .from(vpnSessions)
+    .where(eq(vpnSessions.userId, params.userId));
+  const keep = new Set(seated.map((row) => row.deviceId));
+  keep.add(params.deviceId);
   await db
     .update(nodeCredentials)
     .set({ revoked: true, revokedAt: new Date() })
@@ -74,7 +81,7 @@ export async function buildSignedConfigBundle(
       and(
         eq(nodeCredentials.userId, params.userId),
         eq(nodeCredentials.revoked, false),
-        or(isNull(nodeCredentials.deviceId), ne(nodeCredentials.deviceId, params.deviceId)),
+        or(isNull(nodeCredentials.deviceId), notInArray(nodeCredentials.deviceId, [...keep])),
       ),
     );
   const maxNodes = Math.min(tierDefinition(params.tier).maxNodes, activeNodes.length);

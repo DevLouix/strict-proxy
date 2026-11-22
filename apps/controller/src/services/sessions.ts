@@ -1,96 +1,127 @@
 /**
- * The account's single proxy session.
+ * The account's proxy sessions.
  *
  * A proxy credential is a bearer secret handed to a device: there is no way for
- * the controller to close a TCP connection the device already holds. "One
- * session per account" is therefore enforced where it can be:
+ * the controller to close a TCP connection the device already holds. Seats are
+ * therefore enforced where they can be:
  *
- *   - the row below records which install owns the account right now;
- *   - issuing a config bundle revokes every other install's node credentials,
- *     so a node stops accepting the previous device on its next sync. It
- *     deliberately happens there, after the entitlement checks, rather than on
- *     the claim: a device that cannot be given credentials (an expired plan,
- *     an exhausted quota) must not destroy the working credentials of the
- *     device that is already connected;
- *   - the losing client polls this row and shuts its own tunnel down, instead
- *     of sitting "connected" with credentials the node no longer accepts.
+ *   - one row per install, and the tier's `deviceSeats` bounds how many rows an
+ *     account may hold — a fourth install on a three-seat plan displaces the
+ *     least-recently-seen one;
+ *   - issuing a config bundle revokes the node credentials of installs that
+ *     hold no seat, so a node stops accepting them on its next sync. That
+ *     happens there, after the entitlement checks, rather than on the claim: a
+ *     device that cannot be given credentials (expired plan, exhausted quota)
+ *     must not destroy the working credentials of a device that is connected;
+ *   - the displaced client polls this table and shuts its own tunnel down.
  *
- * The newest install to claim the session wins. Re-connecting from the same
- * install keeps its session id, so an ordinary reconnect does not churn node
- * credentials or disconnect anything.
+ * A shared credential cannot buy an extra seat. Seats are rows keyed by the
+ * install id the controller issued the credential to, so handing a UUID to
+ * someone else still occupies exactly one seat — and that seat's next bundle
+ * fetch is what revokes the shared credential when the seat is displaced.
  */
 import { randomBytes } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { vpnSessions } from '../db/schema.js';
+
+export interface ActiveSession {
+  sessionId: string;
+  deviceId: string;
+  startedAt: string;
+  lastSeenAt: string;
+}
 
 export interface SessionClaim {
   sessionId: string;
   deviceId: string;
   startedAt: string;
-  /** The install this claim displaced, when a different device owned the slot. */
+  /** The install displaced to stay within the seats, when this claim caused it. */
   superseded: { deviceId: string; startedAt: string } | null;
+  /** Installs holding a seat after this claim. */
+  activeDevices: number;
+  seatLimit: number;
 }
 
-/** The session row currently owning the account, or null before the first claim. */
-export async function currentVpnSession(db: Db, userId: string) {
-  const [row] = await db
-    .select()
-    .from(vpnSessions)
-    .where(eq(vpnSessions.userId, userId))
-    .limit(1);
-  return row ?? null;
+function toActive(row: { sessionId: string; deviceId: string; startedAt: Date; lastSeenAt: Date }): ActiveSession {
+  return {
+    sessionId: row.sessionId,
+    deviceId: row.deviceId,
+    startedAt: row.startedAt.toISOString(),
+    lastSeenAt: row.lastSeenAt.toISOString(),
+  };
 }
 
 /**
- * Claims the account's proxy session for one install.
+ * Every install currently holding a seat, least recently seen first.
  *
- * Deliberately not in a transaction: the two devices racing to connect is
- * resolved by the unique user row (last upsert wins), and the revocation that
- * follows is idempotent. A transaction around the network-facing revocation
- * would only lengthen the window in which both devices look alive.
+ * The order is the eviction order: the install that has gone longest without
+ * claiming is the one a new device displaces.
+ */
+export async function listVpnSessions(db: Db, userId: string): Promise<ActiveSession[]> {
+  const rows = await db.select().from(vpnSessions).where(eq(vpnSessions.userId, userId));
+  return rows
+    .map(toActive)
+    .sort((a, b) => Date.parse(a.lastSeenAt) - Date.parse(b.lastSeenAt) || a.deviceId.localeCompare(b.deviceId));
+}
+
+/**
+ * Claims a seat for one install, evicting the least-recently-seen install when
+ * the account is already at its seat limit.
+ *
+ * Re-claiming from the same install keeps its session id and start time, so an
+ * ordinary reconnect does not churn credentials. The claimant's `lastSeenAt`
+ * is stamped before the trim, which is what guarantees the claim never evicts
+ * the install making it.
  */
 export async function claimVpnSession(
   db: Db,
-  params: { userId: string; deviceId: string },
+  params: { userId: string; deviceId: string; seatLimit: number },
 ): Promise<SessionClaim> {
+  const seatLimit = Math.max(1, Math.floor(params.seatLimit));
+  const now = new Date();
   const [existing] = await db
     .select()
     .from(vpnSessions)
-    .where(eq(vpnSessions.userId, params.userId))
+    .where(and(eq(vpnSessions.userId, params.userId), eq(vpnSessions.deviceId, params.deviceId)))
     .limit(1);
 
-  const now = new Date();
-  const sameDevice = existing?.deviceId === params.deviceId;
-  const sessionId = sameDevice && existing ? existing.sessionId : randomBytes(18).toString('base64url');
-  const startedAt = sameDevice && existing ? existing.startedAt : now;
+  const sessionId = existing?.sessionId ?? randomBytes(18).toString('base64url');
+  const startedAt = existing?.startedAt ?? now;
 
   await db
     .insert(vpnSessions)
-    .values({
-      userId: params.userId,
-      deviceId: params.deviceId,
-      sessionId,
-      startedAt,
-      lastSeenAt: now,
-    })
+    .values({ userId: params.userId, deviceId: params.deviceId, sessionId, startedAt, lastSeenAt: now })
     .onConflictDoUpdate({
-      target: vpnSessions.userId,
-      set: { deviceId: params.deviceId, sessionId, startedAt, lastSeenAt: now },
+      target: [vpnSessions.userId, vpnSessions.deviceId],
+      set: { sessionId, lastSeenAt: now },
     });
 
-  // A different install took the slot. Its credentials are revoked when that
-  // install is actually issued a bundle (see buildSignedConfigBundle), not
-  // here: claiming alone proves intent, not entitlement, and revoking first
-  // meant a 402/426 could disconnect a device that was working.
-  const superseded = existing && !sameDevice ? existing : null;
+  // Trim back to the plan's seats. The claimant was just stamped, so it sorts
+  // newest and is never the row this removes.
+  const all = await listVpnSessions(db, params.userId);
+  const excess = Math.max(0, all.length - seatLimit);
+  const evicted = all.slice(0, excess);
+  if (evicted.length > 0) {
+    await db
+      .delete(vpnSessions)
+      .where(
+        and(
+          eq(vpnSessions.userId, params.userId),
+          inArray(
+            vpnSessions.deviceId,
+            evicted.map((row) => row.deviceId),
+          ),
+        ),
+      );
+  }
 
   return {
     sessionId,
     deviceId: params.deviceId,
     startedAt: startedAt.toISOString(),
-    superseded: superseded
-      ? { deviceId: superseded.deviceId, startedAt: superseded.startedAt.toISOString() }
-      : null,
+    superseded: evicted[0] ? { deviceId: evicted[0].deviceId, startedAt: evicted[0].startedAt } : null,
+    activeDevices: all.length - evicted.length,
+    seatLimit,
   };
 }

@@ -431,7 +431,23 @@ class Agent {
           );
           return;
         }
-        await restartSingBox(this.cfg, this.managedSingBox);
+        // Take the node out of new bundles first: the restart drops every
+        // tunnel it carries, and a client handed this node in the same second
+        // would fail to connect. The controller declines when this is the only
+        // online node, because draining it would leave no server at all.
+        const drained = live.length > 0 ? await this.drainForRestart() : false;
+        try {
+          await restartSingBox(this.cfg, this.managedSingBox);
+        } finally {
+          if (drained) {
+            try {
+              await this.client.setDraining(false);
+            } catch (err) {
+              // The controller also expires the drain, so this is not fatal.
+              log('warn', 'could not clear the drain flag:', err instanceof Error ? err.message : err);
+            }
+          }
+        }
         // Names the users this node now accepts. sing-box at `info` logs a
         // successful inbound connection without saying which user it was, so
         // without this line the credential the app holds cannot be matched to
@@ -445,6 +461,29 @@ class Agent {
       await saveAppliedFingerprint(`${this.cfg.singBoxConfigPath}.state`, fp);
     }
     await this.ensureEngine();
+  }
+
+  /**
+   * Asks the controller to stop assigning this node, then waits long enough for
+   * a client to fetch a bundle that no longer contains it.
+   *
+   * Best effort by design: a failed drain must not stop the restart, because the
+   * old config is the thing being replaced.
+   */
+  private async drainForRestart(): Promise<boolean> {
+    if (this.cfg.drainGraceSeconds <= 0) return false;
+    try {
+      const reply = await this.client.setDraining(true);
+      if (!reply.draining) {
+        log('debug', `drain declined (${reply.reason ?? 'unknown'}); restarting without it`);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.cfg.drainGraceSeconds * 1000));
+      return true;
+    } catch (err) {
+      log('debug', 'could not drain before restart:', err instanceof Error ? err.message : err);
+      return false;
+    }
   }
 
   /**

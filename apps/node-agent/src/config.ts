@@ -27,6 +27,11 @@ export interface AgentConfig {
   statsApiProtoPath: string;
   heartbeatIntervalSeconds: number;
   syncIntervalSeconds: number;
+  /**
+   * Seconds to stay out of new bundles before an engine restart. Zero disables
+   * draining, which is only appropriate for a single-node deployment.
+   */
+  drainGraceSeconds: number;
   usageIntervalSeconds: number;
   /** Operator-pinned public IP; null means "detect it" (see `publicIpEchoUrl`). */
   publicIp: string | null;
@@ -94,6 +99,7 @@ export function loadAgentConfig(): AgentConfig {
     statsApiProtoPath: optionalString('SING_BOX_STATS_PROTO', '/opt/strict-proxy/node-agent/src/v2rayapi/stats.proto'),
     heartbeatIntervalSeconds: optionalInt('HEARTBEAT_INTERVAL_SECONDS', 30),
     syncIntervalSeconds: optionalInt('SYNC_INTERVAL_SECONDS', 60),
+    drainGraceSeconds: optionalInt('NODE_DRAIN_GRACE_SECONDS', 3),
     usageIntervalSeconds: optionalInt('USAGE_INTERVAL_SECONDS', 60),
     publicIp: optionalEnv('NODE_PUBLIC_IP'),
     publicIpEchoUrl: resolvePublicIpEchoUrl(),

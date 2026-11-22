@@ -171,6 +171,12 @@ export const nodes = pgTable(
      */
     agentBuild: text('agent_build'),
     /**
+     * Set while the agent has drained itself for an engine restart. Expires so a
+     * drain whose restart never finished cannot keep the node out of rotation;
+     * an operator's drain has no expiry and is preserved by the heartbeat.
+     */
+    autoDrainUntil: timestamp('auto_drain_until', { withTimezone: true }),
+    /**
      * Latest self-check the agent reported: is the managed engine running, and
      * did usage collection reach its stats API. Null until a node reports one,
      * so an old agent is not shown as broken.
@@ -367,7 +373,14 @@ export const vpnSessions = pgTable(
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex('vpn_sessions_user_uq').on(t.userId), index('vpn_sessions_device_idx').on(t.deviceId)],
+  (t) => [
+    // One row per install, not per account: the tier's seats are how many
+    // installs may hold a tunnel at once. A credential cannot add a row of its
+    // own, so sharing a UUID still occupies exactly one seat.
+    uniqueIndex('vpn_sessions_user_device_uq').on(t.userId, t.deviceId),
+    uniqueIndex('vpn_sessions_session_uq').on(t.sessionId),
+    index('vpn_sessions_device_idx').on(t.deviceId),
+  ],
 );
 
 /**

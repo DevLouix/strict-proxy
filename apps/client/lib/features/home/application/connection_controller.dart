@@ -245,12 +245,22 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   /// about whether packets make it out through the proxy: a dead DNS path or a
   /// datapath the device cannot use looks exactly like a working tunnel in that
   /// state. These are plain HTTPS GETs from the app itself, so they traverse the
-  /// tun, the DNS hijack and the proxy outbound in one check. Two unrelated
-  /// hosts so one blocked destination is not mistaken for a broken tunnel.
-  static final dataPathProbes = <Uri>[
-    Uri.parse('https://cloudflare.com/cdn-cgi/trace'),
-    Uri.parse('https://www.gstatic.com/generate_204'),
-  ];
+  /// tun, the DNS hijack and the proxy outbound in one check.
+  ///
+  /// The target is the controller's own `/healthz`, not a public CDN. The old
+  /// pair (a Cloudflare trace and a Google 204) failed on networks that filter
+  /// those hosts even though the user's own destinations work — and the app
+  /// disconnected a working tunnel over it. Our endpoint is also the one host
+  /// the app already requires, so it adds no new dependency.
+  static List<Uri> get dataPathProbes {
+    try {
+      return <Uri>[Uri.parse('${AppConfig.controllerUrl}/healthz')];
+    } catch (_) {
+      // A build with an unusable controller URL cannot connect anyway; the
+      // empty list makes the probe pass rather than blaming the tunnel.
+      return const <Uri>[];
+    }
+  }
 
   static const dataPathProbeTimeout = Duration(seconds: 8);
 
@@ -409,24 +419,26 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   }) async {
     final targets = (urls ?? dataPathProbes).toList(growable: false);
     if (targets.isEmpty) return true;
-    final client = HttpClient()..connectionTimeout = timeout;
-    try {
-      final results = await Future.wait(targets.map((uri) async {
-        try {
-          final request = await client.getUrl(uri).timeout(timeout);
-          request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
-          final response = await request.close().timeout(timeout);
-          await response.drain<void>().timeout(timeout);
-          return response.statusCode >= 200 && response.statusCode < 400;
-        } catch (error) {
-          onError?.call(error);
-          return false;
-        }
-      }));
-      return results.any((reachable) => reachable);
-    } finally {
-      client.close(force: true);
-    }
+    // A client per target, closed immediately: reusing one would let a pooled
+    // socket opened before the tunnel existed answer 200 while the tunnel
+    // carries nothing — the false "connected" this probe exists to prevent.
+    final results = await Future.wait(targets.map((uri) async {
+      final client = HttpClient()..connectionTimeout = timeout;
+      try {
+        final request = await client.getUrl(uri).timeout(timeout);
+        request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+        request.headers.set(HttpHeaders.connectionHeader, 'close');
+        final response = await request.close().timeout(timeout);
+        await response.drain<void>().timeout(timeout);
+        return response.statusCode >= 200 && response.statusCode < 400;
+      } catch (error) {
+        onError?.call(error);
+        return false;
+      } finally {
+        client.close(force: true);
+      }
+    }));
+    return results.any((reachable) => reachable);
   }
 
   ServerNode? get selected => _selected;

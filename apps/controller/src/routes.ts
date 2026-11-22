@@ -10,7 +10,7 @@
 import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
-import { eq, sql, and, asc, desc, inArray, isNull, isNotNull, lte, or } from 'drizzle-orm';
+import { eq, sql, and, asc, desc, inArray, isNull, isNotNull, lte, ne, or } from 'drizzle-orm';
 import { generateEd25519Keypair, signJson, loadSigningPrivateKey, isPublicIpAddress, normalizeIpAddress } from '@strict-proxy/types';
 import type { PublicIpsResponse, SubscriptionTier, UserPublic } from '@strict-proxy/types';
 import type { Db } from './db/client.js';
@@ -39,7 +39,7 @@ import {
   parseClientBuild,
 } from './services/client-version.js';
 import { mintEntitlementToken } from './services/entitlements.js';
-import { claimVpnSession, currentVpnSession } from './services/sessions.js';
+import { claimVpnSession, listVpnSessions } from './services/sessions.js';
 import { buildLinksCatalog, normalizeLinkInput, type LinkInput } from './services/links.js';
 import { auditActor, listAuditEntries, recordAudit } from './services/audit.js';
 import { requirePermission } from './services/rbac.js';
@@ -1153,7 +1153,14 @@ export function buildRouter(ctx: Ctx): Router {
         res.status(400).json({ error: 'deviceId is required', code: 'VALIDATION' });
         return;
       }
-      const claim = await claimVpnSession(ctx.db, { userId: req.auth!.sub, deviceId });
+      const sub = await getSubscription(ctx.db, req.auth!.sub);
+      const claim = await claimVpnSession(ctx.db, {
+        userId: req.auth!.sub,
+        deviceId,
+        // Seats are installs, not concurrent logins: each device row owns one
+        // credential, and a shared UUID cannot create a second row.
+        seatLimit: tierDefinition(sub.tier).deviceSeats,
+      });
       if (claim.superseded) {
         await recordAudit(ctx.db, {
           ...auditActor(req),
@@ -1174,15 +1181,21 @@ export function buildRouter(ctx: Ctx): Router {
     '/api/v1/network/session',
     requireAuth,
     asyncHandler(async (req, res) => {
-      const session = await currentVpnSession(ctx.db, req.auth!.sub);
+      const sessions = await listVpnSessions(ctx.db, req.auth!.sub);
       const presented = req.header('x-session-id') ?? '';
+      const mine = presented ? (sessions.find((s) => s.sessionId === presented) ?? null) : null;
+      const newest = sessions.length > 0 ? sessions[sessions.length - 1]! : null;
       res.setHeader('Cache-Control', 'no-store');
+      // `current` answers "does this install still hold a seat", not "is it the
+      // only one": a device must not close itself down just because the account
+      // also connected somewhere else.
       res.json({
-        current: session ? session.sessionId === presented : true,
-        sessionId: session?.sessionId ?? null,
-        deviceId: session?.deviceId ?? null,
-        startedAt: session?.startedAt ? session.startedAt.toISOString() : null,
-        lastSeenAt: session?.lastSeenAt ? session.lastSeenAt.toISOString() : null,
+        current: sessions.length === 0 ? true : mine !== null,
+        sessionId: mine?.sessionId ?? newest?.sessionId ?? null,
+        deviceId: mine?.deviceId ?? newest?.deviceId ?? null,
+        startedAt: mine?.startedAt ?? newest?.startedAt ?? null,
+        lastSeenAt: mine?.lastSeenAt ?? newest?.lastSeenAt ?? null,
+        devices: sessions.length,
       });
     }),
   );
@@ -1223,19 +1236,33 @@ export function buildRouter(ctx: Ctx): Router {
           return;
         }
       }
-      // One live proxy session per account. A request carrying an older
-      // session id is refused rather than handed credentials that would
-      // silently displace the device the account is actually using.
-      const session = await currentVpnSession(ctx.db, claims.sub);
+      // A session id that holds no seat is refused: it belonged to an install
+      // the account's seats have since displaced, and handing it credentials
+      // would either displace a seated device or mint a seat the plan excludes.
+      const sessions = await listVpnSessions(ctx.db, claims.sub);
       const presented = req.header('x-session-id');
-      if (session && presented && presented !== session.sessionId) {
+      const mine = presented ? (sessions.find((s) => s.sessionId === presented) ?? null) : null;
+      if (presented && !mine) {
         res.status(409).json({
           error: 'this account is connected on another device',
           code: 'SESSION_SUPERSEDED',
         });
         return;
       }
-      const deviceId = session?.deviceId ?? req.header('x-device-id') ?? 'unknown-device';
+      const deviceId = mine?.deviceId ?? req.header('x-device-id') ?? 'unknown-device';
+      // A device id with no seat cannot borrow credentials. Only an install
+      // that holds a row may be issued a bundle, which is what makes a shared
+      // credential useless for adding a person: they would have to claim a
+      // seat, and a claim beyond the plan displaces someone. With no rows at
+      // all (a client from before seats existed) the request is allowed, so an
+      // upgrade does not lock anyone out before their first claim.
+      if (sessions.length > 0 && !sessions.some((s) => s.deviceId === deviceId)) {
+        res.status(409).json({
+          error: 'this install does not hold a seat on the account; reconnect to claim one',
+          code: 'SESSION_SUPERSEDED',
+        });
+        return;
+      }
       const bundle = await buildSignedConfigBundle(ctx.db, ctx.cfg, { userId: claims.sub, tier: sub.tier, deviceId });
       // One line per issued bundle, because neither the device nor the database
       // is reachable from here: with this and the node agent's applied-user
@@ -1352,6 +1379,66 @@ export function buildRouter(ctx: Ctx): Router {
     }),
   );
 
+  /**
+   * Takes this node out of rotation while its agent restarts the engine.
+   *
+   * A restart drops every tunnel the node carries, and a client assigned in the
+   * second before it fails to connect. It refuses when this is the only online
+   * node: draining then removes every server, so new users could not fetch
+   * credentials at all. The expiry means a restart that never completes cannot
+   * strand the node; the agent also clears the flag explicitly afterwards.
+   */
+  router.post(
+    '/internal/v1/node/drain',
+    requireNode,
+    asyncHandler(async (req, res) => {
+      const nodeId = req.node!.nodeId;
+      const body = req.body as { draining?: boolean };
+      if (typeof body.draining !== 'boolean') {
+        res.status(400).json({ error: 'draining must be a boolean', code: 'VALIDATION' });
+        return;
+      }
+      const [node] = await ctx.db
+        .select({ status: nodes.status, loadScore: nodes.loadScore, autoDrainUntil: nodes.autoDrainUntil })
+        .from(nodes)
+        .where(eq(nodes.id, nodeId))
+        .limit(1);
+      if (!node) {
+        res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
+        return;
+      }
+
+      if (body.draining) {
+        const [other] = await ctx.db
+          .select({ id: nodes.id })
+          .from(nodes)
+          .where(and(eq(nodes.status, 'online'), ne(nodes.id, nodeId)))
+          .limit(1);
+        if (!other) {
+          res.json({ draining: false, reason: 'last_online_node' });
+          return;
+        }
+        await ctx.db
+          .update(nodes)
+          .set({ status: 'draining', autoDrainUntil: new Date(Date.now() + 3 * 60_000) })
+          .where(eq(nodes.id, nodeId));
+        res.json({ draining: true });
+        return;
+      }
+
+      if (!node.autoDrainUntil) {
+        // An operator's drain, or an already-cleared one: leave it alone.
+        res.json({ draining: node.status === 'draining' });
+        return;
+      }
+      await ctx.db
+        .update(nodes)
+        .set({ status: node.loadScore > 90 ? 'degraded' : 'online', autoDrainUntil: null })
+        .where(eq(nodes.id, nodeId));
+      res.json({ draining: false });
+    }),
+  );
+
   router.post(
     '/internal/v1/node/heartbeat',
     requireNode,
@@ -1385,7 +1472,7 @@ export function buildRouter(ctx: Ctx): Router {
         return;
       }
       const [node] = await ctx.db
-        .select({ status: nodes.status, tunnelPort: nodes.tunnelPort })
+        .select({ status: nodes.status, tunnelPort: nodes.tunnelPort, autoDrainUntil: nodes.autoDrainUntil })
         .from(nodes)
         .where(eq(nodes.id, nodeId))
         .limit(1);
@@ -1396,7 +1483,16 @@ export function buildRouter(ctx: Ctx): Router {
       await ctx.db
         .update(nodes)
         .set({
-          status: node.status === 'draining' ? 'draining' : load > 90 ? 'degraded' : 'online',
+          // An agent's self-drain expires, so a restart that never finished
+          // cannot keep a node out of rotation. An operator's drain has no
+          // expiry, and a heartbeat preserves it.
+          status:
+            node.autoDrainUntil && node.autoDrainUntil.getTime() > Date.now()
+              ? 'draining'
+              : load > 90
+                ? 'degraded'
+                : 'online',
+          ...(node.autoDrainUntil && node.autoDrainUntil.getTime() <= Date.now() ? { autoDrainUntil: null } : {}),
           loadScore: load,
           engineVersion: body.engineVersion ?? 'unknown',
           // Omitted keeps the previous value: an agent without the marker must
