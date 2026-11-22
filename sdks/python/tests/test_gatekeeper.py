@@ -302,9 +302,10 @@ def test_escaped_pem_ip_port_and_status() -> None:
 
 
 def test_api_key_bootstrap_and_status() -> None:
-    priv, pub_pem = _gen_keypair()
-    ips_body = _signed_ips(priv, ["203.0.113.55"])
-    token = _signed_token(priv, tier="pro")
+    materials = _make_signed_materials(ips=["203.0.113.55"], tier="pro")
+    pub_pem = materials["public_key_pem"]
+    ips_body = materials["public_ips_body"]
+    token = materials["token"]
     seen_headers: dict[str, str] = {}
     seen_url: list[str] = []
 
