@@ -41,6 +41,13 @@ env:
   # Set the repository variable CLIENT_CONTROLLER_URL once the controller has a
   # real HTTPS address; the placeholder keeps compile-only builds working.
   CLIENT_CONTROLLER_URL: ${{ vars.CLIENT_CONTROLLER_URL || 'https://controller.example.invalid' }}
+  # Baked into the Linux bundle and the iOS build. A STRICT_ENV=production build
+  # without it refuses every config bundle (config_bundle_loader.dart fails
+  # closed), so the artifact would install and never connect. The Android job
+  # already had this; the Linux release did not, which is why its bundle could
+  # not open a tunnel.
+  CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+  CLIENT_SIGNING_KEY_ID: ${{ vars.CLIENT_SIGNING_KEY_ID || 'primary' }}
 
 jobs:
   verify:
@@ -275,6 +282,18 @@ jobs:
       # `--no-codesign` deliberately: this proves the Dart and native code
       # compile for iOS. Signing is a release step needing an Apple team
       # identity and provisioning profiles, which cannot live in CI.
+      # Same fail-fast as the Android artifact: a production build without the
+      # key cannot verify a bundle, so the build would prove nothing about a
+      # client that actually connects.
+      - name: Require the controller signing key
+        env:
+          CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+        run: |
+          if [ -z "$CLIENT_SIGNING_PUBLIC_KEY" ]; then
+            echo "::error::CLIENT_SIGNING_PUBLIC_KEY is not set. A STRICT_ENV=production build refuses every config bundle without the controller's Ed25519 public key, so this client could never connect."
+            exit 1
+          fi
+
       - name: Generate iOS host project and build
         working-directory: apps/client
         run: |
@@ -282,7 +301,9 @@ jobs:
           flutter pub get
           flutter build ios --release --no-codesign \
             --dart-define=STRICT_ENV=${CLIENT_ENV} \
-            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
+            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL} \
+            --dart-define=STRICT_SIGNING_PUBLIC_KEY=${CLIENT_SIGNING_PUBLIC_KEY} \
+            --dart-define=STRICT_SIGNING_KEY_ID=${CLIENT_SIGNING_KEY_ID}
 
       # A build that compiles is not the same as a client that works: assert the
       # native engine bridge and the signing-key configuration actually landed,
@@ -400,6 +421,19 @@ jobs:
             exit 1
           fi
 
+      # The Linux bundle is attached to the same releases as the APKs, so it is
+      # held to the same rule: a production build with no signing key installs
+      # and then refuses every bundle, which reads as "cannot connect". Fail
+      # before the build rather than publishing that.
+      - name: Require the controller signing key
+        env:
+          CLIENT_SIGNING_PUBLIC_KEY: ${{ vars.CLIENT_SIGNING_PUBLIC_KEY }}
+        run: |
+          if [ -z "$CLIENT_SIGNING_PUBLIC_KEY" ]; then
+            echo "::error::CLIENT_SIGNING_PUBLIC_KEY is not set. A STRICT_ENV=production build refuses every config bundle without the controller's Ed25519 public key, so this bundle could never connect."
+            exit 1
+          fi
+
       - name: Generate host project and build
         working-directory: apps/client
         run: |
@@ -407,7 +441,9 @@ jobs:
           flutter pub get
           flutter build linux --release \
             --dart-define=STRICT_ENV=${CLIENT_ENV} \
-            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL}
+            --dart-define=STRICT_CONTROLLER_URL=${CLIENT_CONTROLLER_URL} \
+            --dart-define=STRICT_SIGNING_PUBLIC_KEY=${CLIENT_SIGNING_PUBLIC_KEY} \
+            --dart-define=STRICT_SIGNING_KEY_ID=${CLIENT_SIGNING_KEY_ID}
       - name: Archive Linux client
         run: tar -czf strict-proxy-client-linux-${GITHUB_SHA}.tar.gz -C apps/client/build/linux/x64/release/bundle .
       # The artifact store fills up and then refuses every upload, which used

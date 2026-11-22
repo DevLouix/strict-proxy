@@ -353,8 +353,32 @@ of being handed over (`tool/verify-android-apk.sh`; CI runs the same check).
 
 Bump `app_build_number` for every release — Android compares the version code.
 Build with the same keystore, or the install will be rejected as a signature
-mismatch. Because the signing key is compiled into the app, changing
-`STRICT_SIGNING_PUBLIC_KEY` also requires a new build for every user.
+mismatch.
+
+### Rotating a key: what breaks and in which order
+
+The client holds no secret. It does pin the controller's Ed25519 **public** key
+at build time, and that makes rotation a deploy-order problem rather than a
+deploy-simultaneously problem:
+
+| Key | What rotating it does | Order that avoids a gap |
+|---|---|---|
+| Node HMAC secret (Admin → Nodes → Rotate secret) | The old secret keeps verifying until the grace window ends (default 24h), so a node that has not restarted yet still heartbeats. | Rotate with a window longer than your rollout, set `NODE_HMAC_SECRET` on the node and restart it, then let the window expire. `graceHours: 0` is only for a leaked secret: it takes the node offline until the new value is live. |
+| REALITY keypair | Only a deleted-then-re-enrolled node gets a new one; re-registering an existing hostname reuses its keypair. A client holding an older bundle fails the handshake until it fetches again (bundles last 6h). | Do not delete a node row to "reset" it. If the keypair really changes, expect a handshake-failure window until clients re-fetch. |
+| Controller signing key (`SIGNING_PRIVATE_KEY_PEM`) | Every installed app built with the old `STRICT_SIGNING_PUBLIC_KEY` rejects each bundle as unverifiable — it fails closed and will not connect. A differing `keyId` alone is only logged. | Treat it as a long-lived identity, not a scheduled rotation. On compromise: build and distribute a client with the new public key first, then switch the controller. |
+| `JWT_SECRET` | Every access and refresh token is invalidated; users sign in again. The tunnel keeps running until its session check asks the controller. | Expect the sign-in bump. It does not change node or REALITY credentials. |
+| `SETTINGS_ENCRYPTION_KEY` | The stored SMTP password can no longer be decrypted, so mail stops until it is re-entered. Nothing on the VPN path uses it. | Keep it stable; re-enter the SMTP password in Admin → Settings right after a change. |
+| `OPENPAY_WEBHOOK_SECRET` | Webhook signatures stop verifying, so purchases and renewals stop being applied. | Change it in the OpenPay dashboard and the controller together, then replay the events the provider kept. |
+
+The split is deliberate. A node learns its identity from the controller at
+enrollment and never reads a credential the operator typed (the environment
+slots are overrides for a rotation, not settings). The app cannot work that way:
+its build-time key is the anchor that proves a bundle came from *your*
+controller. Fetching signing keys at runtime would let anything able to rewrite a
+controller response — a mis-issued certificate, a hijacked DNS name — mint its
+own configs and have the app trust them. Rotation of that key is therefore a
+release, and the push workflow fails the build when the key is missing so a
+tunnel-less artifact is never published.
 
 ### In-app updates
 
