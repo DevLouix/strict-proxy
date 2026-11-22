@@ -1149,7 +1149,14 @@ export function buildRouter(ctx: Ctx): Router {
     requireAuth,
     asyncHandler(async (req, res) => {
       const body = (req.body ?? {}) as { deviceId?: string };
-      const deviceId = (typeof body.deviceId === 'string' ? body.deviceId : req.header('x-device-id') ?? '').trim();
+      const presented = (typeof body.deviceId === 'string' ? body.deviceId : req.header('x-device-id') ?? '').trim();
+      // The access token is minted for one install, and that is the id the
+      // config route looks up. Seating whatever id the body happens to carry
+      // let one phone own a seat under an id its own token never matched, so a
+      // single install was refused for holding no seat. The token wins; a body
+      // id is only consulted for tokens minted before identity moved into it.
+      const tokenDevice = typeof req.auth!.deviceId === 'string' ? req.auth!.deviceId.trim() : '';
+      const deviceId = tokenDevice.length > 0 ? tokenDevice : presented;
       if (deviceId.length === 0 || deviceId.length > 200) {
         res.status(400).json({ error: 'deviceId is required', code: 'VALIDATION' });
         return;
@@ -1242,9 +1249,9 @@ export function buildRouter(ctx: Ctx): Router {
           return;
         }
       }
-      // A session id that holds no seat is refused: it belonged to an install
-      // the account's seats have since displaced, and handing it credentials
-      // would either displace a seated device or mint a seat the plan excludes.
+      // A session id that holds no seat is refused: it belonged to this
+      // account's install that a newer one has displaced, and handing it
+      // credentials would revive a tunnel the seats have already given away.
       const sessions = await listVpnSessions(ctx.db, claims.sub);
       const presented = req.header('x-session-id');
       const mine = presented ? (sessions.find((s) => s.sessionId === presented) ?? null) : null;
@@ -1255,19 +1262,30 @@ export function buildRouter(ctx: Ctx): Router {
         });
         return;
       }
-      // The access token is minted for one install, so it identifies the caller
-      // even when the session header is missing: an older build, or a proxy
-      // that drops custom headers. Falling back to a literal placeholder
-      // instead made a legitimately seated install look like a stranger and
-      // told its user the account was in use on another device.
-      const deviceId = mine?.deviceId ?? claims.deviceId;
-      // A device id with no seat cannot borrow credentials. Only an install
-      // that holds a row may be issued a bundle, which is what makes a shared
-      // credential useless for adding a person: they would have to claim a
-      // seat, and a claim beyond the plan displaces someone. With no rows at
-      // all (a client from before seats existed) the request is allowed, so an
-      // upgrade does not lock anyone out before their first claim.
-      if (sessions.length > 0 && !sessions.some((s) => s.deviceId === deviceId)) {
+      // The access token is minted for one install, so it names the caller even
+      // when the session header is missing: an older build, or a proxy that
+      // drops custom headers. It is also the id a claim seats, so a request can
+      // no longer be refused for presenting an id its own seat was never
+      // written under.
+      const tokenDevice = typeof claims.deviceId === 'string' ? claims.deviceId.trim() : '';
+      let deviceId = mine?.deviceId ?? tokenDevice;
+      // An authenticated install with no seat of its own has not claimed yet: a
+      // build from before the claim call, or one whose local install id was
+      // regenerated after signing in. Seat it under the token's id here rather
+      // than refuse, because the plan already bounds the rows: this adds no
+      // capacity, and a shared credential still displaces the stalest install
+      // exactly as a claim would.
+      if (!mine && tokenDevice.length > 0 && !sessions.some((s) => s.deviceId === tokenDevice)) {
+        const claimed = await claimVpnSession(ctx.db, {
+          userId: claims.sub,
+          deviceId: tokenDevice,
+          seatLimit: tierDefinition(sub.tier).deviceSeats,
+        });
+        deviceId = claimed.deviceId;
+      }
+      // Only a token minted before install identity moved into it can reach
+      // this: nothing in the request names an install to seat.
+      if (deviceId.length === 0) {
         res.status(409).json({
           error: 'this install does not hold a seat on the account; reconnect to claim one',
           code: 'SEAT_REQUIRED',

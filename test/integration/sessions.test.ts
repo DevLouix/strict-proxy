@@ -6,6 +6,9 @@
  * recently seen one, and the node drops that install's credentials on its next
  * sync. A credential cannot create a seat of its own, so sharing one UUID does
  * not let another person in — it occupies the seat it was issued to.
+ *
+ * Every install here signs in for itself, because that is what mints the token
+ * a real phone presents; a seat is whatever install id that token names.
  */
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -36,14 +39,19 @@ async function paidUser(deviceId = 'device-a') {
   return { user, accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
 }
 
-async function claim(token: string, deviceId: string) {
+/** Signs in as one install, the way a separate phone would. */
+async function install(email: string, password: string, deviceId: string) {
+  return h.login(email, password, deviceId);
+}
+
+async function claim(token: string, body: { deviceId?: string } = {}) {
   return h.request<{
     sessionId: string;
     deviceId: string;
     superseded: { deviceId: string } | null;
     activeDevices: number;
     seatLimit: number;
-  }>('POST', '/api/v1/network/session', { token, body: { deviceId } });
+  }>('POST', '/api/v1/network/session', { token, body });
 }
 
 async function config(token: string, sessionId: string) {
@@ -53,23 +61,36 @@ async function config(token: string, sessionId: string) {
   });
 }
 
-test('claiming a session requires a token and a device id', async () => {
+test('a claim needs a token and seats the install the token names', async () => {
   assert.equal((await h.request('POST', '/api/v1/network/session', { body: { deviceId: 'x' } })).status, 401);
 
-  const { accessToken } = await paidUser();
-  const missing = await h.request('POST', '/api/v1/network/session', { token: accessToken, body: {} });
-  assert.equal(missing.status, 400);
-  assert.equal(missing.body.code, 'VALIDATION');
+  const { user, accessToken } = await paidUser('device-a');
+  const claimed = await claim(accessToken);
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.deviceId, 'device-a');
+
+  // An id in the body that disagrees with the token cannot seat a second
+  // install: one phone whose local id drifted must not consume two seats and
+  // leave itself without the seat its token would match.
+  const drifted = await claim(accessToken, { deviceId: 'device-stale' });
+  assert.equal(drifted.body.deviceId, 'device-a');
+  const rows = await h.query<{ device_id: string }>(
+    `SELECT device_id FROM vpn_sessions WHERE user_id = '${user.id}'`,
+  );
+  assert.deepEqual(
+    rows.map((row) => row.device_id),
+    ['device-a'],
+    'the seat follows the token, not the body',
+  );
 });
 
 test('the first claim starts a session and config provisions that device', async () => {
   await h.seedNode({ status: 'online' });
   const { user, accessToken } = await paidUser('device-a');
 
-  const claimed = await claim(accessToken, 'device-a');
+  const claimed = await claim(accessToken);
   assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
   assert.ok(claimed.body.sessionId);
-  assert.equal(claimed.body.deviceId, 'device-a');
   assert.equal(claimed.body.superseded, null);
   assert.equal(claimed.body.seatLimit, 3);
 
@@ -87,12 +108,13 @@ test('every seat keeps its own live credential', async () => {
   await h.seedNode({ status: 'online' });
   const { user, accessToken } = await paidUser('device-a');
 
-  const a = await claim(accessToken, 'device-a');
+  const a = await claim(accessToken);
   assert.equal((await config(accessToken, a.body.sessionId)).status, 200);
 
-  const b = await claim(accessToken, 'device-b');
+  const bTokens = await install(user.email, user.password, 'device-b');
+  const b = await claim(bTokens.accessToken);
   assert.equal(b.body.superseded, null, 'a second seat is not a displacement');
-  assert.equal((await config(accessToken, b.body.sessionId)).status, 200);
+  assert.equal((await config(bTokens.accessToken, b.body.sessionId)).status, 200);
 
   // The first device must not close itself down because another one connected.
   const statusA = await h.request('GET', '/api/v1/network/session', {
@@ -119,18 +141,21 @@ test('an install beyond the seats evicts the least recently seen one', async () 
   await h.seedNode({ status: 'online' });
   const { user, accessToken } = await paidUser('device-a');
 
-  const a = await claim(accessToken, 'device-a');
+  const a = await claim(accessToken);
   await config(accessToken, a.body.sessionId);
-  const b = await claim(accessToken, 'device-b');
-  await config(accessToken, b.body.sessionId);
-  const c = await claim(accessToken, 'device-c');
-  await config(accessToken, c.body.sessionId);
+  for (const deviceId of ['device-b', 'device-c']) {
+    const tokens = await install(user.email, user.password, deviceId);
+    const claimed = await claim(tokens.accessToken);
+    await config(tokens.accessToken, claimed.body.sessionId);
+  }
 
-  const d = await claim(accessToken, 'device-d');
+  const dTokens = await install(user.email, user.password, 'device-d');
+  const d = await claim(dTokens.accessToken);
   assert.equal(d.status, 200);
   assert.equal(d.body.superseded?.deviceId, 'device-a', 'the stalest install is named');
   assert.equal(d.body.activeDevices, 3);
   assert.equal(d.body.seatLimit, 3);
+  assert.equal((await config(dTokens.accessToken, d.body.sessionId)).status, 200);
 
   // The evicted install learns it holds no seat and is refused credentials.
   const evictedStatus = await h.request('GET', '/api/v1/network/session', {
@@ -141,8 +166,6 @@ test('an install beyond the seats evicts the least recently seen one', async () 
   const stale = await config(accessToken, a.body.sessionId);
   assert.equal(stale.status, 409);
   assert.equal(stale.body.code, 'SESSION_SUPERSEDED');
-
-  assert.equal((await config(accessToken, d.body.sessionId)).status, 200);
 
   const creds = await h.query<{ device_id: string; revoked: boolean }>(
     `SELECT device_id, revoked FROM node_credentials WHERE user_id = '${user.id}' ORDER BY device_id`,
@@ -169,10 +192,10 @@ test('reconnecting from the same install keeps the session and its credentials',
   await h.seedNode({ status: 'online' });
   const { user, accessToken } = await paidUser('device-a');
 
-  const first = await claim(accessToken, 'device-a');
+  const first = await claim(accessToken);
   await config(accessToken, first.body.sessionId);
 
-  const again = await claim(accessToken, 'device-a');
+  const again = await claim(accessToken);
   assert.equal(again.body.sessionId, first.body.sessionId, 'same install keeps its session id');
   assert.equal(again.body.superseded, null);
 
@@ -188,7 +211,7 @@ test('reconnecting from the same install keeps the session and its credentials',
 test('a config request without a session id identifies the install from its token', async () => {
   await h.seedNode({ status: 'online' });
   const { user, accessToken } = await paidUser('device-a');
-  await claim(accessToken, 'device-a');
+  await claim(accessToken);
 
   // An install that lost its local session header still holds the seat its
   // access token was minted for; the controller must not read it as a stranger.
@@ -205,17 +228,51 @@ test('a config request without a session id identifies the install from its toke
   );
 });
 
-test('an install with no seat is told to reconnect, not that another device took over', async () => {
+test('config seats an authenticated install that never claimed', async () => {
   await h.seedNode({ status: 'online' });
   const { user, accessToken } = await paidUser('device-a');
-  // Rows exist for the account, so the seat check applies.
-  await claim(accessToken, 'device-a');
-  await claim(accessToken, 'device-b');
 
-  // A token for an install that never claimed: same account, no seat of its own.
-  const stranger = await h.login(user.email, user.password, 'device-c');
-  const res = await h.request('GET', '/api/v1/network/config', { token: stranger.accessToken });
-  assert.equal(res.status, 409);
-  assert.equal(res.body.code, 'SEAT_REQUIRED');
-  assert.match(String(res.body.error), /does not hold a seat/);
+  const seats: Record<string, string> = {};
+  for (const deviceId of ['device-a', 'device-b', 'device-c']) {
+    const tokens = deviceId === 'device-a' ? { accessToken } : await install(user.email, user.password, deviceId);
+    const claimed = await claim(tokens.accessToken);
+    seats[deviceId] = claimed.body.sessionId;
+    assert.equal((await config(tokens.accessToken, claimed.body.sessionId)).status, 200);
+  }
+
+  // A build from before the claim call, or one whose local install id was
+  // regenerated after signing in, arrives with a token and no session id. It
+  // is authenticated as this account, so it must be seated rather than told
+  // its account is in use — which is what happened to a user with one phone.
+  const late = await install(user.email, user.password, 'device-d');
+  const res = await h.request('GET', '/api/v1/network/config', { token: late.accessToken });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+
+  const rows = await h.query<{ device_id: string }>(
+    `SELECT device_id FROM vpn_sessions WHERE user_id = '${user.id}' ORDER BY device_id`,
+  );
+  assert.deepEqual(
+    rows.map((row) => row.device_id),
+    ['device-b', 'device-c', 'device-d'],
+    'the seat displaced the stalest install instead of exceeding the plan',
+  );
+
+  const creds = await h.query<{ device_id: string; revoked: boolean }>(
+    `SELECT device_id, revoked FROM node_credentials WHERE user_id = '${user.id}' ORDER BY device_id`,
+  );
+  assert.deepEqual(
+    creds.map((row) => [row.device_id, row.revoked]).sort(),
+    [
+      ['device-a', true],
+      ['device-b', false],
+      ['device-c', false],
+      ['device-d', false],
+    ],
+    'the displaced install loses its credential',
+  );
+
+  // And it is told plainly, through the session it already holds.
+  const displaced = await config(accessToken, seats['device-a']!);
+  assert.equal(displaced.status, 409);
+  assert.equal(displaced.body.code, 'SESSION_SUPERSEDED');
 });
