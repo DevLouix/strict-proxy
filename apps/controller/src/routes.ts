@@ -26,7 +26,7 @@ import {
 } from './services/auth.js';
 import { tierDefinition, isPaidTier, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
-import { applyObservedNodeIp, computeLoadScore, createNodeEnrollmentToken, enrollNode, EnrollmentValidationError, registerNode, revokeAllUserCredentials, validateEnrollmentInput } from './services/nodes.js';
+import { applyObservedNodeIp, computeLoadScore, createNodeEnrollmentToken, enrollNode, EnrollmentValidationError, registerNode, revokeAllUserCredentials, statusAfterHeartbeat, validateEnrollmentInput } from './services/nodes.js';
 import { publicIpFromRequest } from './services/client-ip.js';
 import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
@@ -1481,19 +1481,12 @@ export function buildRouter(ctx: Ctx): Router {
         res.status(404).json({ error: 'node not found', code: 'NOT_FOUND' });
         return;
       }
+      const nextStatus = statusAfterHeartbeat(node, load);
       await ctx.db
         .update(nodes)
         .set({
-          // An agent's self-drain expires, so a restart that never finished
-          // cannot keep a node out of rotation. An operator's drain has no
-          // expiry, and a heartbeat preserves it.
-          status:
-            node.autoDrainUntil && node.autoDrainUntil.getTime() > Date.now()
-              ? 'draining'
-              : load > 90
-                ? 'degraded'
-                : 'online',
-          ...(node.autoDrainUntil && node.autoDrainUntil.getTime() <= Date.now() ? { autoDrainUntil: null } : {}),
+          status: nextStatus.status,
+          ...(nextStatus.clearAutoDrain ? { autoDrainUntil: null } : {}),
           loadScore: load,
           engineVersion: body.engineVersion ?? 'unknown',
           // Omitted keeps the previous value: an agent without the marker must

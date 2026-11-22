@@ -167,6 +167,33 @@ export function computeLoadScore(cpuPercent: number, memoryPercent: number): num
 }
 
 /**
+ * The status a heartbeat writes.
+ *
+ * Two drains share the `draining` status and must not be conflated:
+ *
+ *   - an operator's drain has no expiry and must survive every heartbeat. A
+ *     heartbeat that "revived" it silently put a node back into rotation, which
+ *     is what `a heartbeat never resurrects a draining node` guards;
+ *   - an agent's self-drain (set before an engine restart) carries an expiry, so
+ *     a restart that never finished cannot strand the node. Once it expires the
+ *     node returns to rotation on the next heartbeat.
+ *
+ * Pure so both rules are unit-tested rather than inferred from the route.
+ */
+export function statusAfterHeartbeat(
+  node: { status: string; autoDrainUntil: Date | null },
+  loadScore: number,
+  now: Date = new Date(),
+): { status: 'online' | 'degraded' | 'draining'; clearAutoDrain: boolean } {
+  const active = node.autoDrainUntil !== null && node.autoDrainUntil.getTime() > now.getTime();
+  const expired = node.autoDrainUntil !== null && !active;
+  if (active || (!expired && node.status === 'draining')) {
+    return { status: 'draining', clearAutoDrain: false };
+  }
+  return { status: loadScore > 90 ? 'degraded' : 'online', clearAutoDrain: expired };
+}
+
+/**
  * Registers (or re-registers) a node, returning its id and HMAC secret.
  * This remains useful for controlled bootstrap/seed tooling; normal VPS
  * onboarding should use the one-time enrollment endpoint above.
