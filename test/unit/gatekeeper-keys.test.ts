@@ -8,7 +8,11 @@ import {
   generateGatekeeperKey,
   hashGatekeeperKey,
   isGatekeeperKeyFormat,
+  isGatekeeperKeyPrefix,
   normalizeGatekeeperKeyInput,
+  normalizeGatekeeperKeyUpdate,
+  normalizeSiteUrl,
+  sanitizeReturnPath,
   serializeGatekeeperKey,
 } from '../../apps/controller/src/services/gatekeeper-keys.js';
 
@@ -58,6 +62,7 @@ test('serializeGatekeeperKey computes active, revoked, and expired status cleanl
     name: 'Portal',
     keyPrefix: 'sp_gk_deadbeef',
     keyHash: 'a'.repeat(64),
+    siteUrl: null as string | null,
     note: null,
     active: true,
     lastUsedAt: null,
@@ -85,4 +90,33 @@ test('serializeGatekeeperKey computes active, revoked, and expired status cleanl
   });
   assert.equal(revoked.status, 'revoked');
   assert.equal(revoked.active, false);
+});
+
+test('normalizeSiteUrl, sanitizeReturnPath, isGatekeeperKeyPrefix, and normalizeGatekeeperKeyUpdate', () => {
+  assert.equal(normalizeSiteUrl('https://portal.example.com/dashboard?x=1'), 'https://portal.example.com');
+  assert.equal(normalizeSiteUrl('http://localhost:3000/app'), 'http://localhost:3000');
+  assert.equal(normalizeSiteUrl(''), null);
+  assert.equal(normalizeSiteUrl(null), null);
+  assert.throws(() => normalizeSiteUrl('http://portal.example.com'), /https:\/\//);
+  assert.throws(() => normalizeSiteUrl('https://user:pass@portal.example.com'), /credentials/);
+  assert.throws(() => normalizeSiteUrl('not-a-url'), /valid .*URL/);
+
+  assert.equal(sanitizeReturnPath('/wallet?tab=1&sp_ticket=old'), '/wallet?tab=1');
+  assert.equal(sanitizeReturnPath('//evil.example/pwn'), '/');
+  assert.equal(sanitizeReturnPath('https://evil.example/pwn'), '/');
+  assert.equal(sanitizeReturnPath('/\\evil.example'), '/');
+  assert.equal(sanitizeReturnPath('/foo\r\nbar'), '/');
+
+  assert.equal(isGatekeeperKeyPrefix('sp_gk_deadbeef'), true);
+  assert.equal(isGatekeeperKeyPrefix('sp_gk_DEADBEEF'), false);
+  assert.equal(isGatekeeperKeyPrefix('sp_gk_deadbeef_secret'), false);
+
+  const upd = normalizeGatekeeperKeyUpdate({
+    name: '  Updated Portal  ',
+    siteUrl: 'https://updated.example.com/home',
+    note: '  ops  ',
+  });
+  assert.equal(upd.name, 'Updated Portal');
+  assert.equal(upd.siteUrl, 'https://updated.example.com');
+  assert.equal(upd.note, 'ops');
 });

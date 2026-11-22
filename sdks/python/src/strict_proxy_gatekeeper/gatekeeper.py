@@ -69,6 +69,15 @@ class EntitlementVerification:
 
 
 @dataclass(frozen=True)
+class PassHandoffResult:
+    """Result returned by `Gatekeeper.create_pass_handoff()` (RFC 9126 PAR)."""
+
+    session_id: str
+    handoff_url: str
+    expires_in: int
+
+
+@dataclass(frozen=True)
 class AuthDecision:
     """Authorization decision returned by `Gatekeeper.auth()`."""
 
@@ -82,6 +91,34 @@ class AuthDecision:
     body: Optional[dict[str, Any]] = None
     redirect_url: Optional[str] = None
     fetch_error: Optional[str] = None
+    had_ticket: bool = False
+
+
+def safe_return_path(raw: Any, query_param: str = "sp_ticket") -> str:
+    """Sanitizes a relative return path for same-site pass handoff redirects.
+
+    Rejects protocol-relative (`//evil.com`), absolute URLs, backslashes, and CR/LF,
+    and strips any stale `sp_ticket` query parameter so redirects never loop.
+    """
+    if not isinstance(raw, str):
+        return "/"
+    s = raw.strip()
+    if not s or len(s) > 1024:
+        return "/"
+    if not s.startswith("/") or s.startswith("//") or "\\" in s or any(ch in s for ch in ("\r", "\n", "\x00")):
+        return "/"
+    try:
+        parsed = urllib.parse.urlsplit(s)
+        if parsed.scheme or parsed.netloc:
+            return "/"
+        if not parsed.path.startswith("/") or parsed.path.startswith("//"):
+            return "/"
+        pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        filtered = [(k, v) for k, v in pairs if k != query_param]
+        qs = urllib.parse.urlencode(filtered)
+        return f"{parsed.path}?{qs}" if qs else parsed.path
+    except Exception:
+        return "/"
 
 
 def _normalize_ip(raw: str) -> str:
@@ -345,7 +382,7 @@ def _default_http_get_json(
 ) -> dict[str, Any]:
     req_headers = {
         "Accept": "application/json",
-        "User-Agent": "strict-proxy-gatekeeper-py/0.2.0",
+        "User-Agent": "strict-proxy-gatekeeper-py/0.3.0",
     }
     if headers:
         req_headers.update(headers)
@@ -367,6 +404,41 @@ def _default_http_get_json(
                 f"gatekeeper bootstrap failed (404): controller does not expose /api/v1/gatekeeper/bootstrap yet ({url})"
             ) from exc
         raise RuntimeError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"fetch failed for {url} ({exc.reason})") from exc
+
+
+def _default_http_post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    timeout_seconds: float,
+    headers: Optional[Mapping[str, str]] = None,
+) -> dict[str, Any]:
+    req_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "strict-proxy-gatekeeper-py/0.3.0",
+    }
+    if headers:
+        req_headers.update(headers)
+    data = json.dumps(dict(payload)).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=req_headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            status = getattr(resp, "status", 200)
+            if status < 200 or status >= 300:
+                raise RuntimeError(f"HTTP {status} from {url}")
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        detail = f"HTTP {exc.code}"
+        try:
+            err_body = json.loads(exc.read().decode("utf-8"))
+            if isinstance(err_body, dict) and err_body.get("error"):
+                detail = f"{detail}: {err_body['error']}"
+        except Exception:
+            pass
+        raise RuntimeError(f"gatekeeper request failed ({detail}) for {url}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"fetch failed for {url} ({exc.reason})") from exc
 
@@ -395,6 +467,10 @@ class Gatekeeper:
         allow_insecure_http: bool = False,
         required_tier: Optional[str] = None,
         cache_ttl_seconds: float = 300.0,
+        min_refresh_interval_seconds: Optional[float] = None,
+        failure_backoff_seconds: Optional[float] = None,
+        stale_while_revalidate_seconds: Optional[float] = None,
+        refresh_on_unknown_ip: bool = True,
         fetch_timeout_seconds: float = 5.0,
         entitlement_header: str = "x-strict-proxy-entitlement",
         entitlement_query_param: str = "sp_ticket",
@@ -408,6 +484,7 @@ class Gatekeeper:
         trusted_proxy_hops: Optional[int] = None,
         failure_mode: str = "closed",
         http_get_json: Optional[Callable[..., dict[str, Any]]] = None,
+        http_post_json: Optional[Callable[..., dict[str, Any]]] = None,
         logger: Optional[Callable[[str], None]] = None,
     ) -> None:
         raw_url = (
@@ -470,7 +547,23 @@ class Gatekeeper:
             raise ValueError("Gatekeeper: failure_mode must be 'closed' or 'open'")
 
         self._default_required_tier = required_tier
-        self._cache_ttl_seconds = float(cache_ttl_seconds)
+        self._cache_ttl_seconds = max(0.0, float(cache_ttl_seconds))
+        self._min_refresh_interval_seconds = (
+            max(0.0, float(min_refresh_interval_seconds))
+            if min_refresh_interval_seconds is not None
+            else min(30.0, self._cache_ttl_seconds)
+        )
+        self._failure_backoff_seconds = (
+            max(0.0, float(failure_backoff_seconds))
+            if failure_backoff_seconds is not None
+            else min(5.0, self._cache_ttl_seconds)
+        )
+        self._swr_seconds = (
+            max(0.0, float(stale_while_revalidate_seconds))
+            if stale_while_revalidate_seconds is not None
+            else min(60.0, self._cache_ttl_seconds / 2.0)
+        )
+        self._refresh_on_unknown_ip = bool(refresh_on_unknown_ip)
         self._fetch_timeout_seconds = float(fetch_timeout_seconds)
         self._entitlement_header = entitlement_header.lower()
         self._entitlement_query_param = entitlement_query_param
@@ -484,12 +577,19 @@ class Gatekeeper:
         self._trusted_proxy_hops = trusted_proxy_hops
         self._failure_closed = failure_mode == "closed"
         self._http_get_json = http_get_json or _default_http_get_json
+        self._http_post_json = http_post_json or _default_http_post_json
         self._logger = logger
 
         self._lock = threading.Lock()
+        self._fetch_lock = threading.Lock()
+        self._refreshing = False
         self._cached_ips: Optional[frozenset[str]] = None
         self._cache_expires_at: float = 0.0
+        self._cache_payload_expires_at: float = 0.0
+        self._cache_stale_until: float = 0.0
+        self._last_refresh_at: float = 0.0
         self._last_error: Optional[str] = None
+        self._last_error_at: float = 0.0
 
     @classmethod
     def init(cls, **kwargs: Any) -> "Gatekeeper":
@@ -520,7 +620,18 @@ class Gatekeeper:
                 return fn(url, self._fetch_timeout_seconds, headers)
         return fn(url, self._fetch_timeout_seconds)
 
-    def _verify_signed_ip_payload(self, body: Mapping[str, Any], key_pem: str) -> frozenset[str]:
+    def _assert_safe_transport(self, context: str) -> None:
+        if (
+            self._parsed_url.scheme != "https"
+            and not _is_private_or_internal_host(self._parsed_url.hostname)
+            and not self._allow_insecure_http
+        ):
+            raise RuntimeError(
+                f"gatekeeper: {context} requires https:// for non-local hosts "
+                "(use https://, a local/Docker internal host, or set allow_insecure_http=True)"
+            )
+
+    def _verify_signed_ip_payload(self, body: Mapping[str, Any], key_pem: str) -> tuple[frozenset[str], float]:
         key_id = body.get("keyId")
         signature = body.get("signature")
         generated_at = body.get("generatedAt")
@@ -544,18 +655,10 @@ class Gatekeeper:
         if exp_ts is None or exp_ts < time.time():
             raise RuntimeError("public-ips list expired")
 
-        return frozenset(_normalize_ip(str(ip)) for ip in ips)
+        return frozenset(_normalize_ip(str(ip)) for ip in ips), exp_ts
 
-    def _fetch_bootstrap(self) -> frozenset[str]:
-        if (
-            self._parsed_url.scheme != "https"
-            and not _is_private_or_internal_host(self._parsed_url.hostname)
-            and not self._allow_insecure_http
-        ):
-            raise RuntimeError(
-                "gatekeeper: api_key bootstrap requires https:// for non-local hosts "
-                "(use https://, a local/Docker internal host, or set allow_insecure_http=True)"
-            )
+    def _fetch_bootstrap(self) -> tuple[frozenset[str], float]:
+        self._assert_safe_transport("api_key bootstrap")
         url = f"{self._controller_base_url}/api/v1/gatekeeper/bootstrap"
         body = self._call_http_get_json(url, headers={"Authorization": f"Bearer {self._api_key}"})
         key_id = body.get("keyId")
@@ -611,7 +714,7 @@ class Gatekeeper:
             self._discovered_keys = discovered
         return discovered
 
-    def _fetch_ip_set(self) -> frozenset[str]:
+    def _fetch_ip_set(self) -> tuple[frozenset[str], float]:
         if self._api_key:
             return self._fetch_bootstrap()
         keys = self._resolve_keys()
@@ -624,35 +727,190 @@ class Gatekeeper:
             raise RuntimeError(f"unknown signing key id: {key_id}")
         return self._verify_signed_ip_payload(body, key_pem)
 
-    def _get_ip_set(self, *, force_refresh: bool = False) -> frozenset[str]:
-        now = time.time()
-        with self._lock:
-            if not force_refresh and self._cached_ips is not None and self._cache_expires_at > now:
-                return self._cached_ips
-        try:
-            ips = self._fetch_ip_set()
-        except Exception as exc:
+    def _refresh_now(self) -> frozenset[str]:
+        with self._fetch_lock:
+            try:
+                ips, payload_exp = self._fetch_ip_set()
+            except Exception as exc:
+                with self._lock:
+                    self._last_error = str(exc)
+                    self._last_error_at = time.time()
+                    self._refreshing = False
+                raise
+            fetched_at = time.time()
+            effective_ttl = min(self._cache_ttl_seconds, 15.0) if not ips else self._cache_ttl_seconds
+            expires_at = min(fetched_at + effective_ttl, payload_exp)
+            stale_until = min(expires_at + self._swr_seconds, payload_exp)
             with self._lock:
-                self._last_error = str(exc)
-            raise
-        effective_ttl = min(self._cache_ttl_seconds, 15.0) if not ips else self._cache_ttl_seconds
-        with self._lock:
-            self._cached_ips = ips
-            self._cache_expires_at = time.time() + effective_ttl
-            self._last_error = None
-        return ips
+                self._cached_ips = ips
+                self._cache_expires_at = expires_at
+                self._cache_payload_expires_at = payload_exp
+                self._cache_stale_until = stale_until
+                self._last_refresh_at = fetched_at
+                self._last_error = None
+                self._last_error_at = 0.0
+                self._refreshing = False
+            return ips
 
-    def refresh(self) -> list[str]:
-        """Forces an immediate refresh of the signed fleet exit-IP allowlist."""
-        return sorted(self._get_ip_set(force_refresh=True))
+    def _trigger_background_refresh(self) -> None:
+        def _bg() -> None:
+            try:
+                self._refresh_now()
+            except Exception as exc:
+                self._log(f"gatekeeper: background refresh failed: {exc}")
+
+        t = threading.Thread(target=_bg, name="strict-proxy-gatekeeper-refresh", daemon=True)
+        t.start()
+
+    def _get_ip_set(self, *, force_refresh: bool = False, allow_stale: bool = True) -> frozenset[str]:
+        now = time.time()
+        trigger_bg = False
+        with self._lock:
+            if not force_refresh and self._cached_ips is not None:
+                if self._cache_expires_at > now:
+                    return self._cached_ips
+                if allow_stale and self._cache_stale_until > now and self._cache_payload_expires_at > now:
+                    if not self._refreshing and (now - self._last_error_at) >= self._failure_backoff_seconds:
+                        self._refreshing = True
+                        trigger_bg = True
+                    cached_stale = self._cached_ips
+                else:
+                    cached_stale = None
+            else:
+                cached_stale = None
+
+            if cached_stale is None and not force_refresh:
+                if (
+                    self._last_error is not None
+                    and self._failure_backoff_seconds > 0
+                    and (now - self._last_error_at) < self._failure_backoff_seconds
+                ):
+                    raise RuntimeError(self._last_error)
+
+        if cached_stale is not None:
+            if trigger_bg:
+                self._trigger_background_refresh()
+            return cached_stale
+
+        return self._refresh_now()
+
+    def refresh(self, *, force: bool = False) -> list[str]:
+        """Refreshes the signed fleet exit-IP allowlist with anti-stampede cooldown throttling.
+
+        By default (`force=False`), calls within `min_refresh_interval_seconds` (default 30s)
+        return the cached list without hitting the controller. Pass `force=True` for explicit
+        operator actions (e.g. an admin "Force refresh" button).
+        """
+        now = time.time()
+        if not force:
+            with self._lock:
+                if (
+                    self._cached_ips is not None
+                    and self._cache_payload_expires_at > now
+                    and (now - self._last_refresh_at) < self._min_refresh_interval_seconds
+                ):
+                    return sorted(self._cached_ips)
+        return sorted(self._get_ip_set(force_refresh=True, allow_stale=False))
+
+    def create_pass_handoff(
+        self,
+        return_path: str = "/",
+        *,
+        return_url: Optional[str] = None,
+        required_tier: Optional[str] = None,
+    ) -> PassHandoffResult:
+        """Creates a short-lived, single-use browser plan-pass handoff session (RFC 9126 PAR).
+
+        Redirect the visitor's browser `302` to `result.handoff_url`. After verifying their
+        StrictProxy account (zero-click if already signed in), the controller redirects back
+        to your site with `?sp_ticket=sp1...`.
+        """
+        if not self._api_key:
+            raise RuntimeError(
+                "Gatekeeper.create_pass_handoff() requires `api_key` "
+                "(created in Admin -> Links -> Gatekeeper Key Factory)."
+            )
+        self._assert_safe_transport("pass-session handoff")
+
+        tier = required_tier or (
+            self._default_required_tier if self._default_required_tier in ("standard", "pro") else None
+        )
+        payload: dict[str, Any] = {}
+        if return_url:
+            payload["returnUrl"] = return_url
+        else:
+            payload["returnPath"] = safe_return_path(return_path, self._entitlement_query_param)
+        if tier:
+            payload["requiredTier"] = tier
+
+        url = f"{self._controller_base_url}/api/v1/gatekeeper/pass-session"
+        body = self._http_post_json(
+            url,
+            payload,
+            self._fetch_timeout_seconds,
+            {"Authorization": f"Bearer {self._api_key}"},
+        )
+        session_id = body.get("sessionId")
+        handoff_url = body.get("handoffUrl")
+        expires_in = body.get("expiresIn", 300)
+        if not isinstance(session_id, str) or not isinstance(handoff_url, str):
+            raise RuntimeError("gatekeeper pass-session response missing sessionId or handoffUrl")
+        return PassHandoffResult(
+            session_id=session_id,
+            handoff_url=handoff_url,
+            expires_in=int(expires_in),
+        )
+
+    def build_pass_redirect_url(
+        self,
+        return_path: str = "/",
+        *,
+        base_url: Optional[str] = None,
+        site_key_prefix: Optional[str] = None,
+        required_tier: Optional[str] = None,
+    ) -> str:
+        """Builds a static registered-origin pass redirect URL (`https://<controller>/pass?site=...`)."""
+        base = (base_url or self._controller_base_url).rstrip("/")
+        prefix = site_key_prefix
+        if not prefix and self._api_key:
+            m = re.match(r"^(sp_gk_[a-f0-9]{8})_", self._api_key)
+            if m:
+                prefix = m.group(1)
+        if not prefix:
+            raise ValueError(
+                "Gatekeeper.build_pass_redirect_url() requires `api_key` (sp_gk_...) or explicit `site_key_prefix`."
+            )
+        params: dict[str, str] = {
+            "site": prefix,
+            "return": safe_return_path(return_path, self._entitlement_query_param),
+        }
+        tier = required_tier or (
+            self._default_required_tier if self._default_required_tier in ("standard", "pro") else None
+        )
+        if tier:
+            params["tier"] = tier
+        return f"{base}/pass?{urllib.parse.urlencode(params)}"
 
     def status(self) -> dict[str, Any]:
-        """Returns current cache and diagnostic status."""
+        """Returns current cache, throttle, and diagnostic status."""
         with self._lock:
             cached = sorted(self._cached_ips) if self._cached_ips is not None else []
             exp_iso = (
                 datetime.fromtimestamp(self._cache_expires_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
                 if self._cache_expires_at > 0
+                else None
+            )
+            last_ref_iso = (
+                datetime.fromtimestamp(self._last_refresh_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                if self._last_refresh_at > 0
+                else None
+            )
+            next_allowed_ts = (
+                self._last_refresh_at + self._min_refresh_interval_seconds if self._last_refresh_at > 0 else 0.0
+            )
+            next_allowed_iso = (
+                datetime.fromtimestamp(next_allowed_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                if next_allowed_ts > 0
                 else None
             )
             last_err = self._last_error
@@ -667,6 +925,8 @@ class Gatekeeper:
             "has_pinned_key": has_pinned_key,
             "cached_ips": cached,
             "cache_expires_at": exp_iso,
+            "last_refresh_at": last_ref_iso,
+            "next_refresh_allowed_at": next_allowed_iso,
             "last_error": last_err,
         }
 
@@ -699,6 +959,7 @@ class Gatekeeper:
         ip: Optional[str] = None,
         fetch_error: Optional[str] = None,
         deny_redirect_url: Optional[str] = None,
+        had_ticket: bool = False,
     ) -> AuthDecision:
         redirect = deny_redirect_url or self._deny_redirect_url
 
@@ -749,6 +1010,7 @@ class Gatekeeper:
                 body=body,
                 redirect_url=redirect,
                 fetch_error=fetch_error,
+                had_ticket=had_ticket,
             )
         if self._deny_status is not None and self._deny_body is not None:
             return AuthDecision(
@@ -759,6 +1021,7 @@ class Gatekeeper:
                 code=code,
                 body=dict(self._deny_body),
                 fetch_error=fetch_error,
+                had_ticket=had_ticket,
             )
         return AuthDecision(
             allowed=False,
@@ -768,6 +1031,7 @@ class Gatekeeper:
             code=code,
             body=body,
             fetch_error=fetch_error,
+            had_ticket=had_ticket,
         )
 
     def auth(
@@ -805,6 +1069,15 @@ class Gatekeeper:
             self._log(f"gatekeeper: ip list refresh failed: {exc}")
             ips = None
 
+        if ips is not None and client_ip and client_ip not in ips and self._refresh_on_unknown_ip:
+            with self._lock:
+                can_refresh = (time.time() - self._last_refresh_at) >= self._min_refresh_interval_seconds
+            if can_refresh:
+                try:
+                    ips = self._get_ip_set(force_refresh=True, allow_stale=False)
+                except Exception:
+                    pass
+
         if ips is None:
             if self._failure_closed:
                 return self._build_denial(
@@ -822,11 +1095,17 @@ class Gatekeeper:
         set_cookie: Optional[str] = None
 
         if effective_tier is not None:
+            had_ticket = _read_query_param(query, self._entitlement_query_param) is not None
             try:
                 keys = self._resolve_keys()
-            except Exception:
+            except Exception as exc:
                 return self._build_denial(
-                    "entitlement_invalid", effective_tier, deny_redirect_url=deny_redirect_url
+                    "entitlement_invalid",
+                    effective_tier,
+                    ip=client_ip,
+                    fetch_error=str(exc),
+                    deny_redirect_url=deny_redirect_url,
+                    had_ticket=had_ticket,
                 )
             found = entitlement_token_with_source_of(
                 headers,
@@ -843,13 +1122,21 @@ class Gatekeeper:
             )
             if not verified.ok or verified.entitlement is None:
                 reason = "entitlement_missing" if (verified.reason == "malformed" and not token) else "entitlement_invalid"
-                return self._build_denial(reason, effective_tier, deny_redirect_url=deny_redirect_url)
+                return self._build_denial(
+                    reason,
+                    effective_tier,
+                    ip=client_ip,
+                    deny_redirect_url=deny_redirect_url,
+                    had_ticket=had_ticket,
+                )
             if not tier_satisfies(verified.entitlement.tier, effective_tier):
                 return self._build_denial(
                     "tier_insufficient",
                     effective_tier,
                     verified.entitlement.tier,
+                    ip=client_ip,
                     deny_redirect_url=deny_redirect_url,
+                    had_ticket=had_ticket,
                 )
             user = verified.entitlement
             if found and found[1] == "query" and effective_set_cookie:

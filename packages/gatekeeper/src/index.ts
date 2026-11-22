@@ -12,6 +12,7 @@ export {
   entitlementTokenOf,
   entitlementTokenWithSourceOf,
   formatFetchError,
+  safeReturnPath,
   tierSatisfies,
   verifyEntitlementToken,
 } from './gatekeeper.js';
@@ -46,8 +47,11 @@ export type {
   GatekeeperOptions,
   GatekeeperRouteOptions,
   GatekeeperStatus,
+  PassHandoffOptions,
+  PassHandoffResult,
   PublicIpsResponse,
   PublicKeyResponse,
+  RefreshOptions,
   SubscriptionTier,
 } from './types.js';
 

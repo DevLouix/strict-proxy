@@ -24,9 +24,37 @@ export interface GatekeeperBootstrapResponse extends PublicIpsResponse {
     id: string;
     name: string;
     keyPrefix: string;
+    siteUrl?: string | null;
   };
   algorithm: string;
   publicKeyPem: string;
+}
+
+/** Response from `POST /api/v1/gatekeeper/pass-session` (RFC 9126 PAR browser handoff). */
+export interface PassHandoffResult {
+  sessionId: string;
+  handoffUrl: string;
+  expiresIn: number;
+}
+
+/** Input options for `gk.createPassHandoff(...)`. */
+export interface PassHandoffOptions {
+  /** Full return URL (e.g. `https://portal.example.com/wallet`). Optional if `siteUrl` is registered on the key. */
+  returnUrl?: string;
+  /** Relative return path (e.g. `/wallet?tab=1`). Resolved strictly against the key's registered `siteUrl`. */
+  returnPath?: string;
+  /** Minimum plan required by the site (defaults to `requiredTier` configured in `Gatekeeper.init()`). */
+  requiredTier?: 'standard' | 'pro';
+}
+
+/** Options for `gk.refresh(options)`. */
+export interface RefreshOptions {
+  /**
+   * When `true`, bypasses `minRefreshIntervalMs` and `failureBackoffMs` cooldowns.
+   * Use `force: true` ONLY for explicit operator/admin actions, never per visitor request.
+   * Defaults to `false`.
+   */
+  force?: boolean;
 }
 
 /** Claims embedded inside a controller-signed `sp1.<payload>.<sig>` entitlement token. */
@@ -79,7 +107,8 @@ export type DenyResponseConfig =
 /** Options accepted by `Gatekeeper.init(...)`. */
 export interface GatekeeperInitOptions {
   /**
-   * Base URL of your StrictProxy controller (e.g. `https://proxy.example.com`).
+   * Base URL of your StrictProxy controller (e.g. `https://proxy.example.com`
+   * or internal `http://strict-proxy-controller:8080`).
    * Falls back to `process.env.STRICT_PROXY_CONTROLLER_URL` or `process.env.STRICT_PROXY_URL`.
    */
   controllerUrl?: string;
@@ -90,35 +119,21 @@ export interface GatekeeperInitOptions {
    * **Admin → Links → Gatekeeper Key Factory**.
    *
    * Falls back to `process.env.STRICT_PROXY_GATEKEEPER_KEY` or `process.env.STRICT_PROXY_API_KEY`.
-   *
-   * Recommended: eliminates manual multi-line PEM setup, fetches both active exit
-   * IPs and the controller Ed25519 signing key in one request, and supports
-   * per-site rotation and revocation.
    */
   apiKey?: string;
   /**
    * Controller Ed25519 signing public key PEM (`-----BEGIN PUBLIC KEY-----`).
    * Optional when using `apiKey` or HTTPS auto-discovery.
    * Falls back to `process.env.STRICT_PROXY_PUBLIC_KEY_PEM`.
-   *
-   * Note: this is the **controller** signing key from Admin → Links, NOT a proxy
-   * node's Reality/tunnel public key.
    */
   publicKey?: string;
-  /**
-   * Optional key id paired with `publicKey` (defaults to `process.env.STRICT_PROXY_SIGNING_KEY_ID`
-   * or accepts any key id when only a single `publicKey` is configured).
-   */
+  /** Optional key id paired with `publicKey`. */
   keyId?: string;
-  /**
-   * Map of `{ [keyId]: publicKeyPem }` for zero-downtime key rotation.
-   * Optional when `apiKey`, `publicKey`, or `autoFetchPublicKey` is used.
-   */
+  /** Map of `{ [keyId]: publicKeyPem }` for zero-downtime key rotation. */
   publicKeys?: Record<string, string>;
   /**
    * When true (default) and neither `apiKey`, `publicKey`, nor `publicKeys` is
-   * provided, automatically fetches the controller's signing key from
-   * `GET /api/v1/network/public-key` over HTTPS (or localhost/internal Docker hosts).
+   * provided, automatically fetches the controller's signing key over HTTPS.
    */
   autoFetchPublicKey?: boolean;
   /**
@@ -134,6 +149,30 @@ export interface GatekeeperInitOptions {
   requiredTier?: SubscriptionTier;
   /** Cache TTL for the signed fleet exit-IP allowlist in seconds. Defaults to `300`. */
   cacheTtlSeconds?: number;
+  /**
+   * Minimum cooldown in milliseconds between early `refresh()` or unknown-IP
+   * revalidation calls (JWKS-style anti-stampede throttle). Defaults to `30000` (30s),
+   * clamped to `cacheTtlSeconds * 1000` unless explicitly set.
+   */
+  minRefreshIntervalMs?: number;
+  /**
+   * Backoff in milliseconds after a failed controller fetch before retrying,
+   * preventing retry storms during a controller outage. Defaults to `5000` (5s),
+   * clamped to `cacheTtlSeconds * 1000` unless explicitly set.
+   */
+  failureBackoffMs?: number;
+  /**
+   * Stale-while-revalidate window in seconds after `cacheTtlSeconds` elapses
+   * (capped by the controller's cryptographic `expiresAt`). Serves cached IPs
+   * with zero latency while refreshing in the background. Defaults to `60`.
+   */
+  staleWhileRevalidateSeconds?: number;
+  /**
+   * When `true` (default), if an incoming IP is not in the cached fleet list and
+   * `minRefreshIntervalMs` has elapsed since the last fetch, Gatekeeper performs
+   * one throttled refresh before denying (so newly online nodes work promptly).
+   */
+  refreshOnUnknownIp?: boolean;
   /** HTTP request timeout in milliseconds when refreshing controller metadata. Defaults to `5000`. */
   fetchTimeoutMs?: number;
   /** Header carrying the signed entitlement token. Defaults to `x-strict-proxy-entitlement`. */
@@ -210,6 +249,8 @@ export interface AuthDeniedDecision {
   reason: DenialReason;
   /** The client IP Gatekeeper evaluated (useful for server-side debugging). */
   ip: string | null;
+  /** True when the request already carried a `?sp_ticket=` query param (use to prevent redirect loops). */
+  hadTicket?: boolean;
   /** Non-null when the controller IP list could not be fetched or verified. */
   fetchError?: string;
   status: number;
@@ -231,6 +272,8 @@ export interface GatekeeperStatus {
   hasPinnedKey: boolean;
   cachedIps: string[];
   cacheExpiresAt: string | null;
+  lastRefreshAt: string | null;
+  nextRefreshAllowedAt: string | null;
   lastError: string | null;
 }
 

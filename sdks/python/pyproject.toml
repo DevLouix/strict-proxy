@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strict-proxy-gatekeeper"
-version = "0.2.0"
+version = "0.3.0"
 description = "Official StrictProxy Gatekeeper SDK — protect websites and APIs so only users routed through your StrictProxy fleet (and optional plan tier) can access them."
 readme = "README.md"
 license = "MIT"

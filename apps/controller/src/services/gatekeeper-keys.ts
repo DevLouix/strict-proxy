@@ -3,8 +3,9 @@
  *
  * Generates, hashes, validates, rotates, and revokes single-line site API keys
  * (`sp_gk_<8hex>_<secret>`) used by `@strict-proxy/gatekeeper` and
- * `strict-proxy-gatekeeper` to bootstrap exit-IP lists and the controller's
- * Ed25519 public key without manual multi-line PEM management.
+ * `strict-proxy-gatekeeper` to bootstrap exit-IP lists, the controller's
+ * Ed25519 public key, and RFC 9126 browser pass handoffs without manual PEM
+ * management or plaintext secret storage.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { desc, eq } from 'drizzle-orm';
@@ -13,6 +14,7 @@ import { gatekeeperKeys } from '../db/schema.js';
 
 export const GATEKEEPER_KEY_PREFIX = 'sp_gk_';
 const KEY_FORMAT_RE = /^sp_gk_[a-f0-9]{8}_[A-Za-z0-9_-]{24,}$/;
+const KEY_PREFIX_RE = /^sp_gk_[a-f0-9]{8}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface GeneratedGatekeeperKey {
@@ -23,14 +25,22 @@ export interface GeneratedGatekeeperKey {
 
 export interface GatekeeperKeyCreateInput {
   name: string;
+  siteUrl: string | null;
   note: string | null;
   expiresAt: Date | null;
+}
+
+export interface GatekeeperKeyUpdateInput {
+  name?: string;
+  siteUrl?: string | null;
+  note?: string | null;
 }
 
 export interface GatekeeperKeySummary {
   id: string;
   name: string;
   keyPrefix: string;
+  siteUrl: string | null;
   note: string | null;
   active: boolean;
   status: 'active' | 'revoked' | 'expired';
@@ -49,8 +59,66 @@ export function isGatekeeperKeyFormat(rawKey: string): boolean {
   return KEY_FORMAT_RE.test(rawKey.trim());
 }
 
+export function isGatekeeperKeyPrefix(prefix: string): boolean {
+  return KEY_PREFIX_RE.test(prefix.trim());
+}
+
 export function isValidUuid(id: string): boolean {
   return UUID_RE.test(id);
+}
+
+/**
+ * Normalizes a site URL down to its strict origin (`https://portal.example.com`).
+ * Rejects non-http(s) schemes and embedded credentials so open redirects are impossible.
+ */
+export function normalizeSiteUrl(raw: unknown): string | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (typeof raw !== 'string') {
+    throw new Error('siteUrl must be a string');
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error('siteUrl must be a valid http:// or https:// URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('siteUrl must use https:// (or http://localhost for local development)');
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('127.');
+  if (parsed.protocol === 'http:' && !isLoopback) {
+    throw new Error('siteUrl must use https:// (or http://localhost for local development)');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('siteUrl must not contain credentials');
+  }
+  return parsed.origin;
+}
+
+/**
+ * Sanitizes a relative return path for same-site redirects.
+ * Rejects protocol-relative (`//host`), absolute URLs, backslashes, and CR/LF,
+ * and strips any stale `sp_ticket` query parameter so redirects never loop.
+ */
+export function sanitizeReturnPath(raw: unknown): string {
+  if (typeof raw !== 'string') return '/';
+  const s = raw.trim();
+  if (!s || s.length > 1024) return '/';
+  if (!s.startsWith('/') || s.startsWith('//') || s.includes('\\') || /[\r\n\0]/.test(s)) {
+    return '/';
+  }
+  try {
+    const parsed = new URL(s, 'https://strict-proxy.invalid');
+    if (parsed.origin !== 'https://strict-proxy.invalid') return '/';
+    parsed.searchParams.delete('sp_ticket');
+    const qs = parsed.searchParams.toString();
+    return `${parsed.pathname}${qs ? `?${qs}` : ''}`;
+  } catch {
+    return '/';
+  }
 }
 
 /** Generates a high-entropy single-line Gatekeeper site key + display prefix + SHA-256 hash. */
@@ -76,6 +144,8 @@ export function normalizeGatekeeperKeyInput(body: unknown, nowMs = Date.now()): 
   if (rawName.length > 80) {
     throw new Error('name must be 80 characters or fewer');
   }
+
+  const siteUrl = normalizeSiteUrl(obj.siteUrl);
 
   let note: string | null = null;
   if (obj.note !== undefined && obj.note !== null) {
@@ -107,7 +177,33 @@ export function normalizeGatekeeperKeyInput(body: unknown, nowMs = Date.now()): 
     expiresAt = new Date(parsed);
   }
 
-  return { name: rawName, note, expiresAt };
+  return { name: rawName, siteUrl, note, expiresAt };
+}
+
+export function normalizeGatekeeperKeyUpdate(body: unknown): GatekeeperKeyUpdateInput {
+  const obj = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+  const out: GatekeeperKeyUpdateInput = {};
+  if (obj.name !== undefined) {
+    const rawName = typeof obj.name === 'string' ? obj.name.trim() : '';
+    if (!rawName) throw new Error('name cannot be empty');
+    if (rawName.length > 80) throw new Error('name must be 80 characters or fewer');
+    out.name = rawName;
+  }
+  if (obj.siteUrl !== undefined) {
+    out.siteUrl = normalizeSiteUrl(obj.siteUrl);
+  }
+  if (obj.note !== undefined) {
+    if (obj.note === null || obj.note === '') {
+      out.note = null;
+    } else if (typeof obj.note !== 'string') {
+      throw new Error('note must be a string');
+    } else {
+      const trimmed = obj.note.trim();
+      if (trimmed.length > 280) throw new Error('note must be 280 characters or fewer');
+      out.note = trimmed || null;
+    }
+  }
+  return out;
 }
 
 export function serializeGatekeeperKey(
@@ -125,6 +221,7 @@ export function serializeGatekeeperKey(
     id: row.id,
     name: row.name,
     keyPrefix: row.keyPrefix,
+    siteUrl: row.siteUrl ?? null,
     note: row.note ?? null,
     active: status === 'active',
     status,
@@ -156,6 +253,7 @@ export async function createGatekeeperKey(
       name: input.name,
       keyPrefix: generated.keyPrefix,
       keyHash: generated.keyHash,
+      siteUrl: input.siteUrl,
       note: input.note,
       active: true,
       expiresAt: input.expiresAt,
@@ -166,6 +264,28 @@ export async function createGatekeeperKey(
     key: serializeGatekeeperKey(row!),
     secret: generated.rawKey,
   };
+}
+
+export async function updateGatekeeperKey(
+  db: Db,
+  id: string,
+  patch: GatekeeperKeyUpdateInput,
+): Promise<GatekeeperKeySummary | null> {
+  if (!isValidUuid(id)) return null;
+  const setObj: Partial<typeof gatekeeperKeys.$inferInsert> = {};
+  if (patch.name !== undefined) setObj.name = patch.name;
+  if (patch.siteUrl !== undefined) setObj.siteUrl = patch.siteUrl;
+  if (patch.note !== undefined) setObj.note = patch.note;
+  if (Object.keys(setObj).length === 0) {
+    const [existing] = await db.select().from(gatekeeperKeys).where(eq(gatekeeperKeys.id, id)).limit(1);
+    return existing ? serializeGatekeeperKey(existing) : null;
+  }
+  const [row] = await db
+    .update(gatekeeperKeys)
+    .set(setObj)
+    .where(eq(gatekeeperKeys.id, id))
+    .returning();
+  return row ? serializeGatekeeperKey(row) : null;
 }
 
 export async function rotateGatekeeperKey(
@@ -221,6 +341,34 @@ export interface VerifiedGatekeeperSite {
   id: string;
   name: string;
   keyPrefix: string;
+  siteUrl: string | null;
+}
+
+/**
+ * Looks up an active, non-expired site key by its public display prefix (`sp_gk_<8hex>`).
+ * Used ONLY by the browser `/pass?site=...` redirect flow, which strictly enforces
+ * redirecting back ONLY to the registered `siteUrl` origin.
+ */
+export async function findActiveGatekeeperKeyByPrefix(
+  db: Db,
+  keyPrefix: string | undefined,
+): Promise<VerifiedGatekeeperSite | null> {
+  if (!keyPrefix) return null;
+  const trimmed = keyPrefix.trim();
+  if (!isGatekeeperKeyPrefix(trimmed)) return null;
+  const [row] = await db
+    .select()
+    .from(gatekeeperKeys)
+    .where(eq(gatekeeperKeys.keyPrefix, trimmed))
+    .limit(1);
+  if (!row || !row.active || row.revokedAt) return null;
+  if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    keyPrefix: row.keyPrefix,
+    siteUrl: row.siteUrl ?? null,
+  };
 }
 
 /**
@@ -252,7 +400,6 @@ export async function verifyGatekeeperKey(
   if (!row.active || row.revokedAt) return null;
   if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) return null;
 
-  // Stamp usage (best effort — never deny a valid site on a telemetry write blip).
   try {
     await db
       .update(gatekeeperKeys)
@@ -269,5 +416,6 @@ export async function verifyGatekeeperKey(
     id: row.id,
     name: row.name,
     keyPrefix: row.keyPrefix,
+    siteUrl: row.siteUrl ?? null,
   };
 }

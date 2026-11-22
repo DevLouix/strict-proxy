@@ -581,6 +581,8 @@ export const gatekeeperKeys = pgTable(
     keyPrefix: text('key_prefix').notNull(),
     /** SHA-256 hex digest of the raw site key. Plaintext is never persisted. */
     keyHash: text('key_hash').notNull(),
+    /** Registered site origin (e.g. https://portal.example.com) for open-redirect-safe pass handoff. */
+    siteUrl: text('site_url'),
     /** Optional domain or operator notes. */
     note: text('note'),
     active: boolean('active').notNull().default(true),

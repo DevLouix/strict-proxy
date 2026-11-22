@@ -26,6 +26,8 @@ import {
   deleteGatekeeperKey,
   listGatekeeperKeys,
   normalizeGatekeeperKeyInput,
+  normalizeGatekeeperKeyUpdate,
+  updateGatekeeperKey,
   revokeGatekeeperKey,
   rotateGatekeeperKey,
   verifyGatekeeperKey,
@@ -142,6 +144,37 @@ export function buildGatekeeperKeysRouter(ctx: Ctx): Router {
         metadata: { keyPrefix: created.key.keyPrefix, expiresAt: created.key.expiresAt },
       });
       res.status(201).json(created);
+    }),
+  );
+
+
+  router.patch(
+    '/api/v1/admin/gatekeeper/keys/:id',
+    ...adminOnly,
+    asyncHandler(async (req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const id = String(req.params.id ?? '');
+      let patch;
+      try {
+        patch = normalizeGatekeeperKeyUpdate(req.body);
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message, code: 'VALIDATION_ERROR' });
+        return;
+      }
+      const updated = await updateGatekeeperKey(ctx.db, id, patch);
+      if (!updated) {
+        res.status(404).json({ error: 'gatekeeper key not found', code: 'NOT_FOUND' });
+        return;
+      }
+      await recordAudit(ctx.db, {
+        ...auditActor(req),
+        action: 'gatekeeper_key.updated',
+        targetType: 'gatekeeper_key',
+        targetId: updated.id,
+        summary: `Updated Gatekeeper site key "${updated.name}" (${updated.keyPrefix})`,
+        metadata: { siteUrl: updated.siteUrl },
+      });
+      res.json({ key: updated });
     }),
   );
 

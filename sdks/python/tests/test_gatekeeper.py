@@ -18,6 +18,7 @@ from strict_proxy_gatekeeper import (
     canonical_json,
     client_ip_of,
     entitlement_token_of,
+    safe_return_path,
     tier_satisfies,
     verify_entitlement_token,
 )
@@ -348,3 +349,122 @@ def test_rejects_node_key_or_site_key_in_public_key() -> None:
             controller_url="https://controller.test",
             public_key="m4h5s8W2kQp9L1xYz0AbCdEfGhIjKlMnOpQrStUvWxY=",
         )
+
+
+def test_safe_return_path_blocks_open_redirects_and_strips_ticket() -> None:
+    assert safe_return_path("/wallet?tab=1&sp_ticket=old") == "/wallet?tab=1"
+    assert safe_return_path("/dashboard") == "/dashboard"
+    assert safe_return_path("//evil.example/pwn") == "/"
+    assert safe_return_path("https://evil.example/pwn") == "/"
+    assert safe_return_path("/\\evil.example") == "/"
+    assert safe_return_path("/foo\r\nSet-Cookie: a=1") == "/"
+    assert safe_return_path(None) == "/"
+
+
+def test_refresh_cooldown_throttling_and_force_override() -> None:
+    m1 = _make_signed_materials(ips=["203.0.113.10"])
+    m2 = _make_signed_materials(ips=["203.0.113.10", "203.0.113.20"])
+    # Reuse keypair from m1 for second response
+    calls = 0
+
+    def fake_get(_url: str, _timeout: float) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return m1["public_ips_body"]
+
+    gk = Gatekeeper.init(
+        controller_url="https://controller.test",
+        public_key=m1["public_key_pem"],
+        cache_ttl_seconds=300,
+        min_refresh_interval_seconds=60,
+        http_get_json=fake_get,
+    )
+    assert gk.refresh() == ["203.0.113.10"]
+    assert calls == 1
+    # Within cooldown -> returns cached IPs without re-fetching
+    assert gk.refresh() == ["203.0.113.10"]
+    assert calls == 1
+    # Explicit force=True bypasses cooldown
+    assert gk.refresh(force=True) == ["203.0.113.10"]
+    assert calls == 2
+    st = gk.status()
+    assert st["last_refresh_at"] is not None
+    assert st["next_refresh_allowed_at"] is not None
+
+
+def test_failure_backoff_prevents_retry_storm() -> None:
+    m = _make_signed_materials()
+    calls = 0
+
+    def failing_get(_url: str, _timeout: float) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("controller unreachable")
+
+    gk = Gatekeeper.init(
+        controller_url="https://controller.test",
+        public_key=m["public_key_pem"],
+        failure_backoff_seconds=30,
+        http_get_json=failing_get,
+    )
+    d1 = gk.auth(ip="203.0.113.10")
+    d2 = gk.auth(ip="203.0.113.10")
+    assert not d1.allowed and d1.fetch_error == "controller unreachable"
+    assert not d2.allowed and d2.fetch_error == "controller unreachable"
+    assert calls == 1
+
+
+def test_pass_handoff_and_had_ticket_loop_guard() -> None:
+    m = _make_signed_materials(ips=["203.0.113.10"], tier="standard")
+    posted: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+
+    def fake_get(_url: str, _timeout: float, _headers: dict[str, str] | None = None) -> dict[str, Any]:
+        return {
+            "site": {"id": "s1", "name": "Portal", "keyPrefix": "sp_gk_deadbeef"},
+            "algorithm": "Ed25519",
+            "publicKeyPem": m["public_key_pem"],
+            **m["public_ips_body"],
+        }
+
+    def fake_post(
+        url: str, payload: dict[str, Any], _timeout: float, headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        posted.append((url, dict(payload), dict(headers or {})))
+        return {
+            "sessionId": "sess-123",
+            "handoffUrl": "https://strictproxy.example.com/pass/sess-123",
+            "expiresIn": 300,
+        }
+
+    gk = Gatekeeper.init(
+        controller_url="https://controller.test",
+        api_key="sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz",
+        required_tier="standard",
+        http_get_json=fake_get,
+        http_post_json=fake_post,
+    )
+
+    # Pass-less visit -> had_ticket is False
+    d_missing = gk.auth(ip="203.0.113.10")
+    assert not d_missing.allowed
+    assert d_missing.code == "GATEKEEPER_ENTITLEMENT_REQUIRED"
+    assert d_missing.had_ticket is False
+
+    # Bogus ?sp_ticket=... -> had_ticket is True (use to avoid redirect loop)
+    d_bad = gk.auth(ip="203.0.113.10", query={"sp_ticket": "bogus"})
+    assert not d_bad.allowed
+    assert d_bad.code == "GATEKEEPER_ENTITLEMENT_INVALID"
+    assert d_bad.had_ticket is True
+
+    # RFC 9126 PAR pass handoff
+    handoff = gk.create_pass_handoff("/wallet?sp_ticket=old&tab=2")
+    assert handoff.session_id == "sess-123"
+    assert handoff.handoff_url == "https://strictproxy.example.com/pass/sess-123"
+    assert handoff.expires_in == 300
+    assert posted[0][0] == "https://controller.test/api/v1/gatekeeper/pass-session"
+    assert posted[0][1] == {"returnPath": "/wallet?tab=2", "requiredTier": "standard"}
+    assert posted[0][2]["Authorization"] == "Bearer sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz"
+
+    # Static registered-origin redirect URL
+    static_url = gk.build_pass_redirect_url("//evil.test/pwn")
+    assert static_url == "https://controller.test/pass?site=sp_gk_deadbeef&return=%2F&tier=standard"

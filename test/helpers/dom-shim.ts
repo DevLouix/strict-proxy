@@ -326,6 +326,7 @@ export function stubApi() {
           id: 'gk1',
           name: 'Partner Portal',
           keyPrefix: 'sp_gk_deadbeef',
+          siteUrl: 'https://partner.example.com',
           note: 'https://partner.example.com',
           active: true,
           status: 'active',

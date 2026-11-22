@@ -339,6 +339,30 @@ if not result.allowed:
 
 ---
 
+## Browser Plan-Pass Handoff (Zero-Click SSO for Bookmarks & Direct Visits)
+
+When a VPN-connected visitor hits a plan-gated route directly without `?sp_ticket=`, create a single-use handoff session via `gk.create_pass_handoff()` (RFC 9126 PAR) and redirect `302` to `handoff.handoff_url`:
+
+```python
+decision = gk.auth(ip=remote_ip, headers=headers, query=query, secure=is_https)
+if not decision.allowed:
+    if decision.reason in ("entitlement_missing", "entitlement_invalid") and not decision.had_ticket:
+        handoff = gk.create_pass_handoff(return_path=full_path)
+        return redirect(handoff.handoff_url, code=302)
+    return jsonify(decision.body), decision.status
+```
+
+Set **Site URL** on your key in StrictProxy **Admin -> Links -> Gatekeeper Key Factory**. After signing in once at `/pass`, the visitor gets a 7-day `HttpOnly` `sp_pass_session` SSO cookie so future pass refreshes happen with zero clicks.
+
+## Anti-Stampede Caching & Throttling (Built In)
+
+- `min_refresh_interval_seconds` (default `30.0`): cooldown throttling on `gk.refresh()` and `refresh_on_unknown_ip` (use `gk.refresh(force=True)` for explicit operator refresh buttons).
+- `stale_while_revalidate_seconds` (default `60.0`): serves cached IPs with zero latency while refreshing in a background thread.
+- `failure_backoff_seconds` (default `5.0`): prevents retry storms during a controller outage.
+- `refresh_on_unknown_ip` (default `True`): throttled refresh if a newly online node IP is not yet cached.
+
+---
+
 ## Troubleshooting (Common Questions)
 
 - **I am connected to StrictProxy, why am I still blocked?**
@@ -362,7 +386,12 @@ gk = Gatekeeper.init(
     trust_forwarded_for=False,                   # set True behind Nginx/Caddy/Cloudflare
     trusted_proxy_hops=1,                        # number of proxies in front of your app
     failure_mode="closed",                       # "closed" (safe default) or "open"
+    api_key="sp_gk_...",                         # or env STRICT_PROXY_GATEKEEPER_KEY (recommended)
     cache_ttl_seconds=300.0,                     # how often to refresh proxy IP list
+    min_refresh_interval_seconds=30.0,           # cooldown between early refresh() calls
+    stale_while_revalidate_seconds=60.0,         # zero-latency background refresh window
+    failure_backoff_seconds=5.0,                 # backoff after a failed controller fetch
+    refresh_on_unknown_ip=True,                  # throttled refresh when a new node comes online
     set_cookie_from_query=True,                  # auto-save ?sp_ticket= into an HttpOnly cookie
     deny_redirect_url=None,                      # optional 302 redirect URL for blocked visitors
 )

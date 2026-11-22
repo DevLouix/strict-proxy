@@ -99,12 +99,21 @@ function controllerOrigin() {
 }
 
 /** One-time secret reveal dialog after creating or rotating a site key. */
+function passRedirectUrlFor(keyMeta) {
+  const origin = controllerOrigin();
+  return `${origin}/pass?site=${encodeURIComponent(keyMeta.keyPrefix)}`;
+}
+
 function secretRevealDialog(heading, keyMeta, secret) {
   const origin = controllerOrigin();
-  const envSnippet = [
+  const envLines = [
     `STRICT_PROXY_CONTROLLER_URL=${origin}`,
     `STRICT_PROXY_GATEKEEPER_KEY=${secret}`,
-  ].join('\n');
+  ];
+  if (keyMeta.siteUrl) {
+    envLines.push(`STRICT_PROXY_ENTITLEMENT_REDIRECT_URL=${passRedirectUrlFor(keyMeta)}`);
+  }
+  const envSnippet = envLines.join('\n');
 
   const dlg = h('dialog', { class: 'wide' },
     h('div', { class: 'dlg-head' }, h('h3', {}, heading)),
@@ -146,7 +155,8 @@ function secretRevealDialog(heading, keyMeta, secret) {
 /** Key Factory creation dialog. */
 function createKeyDialog(api, onCreated) {
   const name = h('input', { placeholder: 'e.g. Partner Portal' });
-  const note = h('input', { placeholder: 'https://partner.example.com (optional)' });
+  const siteUrl = h('input', { placeholder: 'https://partner.example.com (recommended for plan-pass redirect)' });
+  const note = h('input', { placeholder: 'Internal notes (optional)' });
   const expiry = h('select', {},
     h('option', { value: '', selected: true }, 'Never expires'),
     h('option', { value: '30' }, '30 days'),
@@ -159,12 +169,13 @@ function createKeyDialog(api, onCreated) {
     h('div', { class: 'dlg-head' }, h('h3', {}, 'Create Gatekeeper site key')),
     h('div', { class: 'dlg-body' },
       h('label', { class: 'field' }, h('span', {}, 'Site name'), name),
-      h('label', { class: 'field' }, h('span', {}, 'Domain / note (optional)'), note),
+      h('label', { class: 'field' }, h('span', {}, 'Site URL (origin for browser pass handoff)'), siteUrl),
+      h('label', { class: 'field' }, h('span', {}, 'Note (optional)'), note),
       h('label', { class: 'field' }, h('span', {}, 'Expiration'), expiry),
       h('p', { class: 'muted small' },
-        'Generates a single-line sp_gk_… secret for this site. Pass it as apiKey in '
-        + '@strict-proxy/gatekeeper or strict-proxy-gatekeeper — no multi-line PEM required. '
-        + 'You can rotate or revoke a site key anytime without affecting other sites.'),
+        'Generates a single-line sp_gk_… secret for this site. Setting Site URL locks '
+        + 'browser plan-pass redirects (/pass) strictly to your site’s origin so visitors '
+        + 'arriving via bookmarks can sign in once and return with a signed pass automatically.'),
     ),
     h('div', { class: 'dlg-foot' },
       h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
@@ -183,6 +194,7 @@ function createKeyDialog(api, onCreated) {
     }
     const payload = {
       name: trimmedName,
+      siteUrl: siteUrl.value.trim() || null,
       note: note.value.trim() || null,
       ...(expiry.value ? { expiresInDays: Number(expiry.value) } : {}),
     };
@@ -198,6 +210,49 @@ function createKeyDialog(api, onCreated) {
       toast(err.message, 'err');
       submit.disabled = false;
       submit.textContent = 'Generate site key';
+    }
+  });
+}
+
+/** Edit site key metadata (name, siteUrl, note) without rotating the secret. */
+function editKeyDialog(api, item, onSaved) {
+  const name = h('input', { value: item.name ?? '' });
+  const siteUrl = h('input', { value: item.siteUrl ?? '', placeholder: 'https://partner.example.com' });
+  const note = h('input', { value: item.note ?? '', placeholder: 'Optional note' });
+  const submit = h('button', { class: 'btn primary' }, 'Save changes');
+
+  const dlg = h('dialog', { class: 'wide' },
+    h('div', { class: 'dlg-head' }, h('h3', {}, `Edit ${item.name}`)),
+    h('div', { class: 'dlg-body' },
+      h('label', { class: 'field' }, h('span', {}, 'Site name'), name),
+      h('label', { class: 'field' }, h('span', {}, 'Site URL (origin for /pass handoff)'), siteUrl),
+      h('label', { class: 'field' }, h('span', {}, 'Note (optional)'), note),
+    ),
+    h('div', { class: 'dlg-foot' },
+      h('button', { class: 'btn', onClick: () => dlg.close() }, 'Cancel'),
+      submit,
+    ),
+  );
+  document.body.append(dlg);
+  dlg.addEventListener('close', () => dlg.remove(), { once: true });
+  dlg.showModal();
+
+  submit.addEventListener('click', async () => {
+    submit.disabled = true;
+    submit.textContent = 'Saving…';
+    try {
+      await api.patch(`/api/v1/admin/gatekeeper/keys/${item.id}`, {
+        name: name.value.trim(),
+        siteUrl: siteUrl.value.trim() || null,
+        note: note.value.trim() || null,
+      });
+      dlg.close();
+      toast('Site key updated');
+      await onSaved();
+    } catch (err) {
+      toast(err.message, 'err');
+      submit.disabled = false;
+      submit.textContent = 'Save changes';
     }
   });
 }
@@ -431,6 +486,7 @@ export async function linksView(api) {
               h('tbody', {}, ...siteKeys.map((item) => h('tr', {},
                 h('td', {},
                   h('div', {}, item.name),
+                  item.siteUrl ? h('div', { class: 'small mono muted' }, item.siteUrl) : null,
                   item.note ? h('span', { class: 'muted small' }, item.note) : null,
                 ),
                 h('td', { class: 'small mono' }, `${item.keyPrefix}_…`),
@@ -442,6 +498,16 @@ export async function linksView(api) {
                 ),
                 h('td', { class: 'small muted' }, item.expiresAt ? date(item.expiresAt) : 'Never'),
                 h('td', { class: 'actions' },
+                  item.siteUrl
+                    ? h('button', {
+                        class: 'btn sm',
+                        type: 'button',
+                        onClick: () => copyText(passRedirectUrlFor(item), 'Pass redirect URL copied'),
+                      }, 'Copy pass URL')
+                    : null,
+                  item.siteUrl ? ' ' : null,
+                  h('button', { class: 'btn sm', type: 'button', onClick: () => editKeyDialog(api, item, load) }, 'Edit'),
+                  ' ',
                   h('button', { class: 'btn sm', type: 'button', onClick: () => rotateKey(item) }, 'Rotate'),
                   ' ',
                   item.status === 'active'

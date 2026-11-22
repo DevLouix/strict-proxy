@@ -1,6 +1,6 @@
 {
   "name": "@strict-proxy/gatekeeper",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Official StrictProxy Gatekeeper SDK \u2014 protect websites and APIs so only users routed through your StrictProxy fleet (and optional plan tier) can access them.",
   "license": "MIT",
   "type": "module",

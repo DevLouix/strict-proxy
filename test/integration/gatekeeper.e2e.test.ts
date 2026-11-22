@@ -368,7 +368,7 @@ test('Key Factory: admin issues sp_gk_ site key, SDK bootstraps & enforces tier,
   assert.equal(rotated.status, 200);
   assert.notEqual(rotated.body.secret, firstSecret);
 
-  await assert.rejects(() => gk.refresh(), /401|rejected/);
+  await assert.rejects(() => gk.refresh({ force: true }), /401|rejected/);
 
   const gkRotated = Gatekeeper.init({
     controllerUrl: h.baseUrl,
@@ -385,5 +385,153 @@ test('Key Factory: admin issues sp_gk_ site key, SDK bootstraps & enforces tier,
   );
   assert.equal(revoked.status, 200);
   assert.equal(revoked.body.key.status, 'revoked');
-  await assert.rejects(() => gkRotated.refresh(), /401|rejected/);
+  await assert.rejects(() => gkRotated.refresh({ force: true }), /401|rejected/);
+});
+
+test('Pass Handoff (RFC 9126 PAR + /pass zero-click SSO): mints real Ed25519 ticket, enforces tier & registered siteUrl', async () => {
+  await h.seedNode({ status: 'online', publicIp: '203.0.113.88' });
+  const adminToken = await h.adminToken();
+
+  // 1. Seed a standard subscriber with known credentials
+  const userEmail = 'sso-member@example.test';
+  const userPass = 'StrongPass!2026';
+  const reg = await h.request<{ user: { id: string } }>('POST', '/api/v1/auth/register', {
+    body: { email: userEmail, password: userPass },
+  });
+  assert.equal(reg.status, 201, JSON.stringify(reg.body));
+  const updSub = await h.request('PATCH', `/api/v1/admin/users/${reg.body.user.id}/subscription`, {
+    token: adminToken,
+    body: { tier: 'standard', status: 'active' },
+  });
+  assert.equal(updSub.status, 200, JSON.stringify(updSub.body));
+
+  // 2. Create a Key Factory site key with registered siteUrl, and verify PATCH update works
+  const created = await h.request<{ key: { id: string; keyPrefix: string; siteUrl: string | null }; secret: string }>(
+    'POST',
+    '/api/v1/admin/gatekeeper/keys',
+    {
+      token: adminToken,
+      body: { name: 'Wallet App', siteUrl: 'https://wallet.example.com/ignored-path' },
+    },
+  );
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.key.siteUrl, 'https://wallet.example.com');
+
+  const patched = await h.request<{ key: { id: string; siteUrl: string | null } }>(
+    'PATCH',
+    `/api/v1/admin/gatekeeper/keys/${created.body.key.id}`,
+    {
+      token: adminToken,
+      body: { siteUrl: 'https://partner.example.com' },
+    },
+  );
+  assert.equal(patched.status, 200, JSON.stringify(patched.body));
+  assert.equal(patched.body.key.siteUrl, 'https://partner.example.com');
+
+  const gk = Gatekeeper.init({
+    controllerUrl: h.baseUrl,
+    apiKey: created.body.secret,
+    requiredTier: 'standard',
+    logger: false,
+  });
+
+  // 3. Open-redirect origin mismatch is rejected at PAR creation time
+  await assert.rejects(
+    () => gk.createPassHandoff({ returnUrl: 'https://evil.example.com/steal', requiredTier: 'standard' }),
+    /400|does not match registered siteUrl/,
+  );
+
+  // 4. Create valid PAR pass session
+  const handoff = await gk.createPassHandoff({
+    returnPath: '/wallet?tab=cards&sp_ticket=stale',
+    requiredTier: 'standard',
+  });
+  assert.ok(handoff.sessionId.length >= 16);
+  assert.ok(handoff.handoffUrl.endsWith(`/pass/${handoff.sessionId}`));
+
+  // Use local test server URL for HTTP fetch (controller publicAppUrl may differ in test config)
+  const localPassUrl = `${h.baseUrl}/pass/${handoff.sessionId}`;
+  const getForm = await fetch(localPassUrl, { redirect: 'manual' });
+  assert.equal(getForm.status, 200);
+  const html = await getForm.text();
+  const csrfMatch = /name="csrf" value="([^"]+)"/.exec(html);
+  assert.ok(csrfMatch?.[1], 'sign-in form should contain CSRF token');
+
+  // 5. Submit valid subscriber credentials -> 302 to partner.example.com with real Ed25519 sp_ticket + SSO cookie
+  const postLogin = await fetch(localPassUrl, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      csrf: csrfMatch[1],
+      email: userEmail,
+      password: userPass,
+    }).toString(),
+  });
+  assert.equal(postLogin.status, 302);
+  const loc1 = postLogin.headers.get('location') ?? '';
+  const parsedLoc1 = new URL(loc1);
+  assert.equal(parsedLoc1.origin, 'https://partner.example.com');
+  assert.equal(parsedLoc1.pathname, '/wallet');
+  assert.equal(parsedLoc1.searchParams.get('tab'), 'cards');
+  const ticket1 = parsedLoc1.searchParams.get('sp_ticket');
+  assert.ok(ticket1 && ticket1.startsWith('sp1.'), 'should mint real Ed25519 sp1 ticket');
+
+  const rawSetCookie = postLogin.headers.get('set-cookie') ?? '';
+  const ssoCookieMatch = /(sp_pass_session=[^;]+)/.exec(rawSetCookie);
+  assert.ok(ssoCookieMatch?.[1], 'should set HttpOnly sp_pass_session SSO cookie');
+  assert.match(rawSetCookie, /HttpOnly/i);
+  const ssoCookie = ssoCookieMatch[1];
+
+  // 6. Single-use PAR session cannot be replayed
+  const replay = await fetch(localPassUrl, { redirect: 'manual' });
+  assert.equal(replay.status, 410);
+
+  // 7. SDK verifies the minted real Ed25519 ticket and emits sp_entitlement cookie
+  const authRes = await gk.authorize({
+    ip: '203.0.113.88',
+    query: { sp_ticket: ticket1 },
+    secure: true,
+  });
+  assert.equal(authRes.allowed, true);
+  if (authRes.allowed) {
+    assert.equal(authRes.user?.email, userEmail);
+    assert.equal(authRes.user?.tier, 'standard');
+    assert.ok(authRes.setCookie?.startsWith('sp_entitlement='));
+  }
+
+  // 8. Second pass-less visit with sp_pass_session cookie -> ZERO-CLICK 302 with fresh sp_ticket!
+  const handoff2 = await gk.createPassHandoff({ returnPath: '/settings', requiredTier: 'standard' });
+  const zeroClick = await fetch(`${h.baseUrl}/pass/${handoff2.sessionId}`, {
+    redirect: 'manual',
+    headers: { cookie: ssoCookie },
+  });
+  assert.equal(zeroClick.status, 302);
+  const loc2 = new URL(zeroClick.headers.get('location') ?? '');
+  assert.equal(loc2.origin, 'https://partner.example.com');
+  assert.equal(loc2.pathname, '/settings');
+  assert.ok(loc2.searchParams.get('sp_ticket')?.startsWith('sp1.'));
+
+  // 9. Tier enforcement: standard user requesting a pro-only pass gets 403 upgrade screen (no ticket)
+  const handoffPro = await gk.createPassHandoff({ returnPath: '/pro-vault', requiredTier: 'pro' });
+  const proDenied = await fetch(`${h.baseUrl}/pass/${handoffPro.sessionId}`, {
+    redirect: 'manual',
+    headers: { cookie: ssoCookie },
+  });
+  assert.equal(proDenied.status, 403);
+  assert.match(await proDenied.text(), /Upgrade required/i);
+
+  // 10. Direct /pass?site=sp_gk_...&return=//evil.example/pwn neutralizes open redirect and uses registered siteUrl
+  const direct = await fetch(
+    `${h.baseUrl}/pass?site=${created.body.key.keyPrefix}&return=${encodeURIComponent('//evil.example/pwn')}&tier=standard`,
+    {
+      redirect: 'manual',
+      headers: { cookie: ssoCookie },
+    },
+  );
+  assert.equal(direct.status, 302);
+  const directLoc = new URL(direct.headers.get('location') ?? '');
+  assert.equal(directLoc.origin, 'https://partner.example.com');
+  assert.equal(directLoc.pathname, '/');
+  assert.ok(directLoc.searchParams.get('sp_ticket')?.startsWith('sp1.'));
 });

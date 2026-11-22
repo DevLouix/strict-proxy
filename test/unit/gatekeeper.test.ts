@@ -11,6 +11,7 @@ import {
   clientIpOf,
   createGatekeeperMiddleware,
   entitlementTokenOf,
+  safeReturnPath,
 } from '@strict-proxy/gatekeeper';
 
 function req(opts: { xff?: string; remoteAddress?: string }): any {
@@ -493,4 +494,162 @@ test('Gatekeeper unwraps nested fetch err.cause details (TLS / ECONNREFUSED / Ag
     assert.match(res.fetchError ?? '', /controller\.test\/api\/v1\/network\/nodes\/public-ips/);
   }
   assert.match(gk.status().lastError ?? '', /UNABLE_TO_VERIFY_LEAF_SIGNATURE/);
+});
+
+test('safeReturnPath neutralizes open redirects and strips stale sp_ticket params', () => {
+  assert.equal(safeReturnPath('/wallet?tab=1&sp_ticket=old'), '/wallet?tab=1');
+  assert.equal(safeReturnPath('/dashboard'), '/dashboard');
+  assert.equal(safeReturnPath('//evil.example/pwn'), '/');
+  assert.equal(safeReturnPath('https://evil.example/pwn'), '/');
+  assert.equal(safeReturnPath('/\\evil.example'), '/');
+  assert.equal(safeReturnPath('/foo\r\nSet-Cookie: a=1'), '/');
+  assert.equal(safeReturnPath(undefined), '/');
+});
+
+test('Gatekeeper.refresh() throttles repeated calls within minRefreshIntervalMs unless { force: true }', async () => {
+  const { publicKeyPem, publicIpsBody } = makeSignedTestMaterials({ ips: ['203.0.113.10'] });
+  let fetchCount = 0;
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    publicKey: publicKeyPem,
+    cacheTtlSeconds: 300,
+    minRefreshIntervalMs: 60_000,
+    logger: false,
+    fetchImpl: (async () => {
+      fetchCount += 1;
+      return { ok: true, status: 200, json: async () => publicIpsBody };
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await gk.refresh(), ['203.0.113.10']);
+  assert.equal(fetchCount, 1);
+
+  // Calling refresh() repeatedly inside cooldown does NOT refetch
+  assert.deepEqual(await gk.refresh(), ['203.0.113.10']);
+  assert.deepEqual(await gk.refresh(), ['203.0.113.10']);
+  assert.equal(fetchCount, 1);
+
+  // Explicit { force: true } bypasses cooldown
+  assert.deepEqual(await gk.refresh({ force: true }), ['203.0.113.10']);
+  assert.equal(fetchCount, 2);
+
+  const st = gk.status();
+  assert.ok(st.lastRefreshAt);
+  assert.ok(st.nextRefreshAllowedAt);
+});
+
+test('Gatekeeper applies failureBackoffMs to prevent retry storms during controller outages', async () => {
+  const { publicKeyPem } = makeSignedTestMaterials();
+  let fetchCount = 0;
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    publicKey: publicKeyPem,
+    failureBackoffMs: 30_000,
+    logger: false,
+    fetchImpl: (async () => {
+      fetchCount += 1;
+      return { ok: false, status: 503, json: async () => ({}) };
+    }) as typeof fetch,
+  });
+
+  const d1 = await gk.authorize({ ip: '203.0.113.10' });
+  const d2 = await gk.authorize({ ip: '203.0.113.10' });
+  assert.equal(d1.allowed, false);
+  assert.equal(d2.allowed, false);
+  assert.equal(fetchCount, 1, 'second call inside failureBackoffMs should not hit controller again');
+});
+
+test('Gatekeeper serves stale-while-revalidate cache and triggers one background refresh', async () => {
+  const { publicKeyPem, publicIpsBody } = makeSignedTestMaterials({ ips: ['203.0.113.10'] });
+  let fetchCount = 0;
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    publicKey: publicKeyPem,
+    cacheTtlSeconds: 0.02,
+    staleWhileRevalidateSeconds: 30,
+    minRefreshIntervalMs: 0,
+    logger: false,
+    fetchImpl: (async () => {
+      fetchCount += 1;
+      return { ok: true, status: 200, json: async () => publicIpsBody };
+    }) as typeof fetch,
+  });
+
+  const d1 = await gk.authorize({ ip: '203.0.113.10' });
+  assert.equal(d1.allowed, true);
+  assert.equal(fetchCount, 1);
+
+  await new Promise((r) => setTimeout(r, 35));
+  const d2 = await gk.authorize({ ip: '203.0.113.10' });
+  assert.equal(d2.allowed, true);
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(fetchCount, 2, 'SWR should refresh once in background');
+});
+
+test('Gatekeeper.authorize sets hadTicket loop guard and supports createPassHandoff + buildPassRedirectUrl', async () => {
+  const { publicKeyPem, publicIpsBody } = makeSignedTestMaterials({ ips: ['203.0.113.10'], tier: 'standard' });
+  const posted: Array<{ url: string; auth: string; body: Record<string, unknown> }> = [];
+
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    apiKey: 'sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz',
+    requiredTier: 'standard',
+    logger: false,
+    fetchImpl: (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      if (u.endsWith('/api/v1/gatekeeper/pass-session')) {
+        posted.push({
+          url: u,
+          auth: headers.authorization ?? headers.Authorization ?? '',
+          body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+        });
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({
+            sessionId: 'sess-xyz',
+            handoffUrl: 'https://strictproxy.example.com/pass/sess-xyz',
+            expiresIn: 300,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          site: { id: 's1', name: 'Portal', keyPrefix: 'sp_gk_deadbeef' },
+          algorithm: 'Ed25519',
+          publicKeyPem,
+          ...publicIpsBody,
+        }),
+      };
+    }) as typeof fetch,
+  });
+
+  const missing = await gk.authorize({ ip: '203.0.113.10' });
+  assert.equal(missing.allowed, false);
+  if (!missing.allowed) {
+    assert.equal(missing.code, 'GATEKEEPER_ENTITLEMENT_REQUIRED');
+    assert.equal(missing.hadTicket, false);
+  }
+
+  const bogus = await gk.authorize({ ip: '203.0.113.10', query: { sp_ticket: 'bogus' } });
+  assert.equal(bogus.allowed, false);
+  if (!bogus.allowed) {
+    assert.equal(bogus.code, 'GATEKEEPER_ENTITLEMENT_INVALID');
+    assert.equal(bogus.hadTicket, true);
+  }
+
+  const handoff = await gk.createPassHandoff({ returnPath: '/wallet?tab=2&sp_ticket=old' });
+  assert.equal(handoff.sessionId, 'sess-xyz');
+  assert.equal(handoff.handoffUrl, 'https://strictproxy.example.com/pass/sess-xyz');
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0]!.auth, 'Bearer sp_gk_deadbeef_0123456789abcdefghijklmnopqrstuvwxyz');
+  assert.deepEqual(posted[0]!.body, { returnPath: '/wallet?tab=2', requiredTier: 'standard' });
+
+  assert.equal(
+    gk.buildPassRedirectUrl('//evil.example/pwn'),
+    'https://controller.test/pass?site=sp_gk_deadbeef&return=%2F&tier=standard',
+  );
 });

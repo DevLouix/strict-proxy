@@ -21,6 +21,7 @@ import { buildClientAppsAdminRouter } from './routes/client-apps-admin.js';
 import { buildClientCrashRouter } from './routes/client-crashes.js';
 import { buildCouponsAdminRouter } from './routes/coupons-admin.js';
 import { buildGatekeeperKeysRouter } from './routes/gatekeeper-keys.js';
+import { buildPassHandoffRouter } from './routes/pass-handoff.js';
 import { errorHandler } from './middleware.js';
 import { mountAdminDashboard } from './admin-ui.js';
 import { buildClientVersionRouter } from './routes/client-version.js';
@@ -110,6 +111,7 @@ export function buildApp(options: BuildAppOptions = {}): AppContext {
   app.use(buildBillingOpsRouter({ db, cfg }));
   app.use(buildCouponsAdminRouter({ db, cfg }));
   app.use(buildGatekeeperKeysRouter({ db, cfg }));
+  app.use(buildPassHandoffRouter({ db, cfg, redis }));
 
   // Admin dashboard (static bundle). Must be mounted BEFORE the main router:
   // that router ends with a catch-all JSON 404 which would otherwise swallow

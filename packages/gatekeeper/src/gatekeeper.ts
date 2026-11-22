@@ -18,8 +18,11 @@ import type {
   GatekeeperOptions,
   GatekeeperRouteOptions,
   GatekeeperStatus,
+  PassHandoffOptions,
+  PassHandoffResult,
   PublicIpsResponse,
   PublicKeyResponse,
+  RefreshOptions,
   SubscriptionTier,
 } from './types.js';
 
@@ -39,21 +42,41 @@ export function tierSatisfies(actual: SubscriptionTier, required: SubscriptionTi
   return TIER_RANK[actual] >= TIER_RANK[required];
 }
 
+/**
+ * Sanitizes a relative return path for same-site pass handoff redirects.
+ * Rejects protocol-relative (`//evil.com`), absolute URLs, backslashes, and CR/LF,
+ * and strips any stale `sp_ticket` query parameter so redirects never loop.
+ */
+export function safeReturnPath(raw: unknown, queryParam = 'sp_ticket'): string {
+  if (typeof raw !== 'string') return '/';
+  const s = raw.trim();
+  if (!s || s.length > 1024) return '/';
+  if (!s.startsWith('/') || s.startsWith('//') || s.includes('\\') || /[\r\n\0]/.test(s)) {
+    return '/';
+  }
+  try {
+    const parsed = new URL(s, 'https://strict-proxy.invalid');
+    if (parsed.origin !== 'https://strict-proxy.invalid') return '/';
+    parsed.searchParams.delete(queryParam);
+    const qs = parsed.searchParams.toString();
+    return `${parsed.pathname}${qs ? `?${qs}` : ''}`;
+  } catch {
+    return '/';
+  }
+}
+
 function normalizeIp(raw: string): string {
   let ip = raw.trim();
   if ((ip.startsWith('"') && ip.endsWith('"')) || (ip.startsWith("'") && ip.endsWith("'"))) {
     ip = ip.slice(1, -1).trim();
   }
-  // Bracketed IPv6, optionally with port: "[2001:db8::1]:443" -> "2001:db8::1"
   if (ip.startsWith('[')) {
     const close = ip.indexOf(']');
     if (close > 1) ip = ip.slice(1, close);
   }
-  // IPv4-mapped IPv6: "::ffff:203.0.113.10" (case-insensitive) -> "203.0.113.10"
   if (ip.toLowerCase().startsWith('::ffff:')) {
     ip = ip.slice(7);
   }
-  // IPv4 with trailing port: "203.0.113.10:54321" -> "203.0.113.10"
   const ipv4Port = /^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/.exec(ip);
   if (ipv4Port) {
     ip = ipv4Port[1]!;
@@ -69,10 +92,8 @@ function isLoopbackHost(hostname: string): boolean {
 function isPrivateOrInternalHost(hostname: string): boolean {
   const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (isLoopbackHost(h)) return true;
-  // Single-label Docker/Kubernetes service hostnames (e.g. "controller", "strict-proxy")
   if (!h.includes('.') && !h.includes(':')) return true;
   if (h.endsWith('.local') || h.endsWith('.internal')) return true;
-  // RFC1918 IPv4 private ranges
   if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
   if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
   const m172 = /^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
@@ -101,7 +122,6 @@ function describeCause(err: unknown, depth = 0): string {
     parts.push(e.message);
   }
 
-  // Node 20+ dual-stack failures often wrap underlying ECONNREFUSED/ETIMEDOUT inside AggregateError.errors
   if (Array.isArray(e.errors) && e.errors.length > 0) {
     const sub = e.errors
       .slice(0, 3)
@@ -398,9 +418,17 @@ function appendSetCookie(res: ExpressLikeResponse, cookieValue: string): void {
   }
 }
 
+interface FetchedIpPayload {
+  ips: Set<string>;
+  payloadExpiresAtMs: number;
+}
+
 interface CacheEntry {
   ips: Set<string>;
+  fetchedAtMs: number;
   expiresAtMs: number;
+  payloadExpiresAtMs: number;
+  staleUntilMs: number;
 }
 
 interface ResolvedRouteOptions {
@@ -445,18 +473,8 @@ function normalizeRouteOptions(
 /**
  * StrictProxy Gatekeeper SDK client.
  *
- * Recommended 2-step setup (Key Factory):
- * ```ts
- * import { Gatekeeper } from '@strict-proxy/gatekeeper';
- *
- * const gk = Gatekeeper.init({
- *   controllerUrl: process.env.STRICT_PROXY_CONTROLLER_URL!,
- *   apiKey: process.env.STRICT_PROXY_GATEKEEPER_KEY!, // sp_gk_...
- *   trustForwardedFor: true,
- *   trustedProxyHops: 1,
- * });
- * app.use(gk.auth());
- * ```
+ * Features JWKS-grade single-flight coalescing, cooldown refresh throttling,
+ * stale-while-revalidate caching, failure backoff, and RFC 9126 browser plan-pass handoff.
  */
 export class Gatekeeper {
   private readonly controllerBaseUrl: string;
@@ -468,6 +486,10 @@ export class Gatekeeper {
   private readonly allowInsecureHttp: boolean;
   private readonly defaultRequiredTier?: SubscriptionTier;
   private readonly ttlMs: number;
+  private readonly minRefreshIntervalMs: number;
+  private readonly failureBackoffMs: number;
+  private readonly swrMs: number;
+  private readonly refreshOnUnknownIp: boolean;
   private readonly fetchTimeoutMs: number;
   private readonly entitlementHeader: string;
   private readonly entitlementQueryParam: string;
@@ -486,6 +508,8 @@ export class Gatekeeper {
   private discoveredKeys: Record<string, string> | null = null;
   private discoveringKeys: Promise<Record<string, string>> | null = null;
   private lastError: string | null = null;
+  private lastErrorAtMs = 0;
+  private lastRefreshAtMs = 0;
 
   private constructor(options: GatekeeperInitOptions) {
     const rawUrl =
@@ -507,7 +531,6 @@ export class Gatekeeper {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new Error(`Gatekeeper.init() controllerUrl must use http:// or https://: ${rawUrl}`);
     }
-    // Strip any accidental #hash, ?query, and trailing slashes.
     parsed.hash = '';
     parsed.search = '';
     this.controllerParsedUrl = parsed;
@@ -543,7 +566,20 @@ export class Gatekeeper {
     this.autoFetchPublicKey = options.autoFetchPublicKey ?? true;
     this.allowInsecureHttp = options.allowInsecureHttp ?? false;
     this.defaultRequiredTier = options.requiredTier;
-    this.ttlMs = (options.cacheTtlSeconds ?? 300) * 1000;
+    this.ttlMs = Math.max(0, (options.cacheTtlSeconds ?? 300) * 1000);
+    this.minRefreshIntervalMs =
+      options.minRefreshIntervalMs !== undefined
+        ? Math.max(0, options.minRefreshIntervalMs)
+        : Math.min(30_000, this.ttlMs);
+    this.failureBackoffMs =
+      options.failureBackoffMs !== undefined
+        ? Math.max(0, options.failureBackoffMs)
+        : Math.min(5_000, this.ttlMs);
+    this.swrMs =
+      options.staleWhileRevalidateSeconds !== undefined
+        ? Math.max(0, options.staleWhileRevalidateSeconds * 1000)
+        : Math.min(60_000, Math.floor(this.ttlMs / 2));
+    this.refreshOnUnknownIp = options.refreshOnUnknownIp ?? true;
     this.fetchTimeoutMs = options.fetchTimeoutMs ?? 5000;
     this.entitlementHeader = (options.entitlementHeader ?? 'x-strict-proxy-entitlement').toLowerCase();
     this.entitlementQueryParam = options.entitlementQueryParam ?? 'sp_ticket';
@@ -622,7 +658,6 @@ export class Gatekeeper {
     }
     if (this.discoveredKeys) return this.discoveredKeys;
 
-    // When apiKey is configured, bootstrapping fetches both IPs and public key in one call.
     if (this.apiKey) {
       await this.getIpSet();
       if (this.discoveredKeys) return this.discoveredKeys;
@@ -673,18 +708,22 @@ export class Gatekeeper {
   private verifySignedIpPayload(
     body: PublicIpsResponse,
     keyPem: string,
-  ): Set<string> {
+  ): FetchedIpPayload {
     const payload = { generatedAt: body.generatedAt, expiresAt: body.expiresAt, ips: body.ips };
     if (!verifyJson(loadSigningPublicKey(body.keyId, keyPem), payload, body.signature)) {
       throw new Error('public-ips signature verification failed');
     }
-    if (new Date(body.expiresAt).getTime() < Date.now()) {
+    const payloadExpiresAtMs = new Date(body.expiresAt).getTime();
+    if (!Number.isFinite(payloadExpiresAtMs) || payloadExpiresAtMs < Date.now()) {
       throw new Error('public-ips list expired');
     }
-    return new Set(body.ips.map((ip) => normalizeIp(String(ip))));
+    return {
+      ips: new Set(body.ips.map((ip) => normalizeIp(String(ip)))),
+      payloadExpiresAtMs,
+    };
   }
 
-  private async fetchBootstrap(): Promise<Set<string>> {
+  private async fetchBootstrap(): Promise<FetchedIpPayload> {
     this.assertSafeTransport('apiKey bootstrap');
     const url = `${this.controllerBaseUrl}/api/v1/gatekeeper/bootstrap`;
     const res = await this.safeFetch(url, {
@@ -712,7 +751,6 @@ export class Gatekeeper {
     const normalizedPem = normalizePem(body.publicKeyPem);
     this.discoveredKeys = { [body.keyId]: normalizedPem };
 
-    // If caller also pinned a key, verify with the pinned key; otherwise use the bootstrapped key.
     const verifyKeyPem =
       this.pinnedSingleKey ??
       (Object.keys(this.pinnedKeys).length > 0 ? this.pinnedKeys[body.keyId] : normalizedPem);
@@ -722,7 +760,7 @@ export class Gatekeeper {
     return this.verifySignedIpPayload(body, verifyKeyPem);
   }
 
-  private async fetchIpSet(): Promise<Set<string>> {
+  private async fetchIpSet(): Promise<FetchedIpPayload> {
     if (this.apiKey) {
       return this.fetchBootstrap();
     }
@@ -739,18 +777,18 @@ export class Gatekeeper {
     return this.verifySignedIpPayload(body, keyPem);
   }
 
-  private async getIpSet(forceRefresh = false): Promise<Set<string>> {
-    const now = Date.now();
-    if (!forceRefresh && this.cache && this.cache.expiresAtMs > now) {
-      return this.cache.ips;
-    }
+  private startRefresh(): Promise<Set<string>> {
     if (!this.inFlight) {
       this.inFlight = this.fetchIpSet()
-        .then((ips) => {
-          // When zero nodes are online, retry sooner (15s) so newly online nodes work right away.
+        .then(({ ips, payloadExpiresAtMs }) => {
+          const fetchedAtMs = Date.now();
           const effectiveTtl = ips.size === 0 ? Math.min(this.ttlMs, 15_000) : this.ttlMs;
-          this.cache = { ips, expiresAtMs: Date.now() + effectiveTtl };
+          const expiresAtMs = Math.min(fetchedAtMs + effectiveTtl, payloadExpiresAtMs);
+          const staleUntilMs = Math.min(expiresAtMs + this.swrMs, payloadExpiresAtMs);
+          this.cache = { ips, fetchedAtMs, expiresAtMs, payloadExpiresAtMs, staleUntilMs };
+          this.lastRefreshAtMs = fetchedAtMs;
           this.lastError = null;
+          this.lastErrorAtMs = 0;
           return ips;
         })
         .finally(() => {
@@ -758,6 +796,7 @@ export class Gatekeeper {
         })
         .catch((err) => {
           this.lastError = err instanceof Error ? formatFetchError(err) : String(err);
+          this.lastErrorAtMs = Date.now();
           this.log('ip list refresh failed', err);
           throw err;
         });
@@ -765,13 +804,153 @@ export class Gatekeeper {
     return this.inFlight;
   }
 
-  /** Forces an immediate refresh of the signed exit-IP allowlist (and discovers the public key if needed). */
-  async refresh(): Promise<string[]> {
-    const ips = await this.getIpSet(true);
+  private async getIpSet(opts: { force?: boolean; allowStale?: boolean } = {}): Promise<Set<string>> {
+    const now = Date.now();
+    const force = Boolean(opts.force);
+    const allowStale = opts.allowStale ?? true;
+
+    if (!force && this.cache) {
+      // 1. Fresh cache hit.
+      if (this.cache.expiresAtMs > now) {
+        return this.cache.ips;
+      }
+      // 2. Stale-while-revalidate hit (still within controller's cryptographic expiresAt).
+      if (allowStale && this.cache.staleUntilMs > now && this.cache.payloadExpiresAtMs > now) {
+        if (!this.inFlight && now - this.lastErrorAtMs >= this.failureBackoffMs) {
+          void this.startRefresh().catch(() => undefined);
+        }
+        return this.cache.ips;
+      }
+    }
+
+    // 3. Failure backoff — avoid hammering an unreachable controller on every visitor request.
+    if (
+      !force &&
+      !this.inFlight &&
+      this.lastError &&
+      this.failureBackoffMs > 0 &&
+      now - this.lastErrorAtMs < this.failureBackoffMs
+    ) {
+      throw new Error(this.lastError);
+    }
+
+    return this.startRefresh();
+  }
+
+  /**
+   * Refreshes the signed exit-IP allowlist with built-in anti-stampede throttling.
+   *
+   * - By default (`force: false`), if the cache was refreshed within `minRefreshIntervalMs`
+   *   (default 30s), returns the cached IPs without hitting the controller.
+   * - Pass `{ force: true }` for explicit operator actions (e.g. an admin "Force refresh" button).
+   */
+  async refresh(options: RefreshOptions = {}): Promise<string[]> {
+    const force = Boolean(options.force);
+    const now = Date.now();
+    if (
+      !force &&
+      this.cache &&
+      this.cache.payloadExpiresAtMs > now &&
+      now - this.lastRefreshAtMs < this.minRefreshIntervalMs
+    ) {
+      return [...this.cache.ips];
+    }
+    const ips = await this.getIpSet({ force: true, allowStale: false });
     return [...ips];
   }
 
-  /** Returns current cache and diagnostic status (useful for debugging denied requests). */
+  /**
+   * Creates a short-lived, single-use browser plan-pass handoff session via
+   * `POST /api/v1/gatekeeper/pass-session` (RFC 9126 PAR pattern).
+   *
+   * Redirect the visitor's browser `302` to the returned `handoffUrl`. After
+   * verifying their StrictProxy account (zero-click if already signed in), the
+   * controller sends them back to your site with `?sp_ticket=sp1...`.
+   */
+  async createPassHandoff(options: PassHandoffOptions): Promise<PassHandoffResult> {
+    if (!this.apiKey) {
+      throw new Error(
+        'Gatekeeper.createPassHandoff() requires `apiKey` (created in Admin -> Links -> Gatekeeper Key Factory).',
+      );
+    }
+    this.assertSafeTransport('pass-session handoff');
+
+    const requiredTier =
+      options.requiredTier ??
+      (this.defaultRequiredTier === 'standard' || this.defaultRequiredTier === 'pro'
+        ? this.defaultRequiredTier
+        : undefined);
+
+    const payload: Record<string, unknown> = {};
+    if (options.returnUrl) {
+      payload.returnUrl = options.returnUrl;
+    } else {
+      payload.returnPath = safeReturnPath(options.returnPath, this.entitlementQueryParam);
+    }
+    if (requiredTier) {
+      payload.requiredTier = requiredTier;
+    }
+
+    const url = `${this.controllerBaseUrl}/api/v1/gatekeeper/pass-session`;
+    const res = await this.safeFetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const errBody = (await res.json()) as { error?: string };
+        if (errBody?.error) detail = `${detail}: ${errBody.error}`;
+      } catch {
+        // ignore non-JSON error body
+      }
+      throw new Error(`gatekeeper pass-session failed (${detail})`);
+    }
+    const body = (await res.json()) as PassHandoffResult;
+    if (!body?.sessionId || !body?.handoffUrl) {
+      throw new Error('gatekeeper pass-session response missing sessionId or handoffUrl');
+    }
+    return body;
+  }
+
+  /**
+   * Builds a static registered-origin pass redirect URL
+   * (`https://<controller>/pass?site=sp_gk_<prefix>&return=/path`).
+   *
+   * Requires `siteUrl` to be configured on the site key in Admin -> Links -> Key Factory.
+   */
+  buildPassRedirectUrl(
+    returnPath: string,
+    opts: { baseUrl?: string; siteKeyPrefix?: string; requiredTier?: 'standard' | 'pro' } = {},
+  ): string {
+    const base = (opts.baseUrl ?? this.controllerBaseUrl).replace(/\/+$/, '');
+    const prefix =
+      opts.siteKeyPrefix ??
+      (this.apiKey ? /^(sp_gk_[a-f0-9]{8})_/.exec(this.apiKey)?.[1] : undefined);
+    if (!prefix) {
+      throw new Error(
+        'Gatekeeper.buildPassRedirectUrl() requires `apiKey` (sp_gk_...) or explicit `siteKeyPrefix`.',
+      );
+    }
+    const url = new URL(`${base}/pass`);
+    url.searchParams.set('site', prefix);
+    url.searchParams.set('return', safeReturnPath(returnPath, this.entitlementQueryParam));
+    const tier =
+      opts.requiredTier ??
+      (this.defaultRequiredTier === 'standard' || this.defaultRequiredTier === 'pro'
+        ? this.defaultRequiredTier
+        : undefined);
+    if (tier) {
+      url.searchParams.set('tier', tier);
+    }
+    return url.toString();
+  }
+
+  /** Returns current cache, throttle, and diagnostic status. */
   status(): GatekeeperStatus {
     const hasPinnedKey = Boolean(this.pinnedSingleKey) || Object.keys(this.pinnedKeys).length > 0;
     const authMode: GatekeeperAuthMode = this.apiKey
@@ -779,6 +958,8 @@ export class Gatekeeper {
       : hasPinnedKey
         ? 'pinned-key'
         : 'auto-public-key';
+    const nextAllowedMs =
+      this.lastRefreshAtMs > 0 ? this.lastRefreshAtMs + this.minRefreshIntervalMs : 0;
     return {
       controllerUrl: this.controllerBaseUrl,
       authMode,
@@ -786,6 +967,8 @@ export class Gatekeeper {
       hasPinnedKey,
       cachedIps: this.cache ? [...this.cache.ips] : [],
       cacheExpiresAt: this.cache ? new Date(this.cache.expiresAtMs).toISOString() : null,
+      lastRefreshAt: this.lastRefreshAtMs > 0 ? new Date(this.lastRefreshAtMs).toISOString() : null,
+      nextRefreshAllowedAt: nextAllowedMs > 0 ? new Date(nextAllowedMs).toISOString() : null,
       lastError: this.lastError,
     };
   }
@@ -811,8 +994,12 @@ export class Gatekeeper {
     actualTier?: SubscriptionTier,
     denyResponse?: DenyResponseConfig,
     fetchError?: string,
+    hadTicket?: boolean,
   ): AuthDecision {
-    const extra = fetchError ? { fetchError } : {};
+    const extra: { fetchError?: string; hadTicket?: boolean } = {};
+    if (fetchError) extra.fetchError = fetchError;
+    if (hadTicket !== undefined) extra.hadTicket = hadTicket;
+
     const base = (
       status: number,
       code:
@@ -901,6 +1088,21 @@ export class Gatekeeper {
       fetchError = err instanceof Error ? formatFetchError(err) : String(err);
     }
 
+    // Cooldown-throttled refresh on unknown IP (in case a newly enrolled node just came online).
+    if (
+      ips &&
+      ip &&
+      !ips.has(ip) &&
+      this.refreshOnUnknownIp &&
+      Date.now() - this.lastRefreshAtMs >= this.minRefreshIntervalMs
+    ) {
+      try {
+        ips = await this.getIpSet({ force: true, allowStale: false });
+      } catch {
+        // Keep the existing verified IP set when a speculative refresh fails.
+      }
+    }
+
     if (!ips) {
       if (this.failureClosed) {
         return this.buildDenial('ip', ip, route.requiredTier, undefined, route.denyResponse, fetchError);
@@ -914,12 +1116,21 @@ export class Gatekeeper {
     let setCookie: string | undefined;
 
     if (route.requiredTier) {
+      const hadTicket = readQueryParam(input.query, this.entitlementQueryParam) !== undefined;
       let keys: Record<string, string> | string;
       try {
         keys = await this.resolveKeys();
       } catch (err) {
         const keyErr = err instanceof Error ? formatFetchError(err) : String(err);
-        return this.buildDenial('entitlement_invalid', ip, route.requiredTier, undefined, route.denyResponse, keyErr);
+        return this.buildDenial(
+          'entitlement_invalid',
+          ip,
+          route.requiredTier,
+          undefined,
+          route.denyResponse,
+          keyErr,
+          hadTicket,
+        );
       }
       const found = extractTokenWithSource(
         input.headers,
@@ -935,7 +1146,15 @@ export class Gatekeeper {
       if (!verified.ok) {
         const reason: DenialReason =
           verified.reason === 'malformed' && !token ? 'entitlement_missing' : 'entitlement_invalid';
-        return this.buildDenial(reason, ip, route.requiredTier, undefined, route.denyResponse);
+        return this.buildDenial(
+          reason,
+          ip,
+          route.requiredTier,
+          undefined,
+          route.denyResponse,
+          undefined,
+          hadTicket,
+        );
       }
       if (!tierSatisfies(verified.entitlement!.tier, route.requiredTier)) {
         return this.buildDenial(
@@ -944,6 +1163,8 @@ export class Gatekeeper {
           route.requiredTier,
           verified.entitlement!.tier,
           route.denyResponse,
+          undefined,
+          hadTicket,
         );
       }
       user = verified.entitlement!;

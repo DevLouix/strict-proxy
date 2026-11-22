@@ -496,6 +496,47 @@ http.createServer(async (req, res) => {
 
 ---
 
+## Browser Plan-Pass Handoff (Zero-Click SSO for Bookmarks & Direct Visits)
+
+When a subscriber connected to your VPN visits a plan-gated (`standard` / `pro`) site directly via a bookmark or typed URL, they won't have `?sp_ticket=` yet. Instead of showing a dead-end `401`, hand them off to your controller's hosted `/pass` issuer:
+
+1. In StrictProxy **Admin -> Links -> Gatekeeper Key Factory**, set **Site URL** (e.g. `https://app.example.com`) on your site key.
+2. In your middleware, when the visitor passed the VPN IP check (`reason === 'entitlement_missing' || reason === 'entitlement_invalid'`) and `!decision.hadTicket`, call `gk.createPassHandoff()` (RFC 9126 Pushed Authorization Request) and redirect `302` to `handoffUrl`:
+
+```ts
+const decision = await gk.verifyRequest(request);
+if (!decision.allowed) {
+  const needsPass =
+    decision.reason === 'entitlement_missing' || decision.reason === 'entitlement_invalid';
+  if (needsPass && !decision.hadTicket) {
+    const { handoffUrl } = await gk.createPassHandoff({
+      returnPath: `${url.pathname}${url.search}`,
+    });
+    return Response.redirect(handoffUrl, 302);
+  }
+  return Response.json(decision.body, { status: decision.status });
+}
+```
+
+- **Zero-click SSO**: The first time a visitor signs in at `/pass`, the controller sets an `HttpOnly` `sp_pass_session` cookie (7 days). Future pass refreshes or other gated sites redirect straight back with a fresh Ed25519 `?sp_ticket=` without showing a login form.
+- **Zero open redirects**: The controller locks every return URL strictly to the site key's registered `Site URL` origin.
+- **No redirect loops**: Check `!decision.hadTicket` so an invalid/tampered `?sp_ticket=` renders the deny screen instead of bouncing.
+- **Static redirect alternative**: If you prefer a static env var (`STRICT_PROXY_ENTITLEMENT_REDIRECT_URL`), copy the **Pass URL** (`https://<controller>/pass?site=sp_gk_<8hex>`) from Admin -> Links -> Key Factory or call `gk.buildPassRedirectUrl(returnPath)`.
+
+---
+
+## Anti-Stampede Caching & Throttling (Built In)
+
+You do **not** need to call `gk.refresh()` on every pass-less visit. Gatekeeper implements JWKS-grade caching out of the box:
+
+- **Single-flight coalescing**: Concurrent cache misses share one controller HTTP request.
+- **Cooldown throttling (`minRefreshIntervalMs`, default `30_000`)**: Repeated `gk.refresh()` calls or unknown-IP checks within 30s reuse the verified cache (pass `gk.refresh({ force: true })` for explicit admin refresh buttons).
+- **Stale-while-revalidate (`staleWhileRevalidateSeconds`, default `60`)**: Serves verified IPs with zero added latency while refreshing in the background (strictly bounded by the controller's cryptographic `expiresAt`).
+- **Failure backoff (`failureBackoffMs`, default `5_000`)**: Prevents retry storms during a controller outage.
+- **New-node self-healing (`refreshOnUnknownIp`, default `true`)**: If a newly enrolled node IP isn't in cache and the cooldown has elapsed, Gatekeeper performs one throttled refresh automatically before denying.
+
+---
+
 ## Troubleshooting (Common Questions)
 
 - **I am connected to StrictProxy, why am I still blocked?**
@@ -519,7 +560,12 @@ const gk = Gatekeeper.init({
   trustForwardedFor: false,                   // set true behind Nginx/Caddy/Cloudflare
   trustedProxyHops: 1,                        // number of proxies in front of your app
   failureMode: 'closed',                      // 'closed' (safe default) or 'open'
+  apiKey: 'sp_gk_...',                        // or env STRICT_PROXY_GATEKEEPER_KEY (recommended)
   cacheTtlSeconds: 300,                       // how often to refresh proxy IP list
+  minRefreshIntervalMs: 30_000,               // cooldown between early refresh() / unknown-IP fetches
+  staleWhileRevalidateSeconds: 60,            // zero-latency background refresh window
+  failureBackoffMs: 5_000,                    // backoff after a failed controller fetch
+  refreshOnUnknownIp: true,                   // throttled refresh when a new node comes online
   setCookieFromQuery: true,                   // auto-save ?sp_ticket= into an HttpOnly cookie
   denyResponse: { redirectUrl: '...' },       // or { status: 403, body: { error: '...' } }
 });
@@ -532,7 +578,10 @@ const gk = Gatekeeper.init({
 - `gk.verifyRequest(request, tierOrOptions?)` — checks a Web Standard `Request` (Next.js / Hono / Fetch).
 - `gk.authorize({ ip, headers, query, secure }, tierOrOptions?)` — works anywhere.
 - `gk.verifyToken(token)` — checks an `sp1.*` pass string offline.
-- `gk.refresh()` — refreshes the proxy IP list immediately.
+- `gk.refresh({ force?: boolean })` — cooldown-throttled refresh (pass `{ force: true }` to bypass cooldown).
+- `gk.createPassHandoff({ returnPath, requiredTier? })` — creates a single-use `/pass` SSO handoff session (RFC 9126 PAR).
+- `gk.buildPassRedirectUrl(returnPath, opts?)` — builds a static `https://<controller>/pass?site=...` redirect URL.
+- `gk.status()` — returns cache, throttle (`lastRefreshAt`, `nextRefreshAllowedAt`), and diagnostic status.
 
 ---
 
