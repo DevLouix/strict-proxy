@@ -1137,11 +1137,12 @@ export function buildRouter(ctx: Ctx): Router {
   // -- network (client) ------------------------------------------------------
 
   /**
-   * Claims the account's single proxy session for the calling install.
+   * Claims a seat for the calling install.
    *
-   * The newest install wins: a different device taking the slot revokes the
-   * previous device's node credentials. Repeating the call from the same install
-   * is a no-op, so a reconnect does not churn credentials.
+   * A plan's `deviceSeats` bounds how many installs may hold a tunnel; a claim
+   * beyond the limit displaces the least-recently-seen install, whose
+   * credentials the next bundle request revokes. Repeating the call from the
+   * same install is a no-op, so a reconnect does not churn credentials.
    */
   router.post(
     '/api/v1/network/session',

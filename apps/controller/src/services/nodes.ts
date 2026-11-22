@@ -291,9 +291,10 @@ export async function applyObservedNodeIp(
 /**
  * Ensures a VLESS credential exists for (user, node, install).
  *
- * The install is part of the identity so that "one session per account" can
- * revoke the previous device on its own; a per-account credential was shared by
- * every device, which made that impossible.
+ * The install is part of the identity so a seat can be granted, displaced and
+ * revoked per device; a per-account credential was shared by every device,
+ * which made seat accounting — and therefore limiting credential sharing —
+ * impossible.
  */
 export async function ensureUserCredential(
   db: Db,

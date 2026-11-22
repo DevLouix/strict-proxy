@@ -235,8 +235,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
   /// credentials and no working traffic.
   Timer? _sessionWatch;
 
-  /// How often a connected client re-checks that it still owns the account's
-  /// single proxy session.
+  /// How often a connected client re-checks that it still holds a seat.
   static const sessionCheckInterval = Duration(seconds: 45);
 
   /// Endpoints that prove the tunnel carries real traffic.
@@ -470,9 +469,9 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         _fail(_engineError!);
         return;
       }
-      // Claim the account's single proxy session before any credentials are
-      // fetched: the newest install wins, and the previous one's credentials
-      // stop being valid server-side.
+      // Claim this install's seat before any credentials are fetched: a claim
+      // beyond the plan displaces the least-recently-seen install, and the
+      // bundle request then revokes that install's credentials server-side.
       _sessionId = await _claimSession();
       if (attempt != _attempt) return;
 
@@ -631,7 +630,7 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
     }
   }
 
-  /// Claims the account's single proxy session for this install.
+  /// Claims a seat for this install.
   ///
   /// Returns null when the install has no device identity yet: the controller
   /// then falls back to the previous per-account behaviour instead of refusing

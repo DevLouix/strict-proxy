@@ -161,14 +161,22 @@ the app can say "Standard unlocks 3 more" instead of hiding the catalogue. Each
 unlocked link carries a freshly minted `sp_ticket`, which is why a ticket left
 in browser history expires with its token.
 
-### One proxy session per account
+### Device seats, one credential per install
 
-Connecting claims the account's single session (`POST /api/v1/network/session`).
-The newest install wins: every other install's node credentials are revoked in
-the same request that mints the new ones, so a node stops accepting the previous
-device on its next sync, and the previous client's session poll sees
-`current: false` and closes its own tunnel. Reconnecting from the same install
-keeps its session, so an ordinary reconnect does not churn credentials.
+Connecting claims a seat for the install (`POST /api/v1/network/session`). The
+plan's `deviceSeats` sets how many installs may hold a tunnel at once: 1 on
+Free, 3 on Standard, 5 on Pro. Each seat owns its own node credential, and an
+install beyond the limit displaces the least-recently-seen one — that install's
+credentials are revoked in the request that mints the new ones, the node stops
+accepting it on its next sync, and its session poll sees `current: false` and
+closes its own tunnel. Reconnecting from the same install keeps its seat, so an
+ordinary reconnect does not churn credentials.
+
+Seats are rows keyed by the install id the controller issued the credential to,
+so sharing a UUID with another person buys them no extra seat: they are using a
+credential that belongs to one device, and it stops working when that device's
+seat is displaced. Anything that can sign in as the account can still claim the
+remaining seats — that is what the account password protects.
 
 ## API surface
 
@@ -179,7 +187,7 @@ keeps its session, so an ordinary reconnect does not churn credentials.
 | `DELETE /api/v1/me` | JWT + password | Self-service account deletion |
 | `GET /api/v1/me` | JWT | Profile + device seats |
 | `GET /api/v1/network/config` | JWT + active sub | Signed dynamic VLESS+REALITY bundle per user |
-| `POST` / `GET /api/v1/network/session` | JWT | Claim or check the account's single proxy session |
+| `POST` / `GET /api/v1/network/session` | JWT | Claim or check an install's seat (bounded by `deviceSeats`) |
 | `GET /api/v1/network/nodes/public-ips` | public (signed) | Ed25519-signed fleet IP list for Gatekeeper |
 | `GET /api/v1/entitlement` | JWT | Short-lived Ed25519-signed plan token for Gatekeeper sites |
 | `GET /api/v1/links` | JWT | Operator-published gated links, locked above the account's plan |

@@ -103,7 +103,7 @@ void main() {
     expect(find.text('Current plan'), findsOneWidget);
     expect(find.text('FREE'), findsOneWidget);
     expect(find.text('active'), findsOneWidget);
-    expect(find.text('Simultaneous devices'), findsOneWidget);
+    expect(find.text('Devices signed in'), findsOneWidget);
     expect(find.text('Server access'), findsOneWidget);
     expect(find.text('Plans'), findsOneWidget);
     expect(find.text('Standard'), findsOneWidget);
