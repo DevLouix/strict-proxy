@@ -175,6 +175,9 @@ services:
         condition: service_healthy
     volumes:
       - clientreleases:/var/lib/strict-proxy/client-releases
+    dns:
+      - ${CONTAINER_DNS_PRIMARY:-1.1.1.1}
+      - ${CONTAINER_DNS_SECONDARY:-8.8.8.8}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8080) + '/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: ${CONTROLLER_HEALTH_INTERVAL:-10s}
@@ -191,7 +194,10 @@ services:
       options:
         max-size: ${LOG_MAX_SIZE:-10m}
         max-file: ${LOG_MAX_FILES:-5}
-    networks: [backend]
+    networks:
+      backend:
+        aliases:
+          - ${CONTROLLER_INTERNAL_ALIAS:-strict-proxy-controller}
 
   edge:
     profiles: [edge]

@@ -401,3 +401,23 @@ single process, and there is no distributed lock.
 | Node enrollment token rejected | expired or already used | rotate it in **Enrollments** if unused; otherwise issue a new one (single-use, default 30 min) |
 | Client says "tampered configuration" | client built with a different public key | rebuild with the current key and `SIGNING_KEY_ID` |
 | Client connects to nothing / native SDK error | APK built without `libbox.aar` | use the release workflow, which refuses to build without it |
+
+## Connecting Gatekeeper-protected apps on the same Dokploy host
+
+The controller joins `dokploy-network` with the stable alias `strict-proxy-controller`
+(configurable via `CONTROLLER_INTERNAL_ALIAS`). Any gated web app deployed on the same
+Dokploy server can connect directly over `dokploy-network` without public DNS or hairpin NAT:
+
+```env
+STRICT_PROXY_CONTROLLER_URL=http://strict-proxy-controller:8080
+STRICT_PROXY_GATEKEEPER_KEY=sp_gk_...
+```
+
+If a gated app runs on a **separate** host and hits `ENOTFOUND` inside Docker, add public DNS
+servers to that app's Compose service:
+
+```yaml
+dns:
+  - 1.1.1.1
+  - 8.8.8.8
+```
