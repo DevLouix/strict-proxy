@@ -614,6 +614,8 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
         return 'No servers are available right now. Try again shortly.';
       case 'SESSION_SUPERSEDED':
         return 'Your account connected on another device, so this session was closed.';
+      case 'SEAT_REQUIRED':
+        return 'This install needs to claim its seat again. Tap connect to retry.';
       case 'CLIENT_UPDATE_REQUIRED':
         return 'This build of StrictProxy can no longer connect. Update the app to continue.';
       case 'TOKEN_REVOKED':
@@ -632,13 +634,13 @@ class ConnectionNotifier extends StateNotifier<ConnState> {
 
   /// Claims a seat for this install.
   ///
-  /// Returns null when the install has no device identity yet: the controller
-  /// then falls back to the previous per-account behaviour instead of refusing
-  /// to connect over a locally missing id.
+  /// The identity is created here when it is missing. A restored session can
+  /// outlive the install id in preferences, and skipping the claim in that case
+  /// asked the controller for credentials with no seat and no identity — which
+  /// it refused, correctly, while the user had never used another device.
   Future<String?> _claimSession() async {
     final api = _ref.read(apiProvider);
-    final deviceId = await api.tokens.deviceId;
-    if (deviceId == null || deviceId.trim().isEmpty) return null;
+    final deviceId = await api.tokens.ensureDeviceIdentity();
     final claim = await api.claimSession(deviceId);
     final claimed = claim['sessionId'];
     return claimed is String && claimed.isNotEmpty ? claimed : null;

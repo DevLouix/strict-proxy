@@ -33,6 +33,13 @@ void main() {
     );
   });
 
+  test('a missing seat asks the user to reconnect, not blames another device', () {
+    expect(
+      describe(409, 'SEAT_REQUIRED'),
+      'This install needs to claim its seat again. Tap connect to retry.',
+    );
+  });
+
   test('an unreachable controller reads as a connectivity problem', () {
     expect(describe(0, 'NETWORK_ERROR'), 'Cannot reach the controller. Check your connection.');
   });

@@ -235,11 +235,11 @@ class ControllerApi {
         ));
   }
 
-  /// Claims the account's one proxy session for this install.
+  /// Claims this install's seat on the account and returns its session id.
   ///
-  /// A different install claiming the same account supersedes this one: its
-  /// node credentials are revoked, and [sessionStatus] starts reporting
-  /// `current: false` so the losing device can close its own tunnel.
+  /// A later install beyond the plan's seats displaces the least recently seen
+  /// one: that install's node credentials are revoked, and [sessionStatus]
+  /// starts reporting `current: false` so it can close its own tunnel.
   Future<Map<String, dynamic>> claimSession(String deviceId) => _send(() => _client.post(
         _uri('/api/v1/network/session'),
         headers: _headers(),

@@ -1182,9 +1182,14 @@ export function buildRouter(ctx: Ctx): Router {
     '/api/v1/network/session',
     requireAuth,
     asyncHandler(async (req, res) => {
-      const sessions = await listVpnSessions(ctx.db, req.auth!.sub);
+      const claims = req.auth!;
+      const sessions = await listVpnSessions(ctx.db, claims.sub);
       const presented = req.header('x-session-id') ?? '';
-      const mine = presented ? (sessions.find((s) => s.sessionId === presented) ?? null) : null;
+      // Without the header the access token still names the install it was
+      // minted for, so report that install's seat instead of "not current".
+      const mine = presented
+        ? (sessions.find((s) => s.sessionId === presented) ?? null)
+        : (sessions.find((s) => s.deviceId === claims.deviceId) ?? null);
       const newest = sessions.length > 0 ? sessions[sessions.length - 1]! : null;
       res.setHeader('Cache-Control', 'no-store');
       // `current` answers "does this install still hold a seat", not "is it the
@@ -1250,7 +1255,12 @@ export function buildRouter(ctx: Ctx): Router {
         });
         return;
       }
-      const deviceId = mine?.deviceId ?? req.header('x-device-id') ?? 'unknown-device';
+      // The access token is minted for one install, so it identifies the caller
+      // even when the session header is missing: an older build, or a proxy
+      // that drops custom headers. Falling back to a literal placeholder
+      // instead made a legitimately seated install look like a stranger and
+      // told its user the account was in use on another device.
+      const deviceId = mine?.deviceId ?? claims.deviceId;
       // A device id with no seat cannot borrow credentials. Only an install
       // that holds a row may be issued a bundle, which is what makes a shared
       // credential useless for adding a person: they would have to claim a
@@ -1260,7 +1270,7 @@ export function buildRouter(ctx: Ctx): Router {
       if (sessions.length > 0 && !sessions.some((s) => s.deviceId === deviceId)) {
         res.status(409).json({
           error: 'this install does not hold a seat on the account; reconnect to claim one',
-          code: 'SESSION_SUPERSEDED',
+          code: 'SEAT_REQUIRED',
         });
         return;
       }

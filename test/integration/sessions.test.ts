@@ -182,14 +182,37 @@ test('reconnecting from the same install keeps the session and its credentials',
   assert.equal(creds[0].revoked, false, 'a reconnect must not revoke its own credential');
 });
 
-test('a config request without a session id still works for older clients', async () => {
+test('a config request without a session id identifies the install from its token', async () => {
   await h.seedNode({ status: 'online' });
-  const { accessToken } = await paidUser('device-a');
+  const { user, accessToken } = await paidUser('device-a');
   await claim(accessToken, 'device-a');
 
-  const res = await h.request('GET', '/api/v1/network/config', {
-    token: accessToken,
-    headers: { 'x-device-id': 'device-a' },
-  });
-  assert.equal(res.status, 200);
+  // An install that lost its local session header still holds the seat its
+  // access token was minted for; the controller must not read it as a stranger.
+  const res = await h.request('GET', '/api/v1/network/config', { token: accessToken });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+
+  const creds = await h.query<{ device_id: string; revoked: boolean }>(
+    `SELECT device_id, revoked FROM node_credentials WHERE user_id = '${user.id}'`,
+  );
+  assert.deepEqual(
+    creds.map((row) => [row.device_id, row.revoked]),
+    [['device-a', false]],
+    'credentials belong to the device named in the token',
+  );
+});
+
+test('an install with no seat is told to reconnect, not that another device took over', async () => {
+  await h.seedNode({ status: 'online' });
+  const { user, accessToken } = await paidUser('device-a');
+  // Rows exist for the account, so the seat check applies.
+  await claim(accessToken, 'device-a');
+  await claim(accessToken, 'device-b');
+
+  // A token for an install that never claimed: same account, no seat of its own.
+  const stranger = await h.login(user.email, user.password, 'device-c');
+  const res = await h.request('GET', '/api/v1/network/config', { token: stranger.accessToken });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'SEAT_REQUIRED');
+  assert.match(String(res.body.error), /does not hold a seat/);
 });
