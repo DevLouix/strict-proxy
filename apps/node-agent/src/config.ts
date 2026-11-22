@@ -37,6 +37,8 @@ export interface AgentConfig {
   hostname: string;
   label: string | null;
   realityServerName: string;
+  /** Commit the image was built from; "dev" when running from source. */
+  agentBuild: string;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -100,6 +102,7 @@ export function loadAgentConfig(): AgentConfig {
     hostname: optionalString('NODE_HOSTNAME', 'node.local'),
     label: optionalEnv('NODE_LABEL'),
     realityServerName: optionalString('NODE_REALITY_SERVER_NAME', 'www.microsoft.com'),
+    agentBuild: optionalEnv('AGENT_BUILD') ?? 'dev',
     logLevel: optionalString('LOG_LEVEL', 'info') as AgentConfig['logLevel'],
   };
 }

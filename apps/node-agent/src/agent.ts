@@ -26,6 +26,7 @@ import {
   saveAppliedFingerprint,
   type Credential,
 } from './singbox.js';
+import { composeAdminLines, EngineLogRing, type LogLine } from './logbuffer.js';
 
 const execFileP = promisify(execFile);
 
@@ -39,12 +40,12 @@ const HEALTH_PATH = process.env.AGENT_HEALTH_PATH?.trim() || '/tmp/agent-healthy
  * internet's scanners to stderr, and a burst of a few hundred lines pushed
  * `applied N credential(s)` and `could not post log lines` out of the buffer
  * within seconds — the exact lines an operator clicks Logs to find. Engine
- * output is capped on its own; the agent's own lines are not.
+ * output is kept on its own, by age, and each source gets its own budget when
+ * the request is assembled (`logbuffer.ts`).
  */
 const RECENT_LOG_LIMIT = 200;
-const ENGINE_LOG_LIMIT = 60;
-const recentLogs: Array<{ at: string; level: string; msg: string }> = [];
-const engineLogs: Array<{ at: string; level: string; msg: string }> = [];
+const recentLogs: LogLine[] = [];
+const engineLogs = new EngineLogRing();
 
 function log(level: 'debug' | 'info' | 'warn' | 'error', msg: string, ...rest: unknown[]): void {
   if (level === 'debug' && process.env.LOG_LEVEL !== 'debug') return;
@@ -69,7 +70,6 @@ function logEngine(level: 'debug' | 'warn', text: string): void {
     console.log(`[${at}][${level}] [sing-box] ${line}`);
     engineLogs.push({ at, level, msg: `[sing-box] ${line}`.slice(0, 500) });
   }
-  if (engineLogs.length > ENGINE_LOG_LIMIT) engineLogs.splice(0, engineLogs.length - ENGINE_LOG_LIMIT);
 }
 
 async function validateSingBoxConfig(binary: string, configPath: string): Promise<boolean> {
@@ -199,6 +199,10 @@ class Agent {
       uplinkRttMs: await this.measureUplinkRtt(),
       uptimeSeconds: Math.floor(osUptime.uptime),
       engineVersion: await this.singBoxVersion(),
+      // Which image is running: the console names it without shell access to the
+      // VPS, and a node that reports one cannot be told to "deploy a newer
+      // build" when the real problem is a log POST the controller refused.
+      agentBuild: this.cfg.agentBuild,
       // Sent on every heartbeat so the controller follows a node whose tunnel
       // port changed (the installer picks a free one), rather than handing
       // clients the port it enrolled with forever.
@@ -246,6 +250,7 @@ class Agent {
     const live = liveCredentials(this.credentials);
     const snapshot = [
       `mode ${this.cfg.singBoxRestartMode}; engine ${engineState}`,
+      `agent build ${this.cfg.agentBuild}`,
       `tunnel port ${this.cfg.tunnelPort}: ${listening ? 'listening' : 'NOT listening — clients cannot connect'}`,
       live.length === 0
         ? 'live user(s) 0 — this node accepts nobody, so a client tunnel comes up and is ' +
@@ -253,10 +258,15 @@ class Agent {
         : `live user(s) ${live.length}; config ${this.cfg.singBoxConfigPath}`,
       `controller ${this.cfg.controllerBaseUrl}; advertised ip ${this.cfg.publicIp ?? 'detected'}`,
     ].map((msg) => ({ at, level: 'info' as const, msg }));
-    // The snapshot and the engine tail sit before the cap so they survive it;
-    // the highest-volume source (engine output) is capped separately in its own
-    // ring, which leaves the remaining room to the agent's own lines.
-    return [...recentLogs, ...snapshot, ...engineLogs, ...(await this.engineLogTail())].slice(-RECENT_LOG_LIMIT);
+    // Each source has its own budget: assembling first and capping the result
+    // let a burst at the tail push out the agent's own lines and the snapshot
+    // that explains a dead node.
+    return composeAdminLines({
+      recent: recentLogs,
+      snapshot,
+      engine: engineLogs.tail(),
+      tail: await this.engineLogTail(),
+    });
   }
 
   /**

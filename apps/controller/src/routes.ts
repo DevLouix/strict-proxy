@@ -730,7 +730,7 @@ export function buildRouter(ctx: Ctx): Router {
   }));
 
   router.get('/api/v1/admin/nodes', ...requireAdministrator, asyncHandler(async (_req, res) => {
-    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, engineHealthy: nodes.engineHealthy, statsApiHealthy: nodes.statsApiHealthy, engineHealthCheckedAt: nodes.engineHealthCheckedAt, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
+    const rows = await ctx.db.select({ id: nodes.id, hostname: nodes.hostname, region: nodes.region, label: nodes.label, publicIp: nodes.publicIp, publicIpSource: nodes.publicIpSource, publicIpUpdatedAt: nodes.publicIpUpdatedAt, tunnelPort: nodes.tunnelPort, status: nodes.status, loadScore: nodes.loadScore, engineVersion: nodes.engineVersion, agentBuild: nodes.agentBuild, engineHealthy: nodes.engineHealthy, statsApiHealthy: nodes.statsApiHealthy, engineHealthCheckedAt: nodes.engineHealthCheckedAt, lastHeartbeatAt: nodes.lastHeartbeatAt, registeredAt: nodes.registeredAt }).from(nodes).orderBy(asc(nodes.region), asc(nodes.label), asc(nodes.hostname));
     // Bandwidth per node, so the fleet view can show whether usage is actually
     // flowing without opening `docker logs`. Sums are over every rollup the node
     // ever reported (total) and over the last 24 hours.
@@ -776,6 +776,12 @@ export function buildRouter(ctx: Ctx): Router {
     {
       /** Heartbeats the node reported while this request was waiting. */
       heartbeats: number;
+      /**
+       * Build the node reported while this request was waiting. Null on an
+       * image that predates the marker, which is what makes a stale image
+       * distinguishable from a build whose log POST was rejected.
+       */
+      build: string | null;
       resolve: (lines: Array<{ at: string; level: string; msg: string }>) => void;
     }
   >();
@@ -798,42 +804,50 @@ export function buildRouter(ctx: Ctx): Router {
     const outcome = await new Promise<{
       lines: Array<{ at: string; level: string; msg: string }> | null;
       heartbeats: number;
+      build: string | null;
     }>((resolve) => {
       const waiter = {
         heartbeats: 0,
+        build: null as string | null,
         resolve: (lines: Array<{ at: string; level: string; msg: string }>) => {
           clearTimeout(timer);
-          resolve({ lines, heartbeats: waiter.heartbeats });
+          resolve({ lines, heartbeats: waiter.heartbeats, build: waiter.build });
         },
       };
       const timer = setTimeout(() => {
         pendingNodeLogs.delete(nodeId);
-        resolve({ lines: null, heartbeats: waiter.heartbeats });
+        resolve({ lines: null, heartbeats: waiter.heartbeats, build: waiter.build });
       }, 55_000);
       pendingNodeLogs.set(nodeId, waiter);
     });
     if (!outcome.lines) {
-      // A node that keeps heartbeating but never posts lines is not offline: its
-      // agent answers the heartbeat and ignores `sendLogs`, which only a build
-      // from before live logs does. Reporting "it may be offline" for both made
-      // a stale image look like a broken button.
-      //
-      // The floor is the build that learned the `sendLogs` reply, not the one
-      // that made the lines worth reading: a node on the older build answers
-      // every heartbeat and silently ignores the request.
-      res.status(504).json(
-        outcome.heartbeats === 0
-          ? {
-              error: 'the node sent no heartbeat while the request waited, so it is offline',
-              code: 'TIMEOUT',
-            }
-          : {
-              error:
-                'the node is heartbeating but did not send its logs: its agent build predates live logs. ' +
-                'Deploy node-agent sha-08a6e51 or newer on it (sha-b40f199 is current) and redeploy the controller.',
-              code: 'LOGS_UNSUPPORTED',
-            },
-      );
+      // A node that keeps heartbeating but never posts lines is not offline.
+      // Two different faults looked identical here: an image too old to know the
+      // `sendLogs` reply, and a current image whose POST never arrived. Only the
+      // older one is fixed by deploying a newer image, so the build the node
+      // reported on those heartbeats decides which answer the operator gets.
+      if (outcome.heartbeats === 0) {
+        res.status(504).json({
+          error: 'the node sent no heartbeat while the request waited, so it is offline',
+          code: 'TIMEOUT',
+        });
+      } else if (outcome.build) {
+        res.status(504).json({
+          error:
+            `the node is heartbeating and reports agent build ${outcome.build}, which knows live logs, ` +
+            'but its log POST never arrived. Look at that node\'s own output for "could not post log lines": ' +
+            'an HMAC mismatch after a secret rotation, or a proxy rejecting the POST, is the usual cause.',
+          code: 'LOGS_NOT_POSTED',
+        });
+      } else {
+        res.status(504).json({
+          error:
+            'the node is heartbeating but reported no agent build and sent no logs: its image predates both ' +
+            'live logs and the build marker. Pull a current node-agent image on the node ' +
+            '(`docker compose -f docker-compose.dokploy-node.yml pull node-agent`) and recreate the container.',
+          code: 'LOGS_UNSUPPORTED',
+        });
+      }
       return;
     }
     res.json({ lines: outcome.lines });
@@ -1311,6 +1325,8 @@ export function buildRouter(ctx: Ctx): Router {
         uplinkRttMs?: number;
         uptimeSeconds?: number;
         engineVersion?: string;
+        /** Commit the agent image was built from; absent on older images. */
+        agentBuild?: string;
         /** Self-check from the agent: the engine is running, usage collection works. */
         engineHealthy?: boolean;
         statsApiHealthy?: boolean;
@@ -1344,6 +1360,11 @@ export function buildRouter(ctx: Ctx): Router {
           status: node.status === 'draining' ? 'draining' : load > 90 ? 'degraded' : 'online',
           loadScore: load,
           engineVersion: body.engineVersion ?? 'unknown',
+          // Omitted keeps the previous value: an agent without the marker must
+          // not erase the build a newer one already reported.
+          ...(typeof body.agentBuild === 'string' && body.agentBuild.trim() !== ''
+            ? { agentBuild: body.agentBuild.trim().slice(0, 64) }
+            : {}),
           // Omitted fields keep the previous value so a node that does not
           // report health is never silently marked unhealthy.
           ...(typeof body.engineHealthy === 'boolean' ? { engineHealthy: body.engineHealthy } : {}),
@@ -1375,7 +1396,10 @@ export function buildRouter(ctx: Ctx): Router {
       // a heartbeat that arrived without the lines is the signature of an agent
       // build that does not know the `sendLogs` reply.
       const logWaiter = pendingNodeLogs.get(nodeId);
-      if (logWaiter) logWaiter.heartbeats += 1;
+      if (logWaiter) {
+        logWaiter.heartbeats += 1;
+        if (typeof body.agentBuild === 'string' && body.agentBuild.trim() !== '') logWaiter.build = body.agentBuild.trim();
+      }
 
       res.json({
         ok: true,
@@ -1398,7 +1422,10 @@ export function buildRouter(ctx: Ctx): Router {
         waiter.resolve(
           body.logs
             .filter((l) => l && typeof l.msg === 'string')
-            .slice(-200)
+            // Larger than the agent's own single-source caps: the POST already
+            // carries a per-source budget, and re-capping the whole list here
+            // was a second place a flood could push out the snapshot.
+            .slice(-600)
             .map((l) => ({ at: String(l.at), level: String(l.level), msg: String(l.msg).slice(0, 500) })),
         );
       }

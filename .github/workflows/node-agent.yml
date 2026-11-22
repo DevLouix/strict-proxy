@@ -170,7 +170,11 @@ jobs:
           file: docker/node-agent.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: SING_BOX_VERSION=${{ env.SING_BOX_VERSION }}
+          build-args: |
+            SING_BOX_VERSION=${{ env.SING_BOX_VERSION }}
+            # Reported on every heartbeat, so the admin console can name the
+            # image a node runs without shell access to the VPS.
+            AGENT_BUILD=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=node-agent

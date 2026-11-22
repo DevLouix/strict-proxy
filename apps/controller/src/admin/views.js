@@ -612,10 +612,20 @@ function showRotatedNodeSecret({ hostname, secret, previousValidUntil }) {
  */
 function nodeLogsDialog(api, node) {
   const body = h('div', { class: 'dlg-body' }, h('p', { class: 'muted small' }, 'Asking the node for its recent log lines. The node answers on its next heartbeat, so this can take up to a minute.'));
+  // Filled once the lines arrive. Staying disabled until then keeps a click
+  // during the wait from copying an empty string and reporting success.
+  let text = '';
+  const copyBtn = h('button', { class: 'btn', disabled: true, onClick: () => copyText(text) }, 'Copy');
   const dlg = h('dialog', { class: 'wide' },
-    h('div', { class: 'dlg-head' }, h('h3', {}, `Logs: ${node.hostname}`)),
+    h('div', { class: 'dlg-head' },
+      h('h3', {}, `Logs: ${node.hostname}`),
+      // Names the build whose lines these are. A node on an image too old to
+      // report one shows nothing rather than a placeholder it never sent.
+      node.agentBuild ? h('p', { class: 'muted small mono' }, `agent build ${node.agentBuild}`) : null,
+    ),
     body,
     h('div', { class: 'dlg-foot' },
+      copyBtn,
       h('button', { class: 'btn', onClick: () => dlg.close() }, 'Close'),
     ),
   );
@@ -625,10 +635,11 @@ function nodeLogsDialog(api, node) {
   api.get(`/api/v1/admin/nodes/${encodeURIComponent(node.id)}/logs`)
     .then((data) => {
       const lines = data.lines || [];
+      text = lines.map((l) => `${l.at} [${l.level}] ${l.msg}`).join('\n');
+      copyBtn.disabled = lines.length === 0;
       body.replaceChildren(lines.length === 0
         ? h('div', { class: 'empty' }, 'The node sent no log lines.')
-        : h('pre', { class: 'mono small logs' },
-          lines.map((l) => `${l.at} [${l.level}] ${l.msg}`).join('\n')));
+        : h('pre', { class: 'mono small logs' }, text));
     })
     .catch((err) => {
       body.replaceChildren(
@@ -768,6 +779,12 @@ export async function nodesView(api) {
                 h('td', { class: 'small muted', title: date(n.lastHeartbeatAt) }, ago(n.lastHeartbeatAt)),
                 h('td', {},
                   h('div', { class: 'small muted mono' }, n.engineVersion),
+                  h('div', {
+                    class: 'small muted mono',
+                    title: n.agentBuild
+                      ? `Agent image build reported by the node: ${n.agentBuild}`
+                      : 'The node has not reported its agent build, so its image predates this field',
+                  }, n.agentBuild ? `agent ${n.agentBuild.slice(0, 7)}` : 'agent build unknown'),
                   n.engineHealthy == null
                     ? h('span', { class: 'badge muted', title: 'The agent has not reported engine health yet' }, 'health unknown')
                     : !n.engineHealthy

@@ -43,7 +43,12 @@ RUN KEY="$(/out/sing-box generate reality-keypair | sed -n 's/^PrivateKey: //p')
     && /out/sing-box check -c /tmp/smoke.json
 
 FROM node:22-bookworm-slim AS runtime
+# The commit this image was built from, reported on every heartbeat so the admin
+# console can show which build a node is actually running. "dev" is what a local
+# run reports; the workflow passes the commit sha.
+ARG AGENT_BUILD=dev
 ENV NODE_ENV=production \
+    AGENT_BUILD=${AGENT_BUILD} \
     SING_BOX_BINARY=/usr/local/bin/sing-box \
     SING_BOX_RESTART_MODE=managed \
     NODE_IDENTITY_PATH=/var/lib/strict-proxy/node-identity.json \
@@ -66,5 +71,7 @@ RUN test -x /usr/local/bin/sing-box \
     && chmod 0750 /etc/sing-box /var/lib/strict-proxy \
     && chmod 0755 /usr/local/bin/node-agent-entrypoint
 
-EXPOSE 443/tcp 443/udp
+# No EXPOSE: the tunnel port is NODE_TUNNEL_PORT (443 by default) and moves to a
+# free port when 443 is already held, so what gets published is the compose
+# file's decision, not this image's.
 ENTRYPOINT ["/usr/local/bin/node-agent-entrypoint"]

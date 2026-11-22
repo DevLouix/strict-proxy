@@ -165,6 +165,12 @@ export const nodes = pgTable(
     realityShortIds: jsonb('reality_short_ids').$type<string[]>().notNull(),
     engineVersion: text('engine_version').notNull().default('unknown'),
     /**
+     * Commit the node-agent image was built from, as reported by the agent.
+     * Null until a build that sends it heartbeats, which is also how the
+     * console tells a stale image from a node whose log POST was rejected.
+     */
+    agentBuild: text('agent_build'),
+    /**
      * Latest self-check the agent reported: is the managed engine running, and
      * did usage collection reach its stats API. Null until a node reports one,
      * so an old agent is not shown as broken.
