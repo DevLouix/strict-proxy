@@ -16,7 +16,7 @@ export {
   verifyEntitlementToken,
 } from './gatekeeper.js';
 
-export { canonicalJson, loadSigningPublicKey, verifyJson } from './crypto.js';
+export { canonicalJson, loadSigningPublicKey, normalizePem, verifyJson } from './crypto.js';
 
 export type {
   AuthAllowedDecision,
@@ -37,6 +37,7 @@ export type {
   GatekeeperInitOptions,
   GatekeeperOptions,
   GatekeeperRouteOptions,
+  GatekeeperStatus,
   PublicIpsResponse,
   PublicKeyResponse,
   SubscriptionTier,

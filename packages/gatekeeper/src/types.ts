@@ -129,8 +129,11 @@ export interface GatekeeperInitOptions {
   failureMode?: 'open' | 'closed';
   /** Custom `fetch` implementation (useful for testing or custom agents). */
   fetchImpl?: typeof fetch;
-  /** Logger for operational diagnostics. */
-  logger?: (msg: string, meta?: unknown) => void;
+  /**
+   * Logger for operational diagnostics (controller fetch failures, bad PEM, etc.).
+   * Defaults to `console.warn`. Pass `false` to silence logs.
+   */
+  logger?: ((msg: string, meta?: unknown) => void) | false;
 }
 
 /** Legacy middleware options (100% compatible with `createGatekeeperMiddleware`). */
@@ -170,6 +173,10 @@ export interface AuthAllowedDecision {
 export interface AuthDeniedDecision {
   allowed: false;
   reason: DenialReason;
+  /** The client IP Gatekeeper evaluated (useful for server-side debugging). */
+  ip: string | null;
+  /** Non-null when the controller IP list could not be fetched or verified. */
+  fetchError?: string;
   status: number;
   code:
     | 'GATEKEEPER_DENIED'
@@ -178,6 +185,14 @@ export interface AuthDeniedDecision {
     | 'GATEKEEPER_TIER_INSUFFICIENT';
   body: Record<string, unknown>;
   redirectUrl?: string;
+}
+
+export interface GatekeeperStatus {
+  controllerUrl: string;
+  hasPinnedKey: boolean;
+  cachedIps: string[];
+  cacheExpiresAt: string | null;
+  lastError: string | null;
 }
 
 export type AuthDecision = AuthAllowedDecision | AuthDeniedDecision;

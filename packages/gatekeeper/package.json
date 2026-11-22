@@ -1,6 +1,6 @@
 {
   "name": "@strict-proxy/gatekeeper",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Official StrictProxy Gatekeeper SDK — protect websites and APIs so only users routed through your StrictProxy fleet (and optional plan tier) can access them.",
   "license": "MIT",
   "type": "module",
@@ -38,7 +38,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/DevLouix/strict-proxy.git",
+    "url": "git+https://github.com/DevLouix/strict-proxy.git",
     "directory": "packages/gatekeeper"
   },
   "homepage": "https://github.com/DevLouix/strict-proxy/tree/main/packages/gatekeeper#readme",

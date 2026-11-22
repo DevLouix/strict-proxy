@@ -281,3 +281,21 @@ def test_asgi_and_wsgi_middleware() -> None:
     body = b"".join(wsgi({"REMOTE_ADDR": "198.51.100.5", "QUERY_STRING": ""}, start_response))
     assert captured["status"].startswith("403")
     assert json.loads(body)["code"] == "GATEKEEPER_DENIED"
+
+
+def test_escaped_pem_ip_port_and_status() -> None:
+    m = _make_signed_materials()
+    escaped_pem = '"' + m["public_key_pem"].replace("\n", "\\n") + '"'
+    gk = Gatekeeper.init(
+        controller_url="https://controller.test/#links",
+        public_key=escaped_pem,
+        trust_forwarded_for=True,
+        trusted_proxy_hops=1,
+        http_get_json=lambda _u, _t: m["public_ips_body"],
+    )
+    ok = gk.auth(ip="127.0.0.1", headers={"x-forwarded-for": "198.51.100.99, 203.0.113.10:54321"})
+    assert ok.allowed
+    assert ok.ip == "203.0.113.10"
+    st = gk.status()
+    assert st["last_error"] is None
+    assert st["cached_ips"] == ["203.0.113.10"]

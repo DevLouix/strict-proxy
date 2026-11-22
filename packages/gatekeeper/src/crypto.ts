@@ -3,6 +3,20 @@ import { createPublicKey, verify, type KeyObject } from 'node:crypto';
 const keyCache = new Map<string, KeyObject>();
 
 /**
+ * Normalizes a PEM key loaded from environment variables (`.env`, Docker,
+ * Vercel, Render, Dokploy, etc.), where newlines are frequently stored as
+ * literal `\n` escape sequences or wrapped in quotes.
+ */
+export function normalizePem(raw: string): string {
+  let s = raw.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
+  return s;
+}
+
+/**
  * Deterministic canonical JSON serialization matching StrictProxy's controller
  * signing format: sorted object keys, no whitespace, undefined fields omitted.
  */
@@ -17,11 +31,11 @@ export function canonicalJson(payload: unknown): string {
 
 /** Loads and caches an Ed25519 SPKI public key from PEM. */
 export function loadSigningPublicKey(cacheKey: string, publicKeyPem: string): KeyObject {
-  const composite = `${cacheKey}
-${publicKeyPem}`;
+  const normalized = normalizePem(publicKeyPem);
+  const composite = `${cacheKey}\n${normalized}`;
   const cached = keyCache.get(composite);
   if (cached) return cached;
-  const key = createPublicKey(publicKeyPem);
+  const key = createPublicKey(normalized);
   keyCache.set(composite, key);
   return key;
 }

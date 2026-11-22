@@ -1,4 +1,4 @@
-import { loadSigningPublicKey, verifyJson } from './crypto.js';
+import { loadSigningPublicKey, normalizePem, verifyJson } from './crypto.js';
 import type {
   AuthDecision,
   AuthInput,
@@ -15,6 +15,7 @@ import type {
   GatekeeperInitOptions,
   GatekeeperOptions,
   GatekeeperRouteOptions,
+  GatekeeperStatus,
   PublicIpsResponse,
   PublicKeyResponse,
   SubscriptionTier,
@@ -37,7 +38,28 @@ export function tierSatisfies(actual: SubscriptionTier, required: SubscriptionTi
 }
 
 function normalizeIp(raw: string): string {
-  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+  let s = raw.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  // Bracketed IPv6, optionally with :port (e.g. [2001:db8::1]:443 or [::ffff:1.2.3.4]:80)
+  if (s.startsWith('[')) {
+    const end = s.indexOf(']');
+    if (end > 1) s = s.slice(1, end);
+  } else {
+    // Strip IPv4 :port (single colon, e.g. 140.238.127.231:54321)
+    const firstColon = s.indexOf(':');
+    if (firstColon > 0 && firstColon === s.lastIndexOf(':')) {
+      const portPart = s.slice(firstColon + 1);
+      if (/^\d+$/.test(portPart)) {
+        s = s.slice(0, firstColon);
+      }
+    }
+  }
+  if (s.toLowerCase().startsWith('::ffff:')) {
+    s = s.slice(7);
+  }
+  return s.includes(':') ? s.toLowerCase() : s;
 }
 
 function readHeader(
@@ -311,6 +333,8 @@ function normalizeControllerUrl(raw: string): URL {
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new Error(`Gatekeeper: controllerUrl must use http:// or https:// (got ${parsed.protocol})`);
   }
+  parsed.hash = '';
+  parsed.search = '';
   return parsed;
 }
 
@@ -397,6 +421,7 @@ export class Gatekeeper {
 
   private cache: CacheEntry | null = null;
   private inFlight: Promise<Set<string>> | null = null;
+  private lastError: string | null = null;
 
   private constructor(options: GatekeeperInitOptions) {
     const rawUrl =
@@ -415,8 +440,13 @@ export class Gatekeeper {
     const envKeyId = process.env.STRICT_PROXY_KEY_ID?.trim();
     this.pinnedKeys = options.publicKeys ? { ...options.publicKeys } : {};
 
-    const singleKey = options.publicKey?.trim() || (!options.publicKeys && envKey ? envKey : undefined);
-    if (singleKey) {
+    for (const [k, v] of Object.entries(this.pinnedKeys)) {
+      this.pinnedKeys[k] = normalizePem(v);
+    }
+
+    const rawSingleKey = options.publicKey?.trim() || (!options.publicKeys && envKey ? envKey : undefined);
+    if (rawSingleKey) {
+      const singleKey = normalizePem(rawSingleKey);
       this.pinnedSingleKey = singleKey;
       const keyId = options.keyId ?? envKeyId;
       if (keyId) {
@@ -439,7 +469,14 @@ export class Gatekeeper {
     this.trustedProxyHops = options.trustedProxyHops;
     this.failureClosed = (options.failureMode ?? 'closed') === 'closed';
     this.fetchFn = options.fetchImpl;
-    this.log = options.logger ?? (() => undefined);
+    this.log =
+      options.logger === false
+        ? () => undefined
+        : (options.logger ??
+            ((msg: string, meta?: unknown) => {
+              const detail = meta instanceof Error ? meta.message : meta !== undefined ? String(meta) : '';
+              console.warn(`[strict-proxy/gatekeeper] ${msg}${detail ? `: ${detail}` : ''}`);
+            }));
 
     if (
       !this.pinnedSingleKey &&
@@ -530,7 +567,7 @@ export class Gatekeeper {
     if (new Date(body.expiresAt).getTime() < Date.now()) {
       throw new Error('public-ips list expired');
     }
-    return new Set(body.ips);
+    return new Set(body.ips.map((ip) => normalizeIp(String(ip))));
   }
 
   private async getIpSet(forceRefresh = false): Promise<Set<string>> {
@@ -541,14 +578,18 @@ export class Gatekeeper {
     if (!this.inFlight) {
       this.inFlight = this.fetchIpSet()
         .then((ips) => {
-          this.cache = { ips, expiresAtMs: Date.now() + this.ttlMs };
+          // When zero nodes are online, retry sooner (15s) so newly online nodes work right away.
+          const effectiveTtl = ips.size === 0 ? Math.min(this.ttlMs, 15_000) : this.ttlMs;
+          this.cache = { ips, expiresAtMs: Date.now() + effectiveTtl };
+          this.lastError = null;
           return ips;
         })
         .finally(() => {
           this.inFlight = null;
         })
         .catch((err) => {
-          this.log('gatekeeper: ip list refresh failed', err);
+          this.lastError = err instanceof Error ? err.message : String(err);
+          this.log('ip list refresh failed', err);
           throw err;
         });
     }
@@ -559,6 +600,17 @@ export class Gatekeeper {
   async refresh(): Promise<string[]> {
     const ips = await this.getIpSet(true);
     return [...ips];
+  }
+
+  /** Returns current cache and diagnostic status (useful for debugging denied requests). */
+  status(): GatekeeperStatus {
+    return {
+      controllerUrl: this.controllerBaseUrl,
+      hasPinnedKey: Boolean(this.pinnedSingleKey) || Object.keys(this.pinnedKeys).length > 0,
+      cachedIps: this.cache ? [...this.cache.ips] : [],
+      cacheExpiresAt: this.cache ? new Date(this.cache.expiresAtMs).toISOString() : null,
+      lastError: this.lastError,
+    };
   }
 
   /** Verifies an entitlement token offline against the configured (or discovered) public key(s). */
@@ -577,22 +629,27 @@ export class Gatekeeper {
 
   private buildDenial(
     reason: DenialReason,
+    ip: string | null,
     requiredTier?: SubscriptionTier,
     actualTier?: SubscriptionTier,
     denyResponse?: DenyResponseConfig,
+    fetchError?: string,
   ): AuthDecision {
+    const extra = fetchError ? { fetchError } : {};
     const base = (
       status: number,
       code: 'GATEKEEPER_DENIED' | 'GATEKEEPER_ENTITLEMENT_REQUIRED' | 'GATEKEEPER_ENTITLEMENT_INVALID' | 'GATEKEEPER_TIER_INSUFFICIENT',
       body: Record<string, unknown>,
     ): AuthDecision => {
       if (denyResponse && 'redirectUrl' in denyResponse) {
-        return { allowed: false, reason, status: 302, code, body, redirectUrl: denyResponse.redirectUrl };
+        return { allowed: false, reason, ip, ...extra, status: 302, code, body, redirectUrl: denyResponse.redirectUrl };
       }
       if (denyResponse && 'status' in denyResponse) {
         return {
           allowed: false,
           reason,
+          ip,
+          ...extra,
           status: denyResponse.status,
           code,
           body:
@@ -601,7 +658,7 @@ export class Gatekeeper {
               : { error: denyResponse.body },
         };
       }
-      return { allowed: false, reason, status, code, body };
+      return { allowed: false, reason, ip, ...extra, status, code, body };
     };
 
     if (reason === 'ip') {
@@ -655,19 +712,21 @@ export class Gatekeeper {
     const ip = extractClientIp(input.ip, xff, this.trustForwardedFor, this.trustedProxyHops);
 
     let ips: Set<string> | null = null;
+    let fetchError: string | undefined;
     try {
       ips = await this.getIpSet();
-    } catch {
+    } catch (err) {
       ips = null;
+      fetchError = err instanceof Error ? err.message : String(err);
     }
 
     if (!ips) {
       if (this.failureClosed) {
-        return this.buildDenial('ip', route.requiredTier, undefined, route.denyResponse);
+        return this.buildDenial('ip', ip, route.requiredTier, undefined, route.denyResponse, fetchError);
       }
-      this.log('gatekeeper: fleet IP check unavailable; failureMode=open allows the IP through');
+      this.log('fleet IP check unavailable; failureMode=open allows the IP through');
     } else if (!ip || !ips.has(ip)) {
-      return this.buildDenial('ip', route.requiredTier, undefined, route.denyResponse);
+      return this.buildDenial('ip', ip, route.requiredTier, undefined, route.denyResponse);
     }
 
     let user: EntitlementIdentity | null = null;
@@ -677,8 +736,9 @@ export class Gatekeeper {
       let keys: Record<string, string> | string;
       try {
         keys = await this.resolveKeys();
-      } catch {
-        return this.buildDenial('entitlement_invalid', route.requiredTier, undefined, route.denyResponse);
+      } catch (err) {
+        const keyErr = err instanceof Error ? err.message : String(err);
+        return this.buildDenial('entitlement_invalid', ip, route.requiredTier, undefined, route.denyResponse, keyErr);
       }
       const found = extractTokenWithSource(
         input.headers,
@@ -694,11 +754,12 @@ export class Gatekeeper {
       if (!verified.ok) {
         const reason: DenialReason =
           verified.reason === 'malformed' && !token ? 'entitlement_missing' : 'entitlement_invalid';
-        return this.buildDenial(reason, route.requiredTier, undefined, route.denyResponse);
+        return this.buildDenial(reason, ip, route.requiredTier, undefined, route.denyResponse);
       }
       if (!tierSatisfies(verified.entitlement!.tier, route.requiredTier)) {
         return this.buildDenial(
           'tier_insufficient',
+          ip,
           route.requiredTier,
           verified.entitlement!.tier,
           route.denyResponse,

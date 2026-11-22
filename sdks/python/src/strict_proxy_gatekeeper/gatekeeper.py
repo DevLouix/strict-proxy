@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import threading
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
-from .crypto import b64url_decode, load_signing_public_key, verify_json
+from .crypto import b64url_decode, load_signing_public_key, normalize_pem, verify_json
 
 SubscriptionTier = str  # "free" | "standard" | "pro"
 
@@ -30,6 +31,7 @@ _VALID_TIERS = frozenset(TIER_RANK.keys())
 _VALID_STATUSES = frozenset({"active", "inactive", "expired", "cancelled"})
 _COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _UNSET: Any = object()
+_DEFAULT_LOGGER = logging.getLogger("strict_proxy_gatekeeper")
 
 
 def tier_satisfies(actual: str, required: str) -> bool:
@@ -72,10 +74,24 @@ class AuthDecision:
     code: Optional[str] = None
     body: Optional[dict[str, Any]] = None
     redirect_url: Optional[str] = None
+    fetch_error: Optional[str] = None
 
 
 def _normalize_ip(raw: str) -> str:
-    return raw[7:] if raw.startswith("::ffff:") else raw
+    s = raw.strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    if s.startswith("["):
+        end = s.find("]")
+        if end > 1:
+            s = s[1:end]
+    elif s.count(":") == 1:
+        host, port = s.split(":", 1)
+        if host and port.isdigit():
+            s = host
+    if s.lower().startswith("::ffff:"):
+        s = s[7:]
+    return s.lower() if ":" in s else s
 
 
 def _read_header(headers: Optional[Mapping[str, Any]], name: str) -> Optional[str]:
@@ -356,13 +372,14 @@ class Gatekeeper:
             raise ValueError(f"Gatekeeper: controller_url must use http:// or https:// (got {raw_url!r})")
 
         self._parsed_url = parsed
-        self._controller_base_url = raw_url.rstrip("/")
+        clean_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        self._controller_base_url = clean_url.rstrip("/")
 
         env_key = os.environ.get("STRICT_PROXY_PUBLIC_KEY_PEM", "").strip()
         env_key_id = os.environ.get("STRICT_PROXY_KEY_ID", "").strip()
-        self._pinned_keys: dict[str, str] = dict(public_keys) if public_keys else {}
+        self._pinned_keys: dict[str, str] = {k: normalize_pem(v) for k, v in public_keys.items()} if public_keys else {}
         single_key = (public_key or "").strip() or (env_key if not public_keys and env_key else "")
-        self._pinned_single_key: Optional[str] = single_key or None
+        self._pinned_single_key: Optional[str] = normalize_pem(single_key) if single_key else None
         if self._pinned_single_key and (key_id or env_key_id):
             self._pinned_keys[key_id or env_key_id] = self._pinned_single_key
 
@@ -400,6 +417,7 @@ class Gatekeeper:
         self._lock = threading.Lock()
         self._cached_ips: Optional[frozenset[str]] = None
         self._cache_expires_at: float = 0.0
+        self._last_error: Optional[str] = None
 
     @classmethod
     def init(cls, **kwargs: Any) -> "Gatekeeper":
@@ -409,6 +427,8 @@ class Gatekeeper:
     def _log(self, msg: str) -> None:
         if self._logger is not None:
             self._logger(msg)
+        else:
+            _DEFAULT_LOGGER.warning("%s", msg)
 
     def _resolve_keys(self) -> Union[dict[str, str], str]:
         if self._pinned_keys and not self._pinned_single_key:
@@ -475,22 +495,47 @@ class Gatekeeper:
         if exp_ts is None or exp_ts < time.time():
             raise RuntimeError("public-ips list expired")
 
-        return frozenset(str(ip) for ip in ips)
+        return frozenset(_normalize_ip(str(ip)) for ip in ips)
 
     def _get_ip_set(self, *, force_refresh: bool = False) -> frozenset[str]:
         now = time.time()
         with self._lock:
             if not force_refresh and self._cached_ips is not None and self._cache_expires_at > now:
                 return self._cached_ips
-        ips = self._fetch_ip_set()
+        try:
+            ips = self._fetch_ip_set()
+        except Exception as exc:
+            with self._lock:
+                self._last_error = str(exc)
+            raise
+        effective_ttl = min(self._cache_ttl_seconds, 15.0) if not ips else self._cache_ttl_seconds
         with self._lock:
             self._cached_ips = ips
-            self._cache_expires_at = time.time() + self._cache_ttl_seconds
+            self._cache_expires_at = time.time() + effective_ttl
+            self._last_error = None
         return ips
 
     def refresh(self) -> list[str]:
         """Forces an immediate refresh of the signed fleet exit-IP allowlist."""
         return sorted(self._get_ip_set(force_refresh=True))
+
+    def status(self) -> dict[str, Any]:
+        """Returns current cache and diagnostic status."""
+        with self._lock:
+            cached = sorted(self._cached_ips) if self._cached_ips is not None else []
+            exp_iso = (
+                datetime.fromtimestamp(self._cache_expires_at, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                if self._cache_expires_at > 0
+                else None
+            )
+            last_err = self._last_error
+        return {
+            "controller_url": self._controller_base_url,
+            "has_pinned_key": bool(self._pinned_single_key or self._pinned_keys),
+            "cached_ips": cached,
+            "cache_expires_at": exp_iso,
+            "last_error": last_err,
+        }
 
     def verify_token(
         self,
@@ -518,6 +563,8 @@ class Gatekeeper:
         required_tier: Optional[str] = None,
         actual_tier: Optional[str] = None,
         *,
+        ip: Optional[str] = None,
+        fetch_error: Optional[str] = None,
         deny_redirect_url: Optional[str] = None,
     ) -> AuthDecision:
         redirect = deny_redirect_url or self._deny_redirect_url
@@ -562,21 +609,33 @@ class Gatekeeper:
         if redirect:
             return AuthDecision(
                 allowed=False,
+                ip=ip,
                 reason=reason,
                 status=302,
                 code=code,
                 body=body,
                 redirect_url=redirect,
+                fetch_error=fetch_error,
             )
         if self._deny_status is not None and self._deny_body is not None:
             return AuthDecision(
                 allowed=False,
+                ip=ip,
                 reason=reason,
                 status=self._deny_status,
                 code=code,
                 body=dict(self._deny_body),
+                fetch_error=fetch_error,
             )
-        return AuthDecision(allowed=False, reason=reason, status=status, code=code, body=body)
+        return AuthDecision(
+            allowed=False,
+            ip=ip,
+            reason=reason,
+            status=status,
+            code=code,
+            body=body,
+            fetch_error=fetch_error,
+        )
 
     def auth(
         self,
@@ -605,18 +664,26 @@ class Gatekeeper:
         )
 
         ips: Optional[frozenset[str]] = None
+        fetch_error: Optional[str] = None
         try:
             ips = self._get_ip_set()
         except Exception as exc:
+            fetch_error = str(exc)
             self._log(f"gatekeeper: ip list refresh failed: {exc}")
             ips = None
 
         if ips is None:
             if self._failure_closed:
-                return self._build_denial("ip", effective_tier, deny_redirect_url=deny_redirect_url)
+                return self._build_denial(
+                    "ip",
+                    effective_tier,
+                    ip=client_ip,
+                    fetch_error=fetch_error,
+                    deny_redirect_url=deny_redirect_url,
+                )
             self._log("gatekeeper: fleet IP check unavailable; failure_mode=open allows IP through")
         elif not client_ip or client_ip not in ips:
-            return self._build_denial("ip", effective_tier, deny_redirect_url=deny_redirect_url)
+            return self._build_denial("ip", effective_tier, ip=client_ip, deny_redirect_url=deny_redirect_url)
 
         user: Optional[EntitlementIdentity] = None
         set_cookie: Optional[str] = None

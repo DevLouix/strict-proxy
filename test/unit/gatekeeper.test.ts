@@ -360,3 +360,54 @@ test('Gatekeeper.init() reads STRICT_PROXY_* environment variables when omitted'
     else process.env.STRICT_PROXY_PUBLIC_KEY_PEM = prevKey;
   }
 });
+
+test('Gatekeeper normalizes escaped \\n in PEM env vars, strips IP:port, and reports status()', async () => {
+  const { publicKeyPem, publicIpsBody } = makeSignedTestMaterials();
+  const escapedPem = `"${publicKeyPem.replace(/\n/g, '\\n')}"`;
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test/#links',
+    publicKey: escapedPem,
+    trustForwardedFor: true,
+    trustedProxyHops: 1,
+    logger: false,
+    fetchImpl: (async (url: string | URL) => {
+      assert.equal(String(url), 'https://controller.test/api/v1/network/nodes/public-ips');
+      return { ok: true, status: 200, json: async () => publicIpsBody };
+    }) as typeof fetch,
+  });
+
+  const ok = await gk.authorize({
+    ip: '127.0.0.1',
+    headers: { 'x-forwarded-for': '198.51.100.99, 203.0.113.10:54321' },
+  });
+  assert.equal(ok.allowed, true);
+  assert.equal(gk.status().lastError, null);
+  assert.deepEqual(gk.status().cachedIps, ['203.0.113.10']);
+
+  const bad = await gk.authorize({
+    ip: '127.0.0.1',
+    headers: { 'x-forwarded-for': '198.51.100.99' },
+  });
+  assert.equal(bad.allowed, false);
+  if (!bad.allowed) {
+    assert.equal(bad.ip, '198.51.100.99');
+    assert.equal(bad.fetchError, undefined);
+  }
+});
+
+test('Gatekeeper surfaces fetchError on denied decisions and status() when controller fails', async () => {
+  const { publicKeyPem } = makeSignedTestMaterials();
+  const gk = Gatekeeper.init({
+    controllerUrl: 'https://controller.test',
+    publicKey: publicKeyPem,
+    logger: false,
+    fetchImpl: (async () => ({ ok: false, status: 503, json: async () => ({}) })) as typeof fetch,
+  });
+  const res = await gk.authorize({ ip: '203.0.113.10' });
+  assert.equal(res.allowed, false);
+  if (!res.allowed) {
+    assert.equal(res.ip, '203.0.113.10');
+    assert.match(res.fetchError ?? '', /503/);
+  }
+  assert.match(gk.status().lastError ?? '', /503/);
+});
