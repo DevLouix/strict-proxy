@@ -149,7 +149,163 @@ gk = Gatekeeper.init(
 
 ---
 
-## Using Any Other Python Framework (`gk.auth`)
+## Recipes by Framework & Stack
+
+> **Important rule for React / Vue / Next.js frontends talking to a Python backend:**
+> Always run Gatekeeper on your **Python backend** (FastAPI, Flask, Django), never only in browser JS. In your frontend `fetch(...)`, pass `credentials: "include"` so the browser sends the `sp_entitlement` cookie saved by Gatekeeper.
+
+### 1. FastAPI + React / Vite Frontend (Full Stack)
+
+Protect your `/api/*` routes in FastAPI and let your React app call them with cookies enabled:
+
+```python
+# main.py (FastAPI)
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from strict_proxy_gatekeeper import Gatekeeper
+
+app = FastAPI()
+
+# Allow your React frontend to send cookies (replace with your real frontend URL)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://app.example.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+gk = Gatekeeper.init(
+    trust_forwarded_for=True,
+    trusted_proxy_hops=1,
+)
+
+# Public route — anyone can check status
+@app.get("/api/public")
+def public_info():
+    return {"app": "My Private Portal"}
+
+# Proxy-only route — any connected StrictProxy user
+@app.get("/api/private")
+def private_area(_=Depends(gk.fastapi_auth())):
+    return {"secret": "You are connected through StrictProxy!"}
+
+# Paid-plan route — Standard or Pro users only
+@app.get("/api/members")
+def members(user=Depends(gk.fastapi_auth("standard"))):
+    return {"email": user.email, "plan": user.tier}
+```
+
+Then in your React frontend:
+
+```js
+// Forward ?sp_ticket=... if the user just clicked a link inside the StrictProxy app
+const ticket = new URLSearchParams(window.location.search).get('sp_ticket');
+const url = ticket
+  ? `https://api.example.com/api/members?sp_ticket=${encodeURIComponent(ticket)}`
+  : 'https://api.example.com/api/members';
+
+const res = await fetch(url, { credentials: 'include' });
+if (!res.ok) {
+  const err = await res.json();
+  // Show a friendly "Please connect to StrictProxy" screen using err.hint
+}
+```
+
+---
+
+### 2. Flask (Mixed Public Landing Page + Private Blueprint)
+
+Keep your homepage public and protect only your `/app` routes:
+
+```python
+from flask import Blueprint, Flask, g, render_template_string
+from strict_proxy_gatekeeper import Gatekeeper
+
+app = Flask(__name__)
+gk = Gatekeeper.init(trust_forwarded_for=True, trusted_proxy_hops=1)
+
+@app.route("/")
+def landing():
+    return "Public homepage — connect to StrictProxy to visit /app"
+
+# Protect an entire Blueprint at once
+private_bp = Blueprint("private", __name__, url_prefix="/app")
+private_bp.before_request(gk.flask_before_request("standard"))
+
+@private_bp.route("/")
+def dashboard():
+    return render_template_string("<h1>Welcome {{ email }}!</h1>", email=g.strict_proxy.email)
+
+app.register_blueprint(private_bp)
+```
+
+---
+
+### 3. Django & Django REST Framework (DRF)
+
+Protect individual Django views with `@gk.django_auth(...)`, or protect a DRF `APIView` / `ViewSet` with a reusable permission class:
+
+```python
+# permissions.py (Django REST Framework)
+from rest_framework.permissions import BasePermission
+from strict_proxy_gatekeeper import Gatekeeper
+
+gk = Gatekeeper.init(trust_forwarded_for=True, trusted_proxy_hops=1)
+
+class StrictProxyPermission(BasePermission):
+    required_tier = "standard"  # set to None for proxy-only, or "pro"
+
+    def has_permission(self, request, view):
+        tier = getattr(view, "strict_proxy_tier", self.required_tier)
+        decision = gk.auth(
+            ip=request.META.get("REMOTE_ADDR"),
+            headers=request.headers,
+            query=request.GET,
+            secure=request.is_secure(),
+            required_tier=tier,
+        )
+        if not decision.allowed:
+            self.message = decision.body
+            return False
+        request.strict_proxy = decision.user
+        return True
+```
+
+---
+
+### 4. Starlette / Any ASGI App
+
+```python
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from strict_proxy_gatekeeper import Gatekeeper
+
+gk = Gatekeeper.init(required_tier="standard", trust_forwarded_for=True, trusted_proxy_hops=1)
+
+async def homepage(request):
+    user = request.state.strict_proxy
+    return JSONResponse({"ok": True, "email": user.email, "plan": user.tier})
+
+app = Starlette(routes=[Route("/", homepage)])
+app.add_middleware(gk.asgi_middleware())
+```
+
+---
+
+### 5. Any WSGI App (Gunicorn, uWSGI, Pyramid, Bottle)
+
+```python
+from strict_proxy_gatekeeper import Gatekeeper
+
+gk = Gatekeeper.init(trust_forwarded_for=True, trusted_proxy_hops=1)
+app = gk.wsgi_middleware(my_wsgi_app)
+```
+
+---
+
+### 6. Any Other Python Framework (`gk.auth`)
 
 You can call `gk.auth(...)` directly anywhere:
 
@@ -171,8 +327,6 @@ if not result.allowed:
 # result.user       -> EntitlementIdentity(user_id, email, tier, ...) or None
 # result.set_cookie -> Set-Cookie header string (if a ?sp_ticket= was upgraded)
 ```
-
-You can also wrap any WSGI app with `app = gk.wsgi_middleware(app)`.
 
 ---
 
