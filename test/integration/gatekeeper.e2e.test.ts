@@ -519,7 +519,7 @@ test('Pass Handoff (RFC 9126 PAR + /pass zero-click SSO): mints real Ed25519 tic
     headers: { cookie: ssoCookie },
   });
   assert.equal(proDenied.status, 403);
-  assert.match(await proDenied.text(), /Upgrade required/i);
+  assert.match(await proDenied.text(), /Plan required/i);
 
   // 10. Direct /pass?site=sp_gk_...&return=//evil.example/pwn neutralizes open redirect and uses registered siteUrl
   const direct = await fetch(
