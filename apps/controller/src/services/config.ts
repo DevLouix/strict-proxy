@@ -45,21 +45,6 @@ export async function buildSignedConfigBundle(
   cfg: ControllerConfig,
   params: { userId: string; tier: SubscriptionTier; deviceId: string },
 ): Promise<SignedConfigBundle> {
-  // One proxy session per account: whichever install is fetching this bundle is
-  // the winner, so every other install's credentials are revoked here. A node
-  // stops accepting the old device on its next credential sync, and the old
-  // client's own session poll closes its tunnel.
-  await db
-    .update(nodeCredentials)
-    .set({ revoked: true, revokedAt: new Date() })
-    .where(
-      and(
-        eq(nodeCredentials.userId, params.userId),
-        eq(nodeCredentials.revoked, false),
-        or(isNull(nodeCredentials.deviceId), ne(nodeCredentials.deviceId, params.deviceId)),
-      ),
-    );
-
   // Provision per-node credentials for this user before rendering configs,
   // so a fresh user immediately gets working VLESS UUIDs on every node.
   // A node whose engine is not running cannot carry a tunnel; offering it
@@ -76,6 +61,22 @@ export async function buildSignedConfigBundle(
   if (activeNodes.length === 0) {
     throw new Error('no_nodes_available');
   }
+
+  // One proxy session per account: whichever install is issued this bundle is
+  // the winner, so every other install's credentials are revoked. This runs
+  // only after the bundle is known to be buildable — revoking first meant a
+  // request that then failed with `no_nodes_available` had already destroyed
+  // the credentials of a device that was working.
+  await db
+    .update(nodeCredentials)
+    .set({ revoked: true, revokedAt: new Date() })
+    .where(
+      and(
+        eq(nodeCredentials.userId, params.userId),
+        eq(nodeCredentials.revoked, false),
+        or(isNull(nodeCredentials.deviceId), ne(nodeCredentials.deviceId, params.deviceId)),
+      ),
+    );
   const maxNodes = Math.min(tierDefinition(params.tier).maxNodes, activeNodes.length);
   const allowedNodeIds = rankNodesForAssignment(activeNodes).slice(0, maxNodes).map((node) => node.id);
   for (const nodeId of allowedNodeIds) {

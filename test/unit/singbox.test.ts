@@ -13,6 +13,7 @@ import {
   liveCredentials,
   needsApply,
   writeConfigAtomic,
+  writeConfigIfValid,
   loadAppliedFingerprint,
   saveAppliedFingerprint,
 } from '../../apps/node-agent/src/singbox.js';
@@ -128,6 +129,71 @@ test('writeConfigAtomic leaves no temp file behind and round-trips the fingerpri
   assert.deepEqual(leftovers, []);
   await fs.rm(dir, { recursive: true, force: true });
 });
+test('a credential past its expiry is not rendered as a live user', () => {
+  // `expiresAt` was carried end to end and never read, so an expired credential
+  // stayed in the engine's user list. An unparseable date is treated as expired:
+  // a credential whose validity cannot be established must not be accepted.
+  const base = { shortId: 'aa', userEmail: 'a@example.test', revoked: false };
+  const rows = [
+    { ...base, uuid: 'past', expiresAt: new Date(Date.now() - 1_000).toISOString() },
+    { ...base, uuid: 'future', expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    { ...base, uuid: 'never', expiresAt: null },
+    { ...base, uuid: 'garbage', expiresAt: 'not-a-date' },
+  ];
+  assert.deepEqual(liveCredentials(rows).map((u) => u.uuid), ['future', 'never']);
+});
+
+test('writeConfigIfValid keeps the applied config when the candidate is rejected', async () => {
+  // Write-then-validate left a rejected config on disk: the running engine kept
+  // the old one, and the next sync saw the file already matching the render, so
+  // it saved the fingerprint and reported an applied state it was not running.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'singbox-test-'));
+  const target = path.join(dir, 'config.json');
+  await writeConfigAtomic(target, '{"old":true}');
+
+  const accepted = await writeConfigIfValid(target, '{"broken":true}', async () => false);
+  assert.equal(accepted, false);
+  assert.equal(await fs.readFile(target, 'utf8'), '{"old":true}', 'the applied config is untouched');
+  assert.deepEqual((await fs.readdir(dir)).sort(), ['config.json'], 'no candidate file is left behind');
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('writeConfigIfValid treats a throwing validator as a refusal', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'singbox-test-'));
+  const target = path.join(dir, 'config.json');
+  await writeConfigAtomic(target, '{"old":true}');
+
+  const accepted = await writeConfigIfValid(target, '{"broken":true}', async () => {
+    throw new Error('validator crashed');
+  });
+  assert.equal(accepted, false);
+  assert.equal(await fs.readFile(target, 'utf8'), '{"old":true}');
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('writeConfigIfValid replaces the config only after the candidate passes validation', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'singbox-test-'));
+  const target = path.join(dir, 'config.json');
+  await writeConfigAtomic(target, '{"old":true}');
+
+  let seen = '';
+  const accepted = await writeConfigIfValid(target, '{"new":true}', async (candidate) => {
+    // The validator has to see the candidate, not the config that is live.
+    seen = await fs.readFile(candidate, 'utf8');
+    assert.ok(candidate.endsWith('.next'));
+    return true;
+  });
+
+  assert.equal(accepted, true);
+  assert.equal(seen, '{"new":true}');
+  assert.equal(await fs.readFile(target, 'utf8'), '{"new":true}');
+  assert.deepEqual((await fs.readdir(dir)).sort(), ['config.json']);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test('the rendered user list does not depend on the order rows arrive in', () => {
   // The controller's sync query had no ORDER BY and usage reporting rewrites the
   // credential rows every minute, so a user set that had not changed arrived in

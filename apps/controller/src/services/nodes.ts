@@ -18,6 +18,90 @@ export function hashNodeEnrollmentToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
+/** A validation failure the enroll route turns into a 400. */
+export class EnrollmentValidationError extends Error {}
+
+/** A DNS name, IPv4/IPv6 literal or registered hostname; no whitespace. */
+const HOSTNAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._:-]{0,251}[A-Za-z0-9])?$/;
+
+function requiredText(value: unknown, field: string, max: number): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (text.length === 0 || text.length > max || /\s/.test(text)) {
+    throw new EnrollmentValidationError(`${field} must be 1-${max} characters without whitespace`);
+  }
+  return text;
+}
+
+/**
+ * Validates and normalises an enrollment payload.
+ *
+ * The token is operator-issued, but everything else is supplied by the agent and
+ * rendered straight into the sing-box config. `realityShortIds` was accepted
+ * verbatim, so a non-hex or odd-length value produced a config that `sing-box
+ * check` rejects — a node that enrolled successfully and then served nobody.
+ * `tunnelPort` was coerced with `Number()`, which turned a typo into NaN and
+ * surfaced as a 500 instead of a 400 the agent could report.
+ *
+ * The empty short id is rejected on purpose: sing-box reads it as "accept any
+ * short id", which would silently turn off that part of the REALITY handshake.
+ */
+export function validateEnrollmentInput(body: unknown): {
+  token: string;
+  hostname: string;
+  label: string | null;
+  tunnelPort: number;
+  realityServerName: string;
+  realityShortIds: string[];
+  engineVersion: string;
+} {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  const token = requiredText(raw.token, 'token', 200);
+  const hostname = requiredText(raw.hostname, 'hostname', 253);
+  if (!HOSTNAME_RE.test(hostname)) {
+    throw new EnrollmentValidationError('hostname must be a DNS name or address');
+  }
+
+  const realityServerName = requiredText(raw.realityServerName, 'realityServerName', 253);
+  if (!HOSTNAME_RE.test(realityServerName)) {
+    throw new EnrollmentValidationError('realityServerName must be a DNS name or address');
+  }
+
+  const port = raw.tunnelPort === undefined || raw.tunnelPort === null ? 443 : Number(raw.tunnelPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new EnrollmentValidationError('tunnelPort must be an integer between 1 and 65535');
+  }
+
+  if (!Array.isArray(raw.realityShortIds) || raw.realityShortIds.length === 0 || raw.realityShortIds.length > 16) {
+    throw new EnrollmentValidationError('realityShortIds must be a non-empty array of at most 16 short ids');
+  }
+  const realityShortIds = raw.realityShortIds.map((value) => {
+    const id = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (!/^[0-9a-f]{2,16}$/.test(id) || id.length % 2 !== 0) {
+      throw new EnrollmentValidationError(
+        `realityShortIds entries must be 2-16 hex characters in even length; got ${JSON.stringify(value)}`,
+      );
+    }
+    return id;
+  });
+  if (new Set(realityShortIds).size !== realityShortIds.length) {
+    throw new EnrollmentValidationError('realityShortIds entries must be unique');
+  }
+
+  let label: string | null = null;
+  if (raw.label !== undefined && raw.label !== null) {
+    const text = typeof raw.label === 'string' ? raw.label.trim() : '';
+    if (text.length > 100) throw new EnrollmentValidationError('label must be at most 100 characters');
+    label = text.length === 0 ? null : text;
+  }
+
+  const engineVersion =
+    typeof raw.engineVersion === 'string' && raw.engineVersion.trim() !== ''
+      ? raw.engineVersion.trim().slice(0, 64)
+      : 'unknown';
+
+  return { token, hostname, label, tunnelPort: port, realityServerName, realityShortIds, engineVersion };
+}
+
 /**
  * Atomically consumes a one-time enrollment and creates the node in offline
  * state. The node becomes client-visible only after its first valid heartbeat.

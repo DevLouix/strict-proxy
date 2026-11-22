@@ -537,8 +537,11 @@ class _LimitsCard extends StatelessWidget {
     return Card(
       child: Column(
         children: [
+          // Seats are how many installs may be signed in, not how many tunnels
+          // may run: the proxy session is one per account, so "simultaneous
+          // devices" promised something the server does not do.
           _LimitRow(
-              label: 'Simultaneous devices',
+              label: 'Devices signed in',
               value: '${subscription.deviceSeats}'),
           const Divider(height: 1),
           _LimitRow(

@@ -14,10 +14,25 @@ export interface Credential {
   revoked: boolean;
 }
 
-/** Live (non-revoked) credentials, the desired sing-box users. */
+/**
+ * Whether a credential's own expiry has passed.
+ *
+ * `expiresAt` was carried end to end and never read, so a credential the
+ * controller had expired would keep being rendered as a live user. An
+ * unparseable value is treated as expired: a credential whose validity cannot
+ * be established must not be handed to the engine.
+ */
+function credentialExpired(c: Credential, now: number): boolean {
+  if (c.expiresAt === null) return false;
+  const at = Date.parse(c.expiresAt);
+  return Number.isNaN(at) || at <= now;
+}
+
+/** Live (non-revoked, unexpired) credentials, the desired sing-box users. */
 export function liveCredentials(all: Credential[]): Array<{ uuid: string; shortId: string; email: string }> {
+  const now = Date.now();
   return all
-    .filter((c) => !c.revoked)
+    .filter((c) => !c.revoked && !credentialExpired(c, now))
     .map((c) => ({ uuid: c.uuid, shortId: c.shortId, email: c.userEmail }))
     // Order is part of the rendered config, and the controller's sync query has
     // no ORDER BY: once usage reporting rewrites the credential rows, Postgres
@@ -93,6 +108,41 @@ export async function writeConfigAtomic(configPath: string, rendered: string): P
   await fs.mkdir(configPath.substring(0, configPath.lastIndexOf('/')) || '.', { recursive: true });
   await fs.writeFile(tmp, rendered, 'utf8');
   await fs.rename(tmp, configPath);
+}
+
+/**
+ * Replaces the config only when the candidate passes validation.
+ *
+ * The previous order was write-then-validate, which left a rejected config on
+ * disk. The running engine kept the old one, the fingerprint was never saved,
+ * and the next sync found the file already equal to the render — so it skipped
+ * the retry, saved the fingerprint, and the node reported a state it was not
+ * running. The invalid file then crash-looped the engine on the next container
+ * start. Validating before the rename keeps the applied config (and therefore
+ * the running engine) intact, and returning false leaves the fingerprint
+ * unsaved so the next sync retries instead of believing it succeeded.
+ */
+export async function writeConfigIfValid(
+  configPath: string,
+  rendered: string,
+  validate: (candidatePath: string) => Promise<boolean>,
+): Promise<boolean> {
+  const tmp = `${configPath}.next`;
+  await fs.mkdir(configPath.substring(0, configPath.lastIndexOf('/')) || '.', { recursive: true });
+  await fs.writeFile(tmp, rendered, 'utf8');
+  let accepted = false;
+  try {
+    accepted = await validate(tmp);
+  } catch {
+    // A validator that throws is a refusal, not an acceptance.
+    accepted = false;
+  }
+  if (!accepted) {
+    await fs.rm(tmp, { force: true });
+    return false;
+  }
+  await fs.rename(tmp, configPath);
+  return true;
 }
 
 /** Last-applied credential fingerprint to detect churn without restarts. */

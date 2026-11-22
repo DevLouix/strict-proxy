@@ -6,8 +6,12 @@
  * session per account" is therefore enforced where it can be:
  *
  *   - the row below records which install owns the account right now;
- *   - credential provisioning revokes every other install's node credentials,
- *     so a node stops accepting the previous device on its next sync;
+ *   - issuing a config bundle revokes every other install's node credentials,
+ *     so a node stops accepting the previous device on its next sync. It
+ *     deliberately happens there, after the entitlement checks, rather than on
+ *     the claim: a device that cannot be given credentials (an expired plan,
+ *     an exhausted quota) must not destroy the working credentials of the
+ *     device that is already connected;
  *   - the losing client polls this row and shuts its own tunnel down, instead
  *     of sitting "connected" with credentials the node no longer accepts.
  *
@@ -19,7 +23,6 @@ import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { vpnSessions } from '../db/schema.js';
-import { revokeAllUserCredentials } from './nodes.js';
 
 export interface SessionClaim {
   sessionId: string;
@@ -76,11 +79,11 @@ export async function claimVpnSession(
       set: { deviceId: params.deviceId, sessionId, startedAt, lastSeenAt: now },
     });
 
-  // A different install took the slot: the previous one's credentials stop
-  // being valid, so its tunnel cannot keep carrying traffic after the node's
-  // next sync.
+  // A different install took the slot. Its credentials are revoked when that
+  // install is actually issued a bundle (see buildSignedConfigBundle), not
+  // here: claiming alone proves intent, not entitlement, and revoking first
+  // meant a 402/426 could disconnect a device that was working.
   const superseded = existing && !sameDevice ? existing : null;
-  if (superseded) await revokeAllUserCredentials(db, params.userId);
 
   return {
     sessionId,

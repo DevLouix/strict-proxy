@@ -26,7 +26,7 @@ import {
 } from './services/auth.js';
 import { tierDefinition, isPaidTier, isKnownTier } from './services/tiers.js';
 import { buildSignedConfigBundle, buildNodeSyncState } from './services/config.js';
-import { applyObservedNodeIp, computeLoadScore, createNodeEnrollmentToken, enrollNode, registerNode, revokeAllUserCredentials } from './services/nodes.js';
+import { applyObservedNodeIp, computeLoadScore, createNodeEnrollmentToken, enrollNode, EnrollmentValidationError, registerNode, revokeAllUserCredentials, validateEnrollmentInput } from './services/nodes.js';
 import { publicIpFromRequest } from './services/client-ip.js';
 import { rateLimit } from './services/rate-limit.js';
 import { userBandwidthUsageInWindow, quotaWindowStart } from './services/usage.js';
@@ -690,10 +690,19 @@ export function buildRouter(ctx: Ctx): Router {
   }));
 
   router.post('/api/v1/nodes/enroll', limit('nodes.enroll'), asyncHandler(async (req, res) => {
-    const body = req.body as { token?: string; hostname?: string; label?: string; publicIp?: string; tunnelPort?: number; realityServerName?: string; realityShortIds?: string[]; engineVersion?: string };
-    if (!body.token || !body.hostname || !body.realityServerName || !body.realityShortIds?.length) {
-      res.status(400).json({ error: 'token, hostname, realityServerName and realityShortIds are required', code: 'VALIDATION' });
-      return;
+    const body = req.body as { publicIp?: string };
+    // Everything except the IP is validated centrally (services/nodes.ts), so a
+    // malformed short id or tunnel port is a 400 the agent can report rather
+    // than a config sing-box rejects after a successful enrollment.
+    let input: ReturnType<typeof validateEnrollmentInput>;
+    try {
+      input = validateEnrollmentInput(req.body);
+    } catch (err) {
+      if (err instanceof EnrollmentValidationError) {
+        res.status(400).json({ error: err.message, code: 'VALIDATION' });
+        return;
+      }
+      throw err;
     }
 
     // The operator may pin the address; otherwise fall back to the address the
@@ -717,15 +726,15 @@ export function buildRouter(ctx: Ctx): Router {
     let enrolled: { nodeId: string; hmacSecret: string; region: string };
     try {
       enrolled = await enrollNode(ctx.db, {
-        token: body.token,
-        hostname: body.hostname,
-        label: body.label,
+        token: input.token,
+        hostname: input.hostname,
+        label: input.label ?? undefined,
         publicIp,
         publicIpSource: supplied ? 'enrollment' : 'autodetect',
-        tunnelPort: Number(body.tunnelPort ?? 443),
-        realityServerName: body.realityServerName,
-        realityShortIds: body.realityShortIds,
-        engineVersion: body.engineVersion ?? 'unknown',
+        tunnelPort: input.tunnelPort,
+        realityServerName: input.realityServerName,
+        realityShortIds: input.realityShortIds,
+        engineVersion: input.engineVersion,
       });
     } catch (err) {
       // Rebuilding a VPS (new volume, same NODE_HOSTNAME) leaves the old node
@@ -747,7 +756,7 @@ export function buildRouter(ctx: Ctx): Router {
       if (pg?.code === '23505' && conflict.includes('nodes_hostname')) {
         res.status(409).json({
           error:
-            `a node named "${body.hostname}" already exists; delete it in Admin -> Nodes (this also cascades its credentials), ` +
+            `a node named "${input.hostname}" already exists; delete it in Admin -> Nodes (this also cascades its credentials), ` +
             'then retry this enrollment with the same token, or set NODE_HOSTNAME to a different name',
           code: 'NODE_HOSTNAME_IN_USE',
         });

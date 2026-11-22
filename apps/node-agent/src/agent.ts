@@ -21,7 +21,7 @@ import {
   renderSingBoxConfig,
   liveCredentials,
   needsApply,
-  writeConfigAtomic,
+  writeConfigIfValid,
   loadAppliedFingerprint,
   saveAppliedFingerprint,
   type Credential,
@@ -84,7 +84,27 @@ async function validateSingBoxConfig(binary: string, configPath: string): Promis
 
 async function restartSingBox(cfg: AgentConfig, managedProcess: { current: ChildProcess | null }): Promise<void> {
   if (cfg.singBoxRestartMode === 'managed') {
-    managedProcess.current?.kill('SIGTERM');
+    // Wait for the previous child to release the tunnel port. `kill` returns
+    // immediately, and spawning straight after it raced the kernel: the new
+    // engine exited with "address already in use" and the node served nobody
+    // until the next sync retry. SIGKILL after a grace period so a wedged child
+    // cannot block the restart forever.
+    const previous = managedProcess.current;
+    if (previous && previous.exitCode === null && !previous.killed) {
+      await new Promise<void>((resolve) => {
+        const force = setTimeout(() => {
+          try { previous.kill('SIGKILL'); } catch { /* already gone */ }
+          resolve();
+        }, 5_000);
+        previous.once('exit', () => { clearTimeout(force); resolve(); });
+        try {
+          previous.kill('SIGTERM');
+        } catch {
+          clearTimeout(force);
+          resolve();
+        }
+      });
+    }
     managedProcess.current = spawn(cfg.singBoxBinaryPath, ['run', '-c', cfg.singBoxConfigPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -395,8 +415,22 @@ class Agent {
     const configChanged = await needsApply(this.cfg.singBoxConfigPath, rendered);
     if (applied !== fp || configChanged) {
       if (configChanged) {
-        await writeConfigAtomic(this.cfg.singBoxConfigPath, rendered);
-        if (!(await validateSingBoxConfig(this.cfg.singBoxBinaryPath, this.cfg.singBoxConfigPath))) return;
+        // The candidate is validated under a temporary name and only then
+        // renamed over the applied config, so a rejected render cannot replace
+        // a working file or be mistaken for an applied one on the next sync.
+        const accepted = await writeConfigIfValid(
+          this.cfg.singBoxConfigPath,
+          rendered,
+          (candidate) => validateSingBoxConfig(this.cfg.singBoxBinaryPath, candidate),
+        );
+        if (!accepted) {
+          log(
+            'error',
+            'refusing to apply the new sing-box config: `sing-box check` rejected it. ' +
+              'The previous config and the running engine are untouched; the node retries on the next sync.',
+          );
+          return;
+        }
         await restartSingBox(this.cfg, this.managedSingBox);
         // Names the users this node now accepts. sing-box at `info` logs a
         // successful inbound connection without saying which user it was, so
